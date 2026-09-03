@@ -73,6 +73,15 @@ jobs:
                 -l test/s3-manager-test.el \
                 -f ert-run-tests-batch-and-exit
 
+      - name: Run the suite twice in one process
+        # The listing cache is global state. A leak between tests makes the
+        # suite order-dependent, which passes once and then fails on a
+        # rerun -- so run it twice and require both.
+        run: |
+          emacs -Q --batch -L . -L test \
+                -l test/s3-manager-test.el \
+                --eval '(let ((a (ert-run-tests-batch t)) (b (ert-run-tests-batch t))) (kill-emacs (if (and (zerop (ert-stats-completed-unexpected a)) (zerop (ert-stats-completed-unexpected b))) 0 1)))'
+
       - name: Hermetic run, excluding tests that need the real CLI
         # The suite must stay green on a machine with no AWS CLI at all.
         run: |

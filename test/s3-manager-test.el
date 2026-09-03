@@ -68,6 +68,10 @@ when given, is a file the double writes its arguments to."
   (declare (indent 1))
   `(let* ((s3-manager-aws-program s3-manager-test--fake-aws)
           (s3-manager-timeout 10)
+          ;; The listing cache is global: without a fresh one per test, a
+          ;; listing cached by an earlier test silently satisfies this
+          ;; test's fetch and the request under test never happens.
+          (s3-manager--cache (make-hash-table :test #'equal))
           (process-environment
            (append (list (concat "FAKE_AWS_STDOUT=" (or ,stdout ""))
                          (concat "FAKE_AWS_STDERR=" (or ,stderr ""))
@@ -1327,7 +1331,7 @@ making continuation quadratic.  The two flags must always match."
     (s3-manager--render-objects
      (s3-manager-test--json "list-objects-truncated.json"))
     (should s3-manager--next-token)
-    (should (string-match-p "truncated" header-line-format))))
+    (should (string-match-p "for more" header-line-format))))
 
 
 ;;;; Navigation
@@ -1469,6 +1473,265 @@ equality is structural."
                                                      (buffer-name b)))
                                   (buffer-list))))))
         (kill-buffer buffer)))))
+
+
+;;;; Cache
+
+(defmacro s3-manager-test--with-clean-cache (&rest body)
+  "Run BODY against an empty listing cache."
+  (declare (indent 0))
+  `(let ((s3-manager--cache (make-hash-table :test #'equal))
+         (s3-manager-cache-max-entries 200))
+     ,@body))
+
+(ert-deftest s3-manager-test-cache-key-includes-the-endpoint ()
+  "The same bucket name on two endpoints is two different buckets."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "p" s3-manager--bucket "media"
+          s3-manager--prefix "x/")
+    (let ((aws (let ((s3-manager-endpoint-url nil)
+                     (s3-manager-endpoint-alist nil))
+                 (s3-manager--cache-key)))
+          (minio (let ((s3-manager-endpoint-url "https://minio.example.com")
+                       (s3-manager-endpoint-alist nil))
+                   (s3-manager--cache-key))))
+      (should-not (equal aws minio))
+      (should (equal aws '("p" nil "media" "x/"))))))
+
+(ert-deftest s3-manager-test-cache-roundtrip-and-invalidate ()
+  (s3-manager-test--with-clean-cache
+    (let ((key '("p" nil "media" "")))
+      (should (null (s3-manager--cache-get key)))
+      (s3-manager--cache-put key '(row) '(entry) "tok")
+      (let ((page (s3-manager--cache-get key)))
+        (should (equal (s3-manager-page-rows page) '(row)))
+        (should (equal (s3-manager-page-entries page) '(entry)))
+        (should (equal (s3-manager-page-next-token page) "tok")))
+      (s3-manager--cache-invalidate key)
+      (should (null (s3-manager--cache-get key))))))
+
+(ert-deftest s3-manager-test-cache-purge-whole-bucket ()
+  (s3-manager-test--with-clean-cache
+    (dolist (prefix '("" "a/" "a/b/" "c/"))
+      (s3-manager--cache-put (list "p" nil "media" prefix) nil nil nil))
+    (s3-manager--cache-put '("p" nil "other" "") nil nil nil)
+    (s3-manager--cache-put '("q" nil "media" "") nil nil nil)
+    (should (= 4 (s3-manager--cache-purge "p" nil "media")))
+    ;; Other buckets and other profiles are untouched.
+    (should (s3-manager--cache-get '("p" nil "other" "")))
+    (should (s3-manager--cache-get '("q" nil "media" "")))))
+
+(ert-deftest s3-manager-test-cache-purge-under-a-prefix ()
+  "A recursive change invalidates a prefix and everything beneath it."
+  (s3-manager-test--with-clean-cache
+    (dolist (prefix '("" "a/" "a/b/" "a/b/c/" "ab/" "z/"))
+      (s3-manager--cache-put (list "p" nil "media" prefix) nil nil nil))
+    (should (= 3 (s3-manager--cache-purge "p" nil "media" "a/")))
+    (should (null (s3-manager--cache-get '("p" nil "media" "a/"))))
+    (should (null (s3-manager--cache-get '("p" nil "media" "a/b/c/"))))
+    ;; "ab/" merely starts with "a", it is not under "a/".
+    (should (s3-manager--cache-get '("p" nil "media" "ab/")))
+    (should (s3-manager--cache-get '("p" nil "media" "")))
+    (should (s3-manager--cache-get '("p" nil "media" "z/")))))
+
+(ert-deftest s3-manager-test-cache-is-capped ()
+  "A deep walk must not retain listings without bound."
+  (let ((s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-cache-max-entries 3))
+    (dotimes (i 10)
+      (s3-manager--cache-put (list "p" nil "media" (format "%d/" i))
+                             nil nil nil))
+    (should (<= (hash-table-count s3-manager--cache) 3))
+    ;; The most recent survive; the earliest are gone.
+    (should (s3-manager--cache-get '("p" nil "media" "9/")))
+    (should (null (s3-manager--cache-get '("p" nil "media" "0/"))))))
+
+(ert-deftest s3-manager-test-clear-cache-command ()
+  (s3-manager-test--with-clean-cache
+    (s3-manager--cache-put '("p" nil "media" "") nil nil nil)
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (s3-manager-clear-cache))
+      (should (zerop (hash-table-count s3-manager--cache))))))
+
+(ert-deftest s3-manager-test-navigation-uses-the-cache ()
+  "Descending and coming back must not re-issue a request."
+  (s3-manager-test--with-clean-cache
+    (let ((calls 0))
+      (s3-manager-test--with-fake-aws
+          (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+        (cl-letf* ((original (symbol-function 's3-manager--aws-async))
+                   ((symbol-function 's3-manager--aws-async)
+                    (lambda (&rest args) (cl-incf calls) (apply original args))))
+          (let ((buffer (s3-manager--object-buffer "production" "media" "")))
+            (unwind-protect
+                (with-current-buffer buffer
+                  (should (s3-manager-test--wait
+                           (lambda () (null s3-manager--status))))
+                  (should (= calls 1))
+                  (s3-manager--goto-entry
+                   (s3-manager--directory-entry "videos/" ""))
+                  (s3-manager-open)
+                  (should (s3-manager-test--wait
+                           (lambda () (null s3-manager--status))))
+                  (should (= calls 2))
+                  ;; Back to a prefix already seen: served from cache, and
+                  ;; synchronously, so no event loop is pumped at all.
+                  (s3-manager-up)
+                  (should (null s3-manager--status))
+                  (should (= calls 2))
+                  (should (equal s3-manager--prefix ""))
+                  (should (equal (s3-manager-entry-key (tabulated-list-get-id))
+                                 "videos/")))
+              (kill-buffer buffer))))))))
+
+(ert-deftest s3-manager-test-refresh-bypasses-the-cache ()
+  "`g' means the cached copy is not to be trusted."
+  (s3-manager-test--with-clean-cache
+    (let ((calls 0))
+      (s3-manager-test--with-fake-aws
+          (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+        (cl-letf* ((original (symbol-function 's3-manager--aws-async))
+                   ((symbol-function 's3-manager--aws-async)
+                    (lambda (&rest args) (cl-incf calls) (apply original args))))
+          (let ((buffer (s3-manager--object-buffer "production" "media" "")))
+            (unwind-protect
+                (with-current-buffer buffer
+                  (should (s3-manager-test--wait
+                           (lambda () (null s3-manager--status))))
+                  (should (= calls 1))
+                  (s3-manager-refresh)
+                  (should (s3-manager-test--wait
+                           (lambda () (null s3-manager--status))))
+                  (should (= calls 2)))
+              (kill-buffer buffer))))))))
+
+(ert-deftest s3-manager-test-refresh-with-prefix-arg-purges-the-bucket ()
+  (s3-manager-test--with-clean-cache
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "media"
+            s3-manager--prefix "a/")
+      (dolist (prefix '("" "a/" "b/"))
+        (s3-manager--cache-put (list "p" nil "media" prefix) nil nil nil))
+      (cl-letf (((symbol-function 's3-manager--reload) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        ;; Without the argument only this prefix goes.
+        (s3-manager-refresh)
+        (should (= 2 (hash-table-count s3-manager--cache)))
+        ;; With it, the whole bucket does.
+        (s3-manager-refresh t)
+        (should (zerop (hash-table-count s3-manager--cache)))))))
+
+
+;;;; Pagination
+
+(ert-deftest s3-manager-test-starting-token-argv ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media" s3-manager--prefix ""
+          s3-manager-page-size 1000)
+    (let ((args (s3-manager--list-objects-args "TOKEN123")))
+      (should (equal (cadr (member "--starting-token" args)) "TOKEN123"))
+      ;; Still one page's worth, and the flags still match each other.
+      (should (equal (cadr (member "--max-items" args)) "1000"))
+      (should (equal (cadr (member "--page-size" args)) "1000")))
+    ;; Absent when there is nothing to resume from.
+    (should-not (member "--starting-token" (s3-manager--list-objects-args)))))
+
+(ert-deftest s3-manager-test-render-truncated-caches-the-token ()
+  "A partly-loaded prefix resumes rather than restarting."
+  (s3-manager-test--with-clean-cache
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "media"
+            s3-manager--prefix "")
+      (setq tabulated-list-format s3-manager--object-list-format)
+      (tabulated-list-init-header)
+      (s3-manager--render-objects
+       (s3-manager-test--json "list-objects-truncated.json"))
+      (let ((page (s3-manager--cache-get (s3-manager--cache-key))))
+        (should page)
+        (should (equal (s3-manager-page-next-token page)
+                       s3-manager--next-token))
+        (should (s3-manager-page-next-token page))
+        (should (= 1 (length (s3-manager-page-entries page))))
+        ;; Reinstalling the cached page restores the token, so `+' still
+        ;; knows where to resume from.
+        (setq s3-manager--next-token nil s3-manager--entries nil)
+        (s3-manager--install-page page)
+        (should s3-manager--next-token)
+        (should (= 1 (length s3-manager--entries)))))))
+
+(ert-deftest s3-manager-test-load-more-appends ()
+  "The second page extends the listing instead of replacing it."
+  (s3-manager-test--with-clean-cache
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "media"
+            s3-manager--prefix "")
+      (setq tabulated-list-format s3-manager--object-list-format)
+      (tabulated-list-init-header)
+      ;; First page, truncated.
+      (s3-manager--render-objects
+       (s3-manager-test--json "list-objects-truncated.json"))
+      (should (= 1 (length s3-manager--entries)))
+      (should s3-manager--next-token)
+      ;; Second page, complete.
+      (s3-manager--render-objects
+       (s3-manager-test--json "list-objects-root.json") t)
+      (should (= 4 (length s3-manager--entries)))
+      (should (null s3-manager--next-token))
+      (should (equal (mapcar #'s3-manager-entry-key s3-manager--entries)
+                     '("a.txt" "images/" "videos/" "README.md")))
+      ;; The header no longer offers more.
+      (should-not (string-match-p "for more" header-line-format)))))
+
+(ert-deftest s3-manager-test-load-more-sends-the-token ()
+  (s3-manager-test--with-clean-cache
+    (let ((argv-file (make-temp-file "s3-more-argv")))
+      (unwind-protect
+          (with-temp-buffer
+            (s3-manager-mode)
+            (setq s3-manager--profile "p" s3-manager--bucket "media"
+                  s3-manager--prefix "")
+            (setq tabulated-list-format s3-manager--object-list-format)
+            (tabulated-list-init-header)
+            (s3-manager--render-objects
+             (s3-manager-test--json "list-objects-truncated.json"))
+            (let ((token s3-manager--next-token))
+              (s3-manager-test--with-fake-aws
+                  (:stdout (s3-manager-test--fixture "list-objects-root.json")
+                   :argv-file argv-file)
+                (s3-manager-load-more)
+                (should (s3-manager-test--wait
+                         (lambda () (null s3-manager--status)))))
+              (let ((argv (with-temp-buffer
+                            (insert-file-contents argv-file)
+                            (split-string (buffer-string) "\n" t))))
+                (should (equal (cadr (member "--starting-token" argv)) token))))
+            ;; And it appended.
+            (should (= 4 (length s3-manager--entries))))
+        (delete-file argv-file)))))
+
+(ert-deftest s3-manager-test-load-more-refuses-when-complete ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media" s3-manager--next-token nil)
+    (should-error (s3-manager-load-more) :type 'user-error)))
+
+(ert-deftest s3-manager-test-load-more-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil s3-manager--next-token "tok")
+    (should-error (s3-manager-load-more) :type 'user-error)))
+
+(ert-deftest s3-manager-test-load-more-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "+") #'s3-manager-load-more))
+  (should (eq (keymap-lookup s3-manager-mode-map "g") #'s3-manager-refresh)))
 
 (provide 's3-manager-test)
 

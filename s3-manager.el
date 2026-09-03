@@ -99,6 +99,12 @@ entries.  Equal values make the cut land on a page boundary, which
 yields a genuine server-side cursor instead."
   :type 'integer)
 
+(defcustom s3-manager-cache-max-entries 200
+  "Maximum number of listings held in the cache.
+Bounds what a deep tree walk can retain.  Nothing expires on a timer;
+this only decides what is dropped when the cap is reached."
+  :type 'integer)
+
 (defcustom s3-manager-timeout 120
   "Seconds before an AWS CLI invocation is abandoned.
 Set to nil to wait indefinitely."
@@ -843,6 +849,98 @@ they do not apply, so neither key may be assumed to exist."
                 (alist-get 'Contents response)))))
 
 
+;;;; Listing cache
+;;
+;; Keyed on the resolved endpoint as well as the profile: the same bucket name
+;; on MinIO and on AWS are different buckets, and conflating them would be a
+;; correctness bug for exactly the S3-compatible case this package exists for.
+;;
+;; Invalidation is explicit only.  Nothing expires on a timer, because a UI
+;; that disagrees with itself depending on wall-clock time is worse than one
+;; that is stale until asked -- and `g' is one keystroke, which is the
+;; convention every other Emacs listing follows.
+
+(cl-defstruct (s3-manager-page (:constructor s3-manager-page--create)
+                               (:copier nil))
+  "A cached listing: what was rendered, and where it stopped."
+  rows          ; `tabulated-list-entries', ready to install
+  entries       ; list of `s3-manager-entry', nil for a bucket list
+  next-token    ; continuation token, or nil when the listing is complete
+  time)         ; `float-time' of caching; orders eviction, never expires
+
+(defvar s3-manager--cache (make-hash-table :test #'equal)
+  "Maps (PROFILE ENDPOINT BUCKET PREFIX) to a `s3-manager-page'.
+
+Global rather than buffer-local so that quitting a listing and coming
+back is instant, which is the most common thing a user does with one.")
+
+(defun s3-manager--cache-key (&optional prefix)
+  "Return the cache key for this buffer, at PREFIX if given."
+  (list s3-manager--profile
+        (s3-manager--endpoint-for s3-manager--profile)
+        s3-manager--bucket
+        (or prefix s3-manager--prefix)))
+
+(defun s3-manager--cache-get (key)
+  "Return the cached page for KEY, or nil."
+  (gethash key s3-manager--cache))
+
+(defun s3-manager--cache-evict ()
+  "Drop the oldest cached pages until the table is within its cap."
+  (while (> (hash-table-count s3-manager--cache) s3-manager-cache-max-entries)
+    (let ((oldest nil) (oldest-time nil))
+      (maphash (lambda (key page)
+                 (let ((time (s3-manager-page-time page)))
+                   (when (or (null oldest-time) (< time oldest-time))
+                     (setq oldest key oldest-time time))))
+               s3-manager--cache)
+      (if oldest
+          (remhash oldest s3-manager--cache)
+        ;; Nothing to drop; stop rather than spin.
+        (setq s3-manager-cache-max-entries
+              (hash-table-count s3-manager--cache))))))
+
+(defun s3-manager--cache-put (key rows entries next-token)
+  "Cache ROWS, ENTRIES and NEXT-TOKEN under KEY."
+  (puthash key (s3-manager-page--create :rows rows
+                                        :entries entries
+                                        :next-token next-token
+                                        :time (float-time))
+           s3-manager--cache)
+  (s3-manager--cache-evict))
+
+(defun s3-manager--cache-invalidate (key)
+  "Forget the cached listing for KEY."
+  (remhash key s3-manager--cache))
+
+(defun s3-manager--cache-purge (profile endpoint bucket &optional prefix)
+  "Forget cached listings for BUCKET under PROFILE and ENDPOINT.
+With PREFIX, forget only that prefix and everything beneath it.  Return
+the number of entries dropped.
+
+Keys are collected before being removed: `remhash' during `maphash' is
+not documented as safe."
+  (let ((doomed nil))
+    (maphash (lambda (key _page)
+               (when (and (equal (nth 0 key) profile)
+                          (equal (nth 1 key) endpoint)
+                          (equal (nth 2 key) bucket)
+                          (or (null prefix)
+                              (string-prefix-p prefix (nth 3 key))))
+                 (push key doomed)))
+             s3-manager--cache)
+    (mapc (lambda (key) (remhash key s3-manager--cache)) doomed)
+    (length doomed)))
+
+;;;###autoload
+(defun s3-manager-clear-cache ()
+  "Forget every cached S3 listing."
+  (interactive)
+  (let ((n (hash-table-count s3-manager--cache)))
+    (clrhash s3-manager--cache)
+    (message "S3: cleared %d cached listing%s" n (if (= n 1) "" "s"))))
+
+
 ;;;; Rendering helpers
 
 (defun s3-manager--format-date (timestamp)
@@ -893,7 +991,9 @@ in the header line rather than here."
                                  (if (= n 1) "entry" "entries")
                                (if (= n 1) "bucket" "buckets"))))
                    ;; The listing was capped by `s3-manager-page-size'.
-                   (when s3-manager--next-token " (truncated)"))))))))
+                   (when s3-manager--next-token
+                     (substitute-command-keys
+                      "  \\[s3-manager-load-more] for more")))))))))
 
 (defun s3-manager--set-status (status)
   "Set this buffer's request STATUS and repaint the indicators."
@@ -910,7 +1010,12 @@ in the header line rather than here."
   ;; `g' and `q' arrive from `special-mode' via the replaced
   ;; `revert-buffer-function', so they are deliberately not rebound here.
   "RET" #'s3-manager-open
-  "^" #'s3-manager-up)
+  "^" #'s3-manager-up
+  ;; `g' is bound explicitly, not left to `special-mode' -> `revert-buffer',
+  ;; whose first argument is IGNORE-AUTO -- so `C-u g' could never reach the
+  ;; whole-bucket purge.  `revert-buffer-function' still works for M-x.
+  "g" #'s3-manager-refresh
+  "+" #'s3-manager-load-more)
 
 (define-derived-mode s3-manager-mode tabulated-list-mode "S3"
   "Major mode for browsing S3 buckets and objects.
@@ -956,6 +1061,7 @@ a level supplies the row to land on explicitly."
 
 (defun s3-manager--render-buckets (response)
   "Render the `s3api list-buckets' RESPONSE into the current buffer."
+  (setq s3-manager--next-token nil)
   (setq tabulated-list-entries
         (mapcar (lambda (bucket)
                   (let ((name (alist-get 'Name bucket)))
@@ -967,6 +1073,8 @@ a level supplies the row to land on explicitly."
                                   (s3-manager--format-date
                                    (alist-get 'CreationDate bucket))))))
                 (alist-get 'Buckets response)))
+  (s3-manager--cache-put (s3-manager--cache-key)
+                         tabulated-list-entries nil nil)
   (s3-manager--set-status nil)
   (s3-manager--print-list)
   (s3-manager--update-header-line))
@@ -976,12 +1084,28 @@ a level supplies the row to land on explicitly."
 TARGET, when given, is the entry to put point on once it arrives."
   (unless (derived-mode-p 's3-manager-mode)
     (user-error "Not an S3 Manager buffer"))
-  (setq s3-manager--restore-target target)
   ;; Abandon any request still in flight; this also advances the generation,
   ;; so a response already on its way is dropped rather than rendered over
   ;; the newer one.
   (s3-manager--cancel)
-  (s3-manager--set-status 'loading)
+  (setq s3-manager--restore-target target)
+  (let ((page (s3-manager--cache-get (s3-manager--cache-key))))
+    (if page
+        (s3-manager--install-page page)
+      (s3-manager--set-status 'loading)
+      (s3-manager--fetch-listing))))
+
+(defun s3-manager--install-page (page)
+  "Render a cached PAGE without touching the network."
+  (setq s3-manager--entries (s3-manager-page-entries page)
+        s3-manager--next-token (s3-manager-page-next-token page)
+        tabulated-list-entries (s3-manager-page-rows page))
+  (s3-manager--set-status nil)
+  (s3-manager--print-list)
+  (s3-manager--update-header-line))
+
+(defun s3-manager--fetch-listing ()
+  "Issue the request for whatever the current buffer is showing."
   (let* ((origin (current-buffer))
          (generation s3-manager--generation)
          (objects s3-manager--bucket)
@@ -1005,12 +1129,56 @@ TARGET, when given, is the entry to put point on once it arrives."
 (defun s3-manager--revert (&optional _ignore-auto _noconfirm _preserve-modes)
   "Re-fetch the listing.  The `revert-buffer-function' for this mode.
 Accepts and ignores the three arguments `revert-buffer' supplies."
+  (s3-manager--cache-invalidate (s3-manager--cache-key))
   (s3-manager--reload))
 
-(defun s3-manager-refresh ()
-  "Re-read the current listing from S3."
-  (interactive)
+(defun s3-manager-refresh (&optional whole-bucket)
+  "Re-read the current listing from S3, bypassing the cache.
+
+`g' means \"I do not trust what I see\", so the cached copy of this
+prefix is dropped first.  With a prefix argument WHOLE-BUCKET, drop every
+cached prefix of this bucket -- for after something changed it wholesale."
+  (interactive "P")
+  (unless (derived-mode-p 's3-manager-mode)
+    (user-error "Not an S3 Manager buffer"))
+  (if whole-bucket
+      (let ((n (s3-manager--cache-purge
+                s3-manager--profile
+                (s3-manager--endpoint-for s3-manager--profile)
+                s3-manager--bucket)))
+        (message "S3: dropped %d cached listing%s" n (if (= n 1) "" "s")))
+    (s3-manager--cache-invalidate (s3-manager--cache-key)))
   (s3-manager--reload))
+
+(defun s3-manager-load-more ()
+  "Fetch the next page of the current listing and append it."
+  (interactive)
+  (unless (derived-mode-p 's3-manager-mode)
+    (user-error "Not an S3 Manager buffer"))
+  (unless s3-manager--bucket
+    (user-error "The bucket list is never paginated"))
+  (unless s3-manager--next-token
+    (user-error "Listing is already complete"))
+  (when (eq s3-manager--status 'loading)
+    (user-error "Still loading"))
+  (let ((token s3-manager--next-token)
+        (origin (current-buffer)))
+    ;; Deliberately not `s3-manager--cancel': that would advance the
+    ;; generation and there is nothing in flight worth killing.  Reuse the
+    ;; current generation so a stale page cannot append to a newer listing.
+    (s3-manager--set-status 'loading)
+    (setq s3-manager--process
+          (s3-manager--aws-async
+           (s3-manager--list-objects-args token)
+           :profile s3-manager--profile
+           :buffer origin
+           :generation s3-manager--generation
+           :name "s3-objects-more"
+           :on-success (lambda (response)
+                         (s3-manager--render-objects response t))
+           :on-error (lambda (err)
+                       (s3-manager--set-status 'error)
+                       (s3-manager--report-error err "list-objects-v2"))))))
 
 (defun s3-manager--bucket-buffer (profile &optional target)
   "Return a bucket-list buffer for PROFILE, with a fetch under way.
@@ -1106,19 +1274,30 @@ The timestamps are ISO-8601, so they order correctly as strings."
         (forward-line 1)))
     (unless found (goto-char (point-min)))))
 
-(defun s3-manager--render-objects (response)
-  "Render a `list-objects-v2' RESPONSE into the current buffer."
-  (setq s3-manager--entries
-        (s3-manager--entries-from-listing response s3-manager--prefix)
-        s3-manager--next-token (alist-get 'NextToken response))
+(defun s3-manager--render-objects (response &optional append)
+  "Render a `list-objects-v2' RESPONSE into the current buffer.
+With APPEND, add to what is already shown instead of replacing it, which
+is how `s3-manager-load-more' extends a truncated listing."
+  (let ((new (s3-manager--entries-from-listing response s3-manager--prefix)))
+    (setq s3-manager--entries (if append
+                                  (append s3-manager--entries new)
+                                new)
+          s3-manager--next-token (alist-get 'NextToken response)))
   (setq tabulated-list-entries
         (mapcar #'s3-manager--entry-row s3-manager--entries))
+  ;; Cache the accumulation, token included, so returning to a
+  ;; partly-loaded prefix resumes rather than starting over.
+  (s3-manager--cache-put (s3-manager--cache-key)
+                         tabulated-list-entries
+                         s3-manager--entries
+                         s3-manager--next-token)
   (s3-manager--set-status nil)
   (s3-manager--print-list)
   (s3-manager--update-header-line))
 
-(defun s3-manager--list-objects-args ()
-  "Return the service arguments listing the current bucket and prefix."
+(defun s3-manager--list-objects-args (&optional starting-token)
+  "Return the service arguments listing the current bucket and prefix.
+STARTING-TOKEN, when given, resumes a truncated listing."
   (append (list "s3api" "list-objects-v2" "--bucket" s3-manager--bucket)
           ;; Omitted entirely at the bucket root: an empty --prefix is
           ;; accepted but says nothing.
@@ -1126,8 +1305,9 @@ The timestamps are ISO-8601, so they order correctly as strings."
             (list "--prefix" s3-manager--prefix))
           (list "--delimiter" "/"
                 "--max-items" (number-to-string s3-manager-page-size)
-                "--page-size" (number-to-string s3-manager-page-size)
-                "--output" "json")))
+                "--page-size" (number-to-string s3-manager-page-size))
+          (when starting-token (list "--starting-token" starting-token))
+          (list "--output" "json")))
 
 
 ;;;; Navigation

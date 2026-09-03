@@ -1676,6 +1676,16 @@ appearing in the S3 API documentation and in `--generate-cli-skeleton`:
 
 Hence the §5.3.1 rule that the two flags are always equal.
 
+**Confirmed against a live endpoint.** With `--max-items` and `--page-size`
+both 3, against a prefix holding nine objects, the returned token decoded to:
+
+```json
+{"ContinuationToken": "c2hhcmUvVGhlV2lzZG9tT2ZGYXRoZXJCcm93bi5UaGVEdWVs…"}
+```
+
+— no `boto_truncate_amount`, i.e. a pure server-side cursor. Three pages took
+exactly three API calls and produced nine distinct keys.
+
 `--no-paginate` is **not** an escape hatch: it returns the raw
 `NextContinuationToken`, but the CLI exposes **no `--continuation-token` flag in
 its documented synopsis** to send it back, and it is mutually exclusive with
