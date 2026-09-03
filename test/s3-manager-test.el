@@ -2555,6 +2555,94 @@ regression it exists to catch."
         (s3-manager-open))
       (should called))))
 
+
+;;;; Switching profile
+
+(ert-deftest s3-manager-test-cache-purge-profile ()
+  "Only the named profile's listings go."
+  (s3-manager-test--with-clean-cache
+    (dolist (key '(("a" nil "one" "") ("a" nil "two" "x/")
+                   ("b" nil "one" "") ("b" nil "one" "y/")))
+      (s3-manager--cache-put key nil nil nil))
+    (should (= 2 (s3-manager--cache-purge-profile "a")))
+    (should (null (s3-manager--cache-get '("a" nil "one" ""))))
+    (should (s3-manager--cache-get '("b" nil "one" "")))
+    (should (s3-manager--cache-get '("b" nil "one" "y/")))))
+
+(ert-deftest s3-manager-test-switch-profile-opens-the-new-bucket-list ()
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("alpha" "beta"))
+    (s3-manager-test--with-fake-aws (:stdout s3-manager-test--no-buckets-json)
+      (let ((shown nil))
+        (with-temp-buffer
+          (s3-manager-mode)
+          (setq s3-manager--profile "alpha")
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "beta"))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (b &rest _) (setq shown b)))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-switch-profile)))
+        (should (bufferp shown))
+        (should (equal (buffer-name shown) "*s3: beta*"))
+        (with-current-buffer shown
+          (should (equal s3-manager--profile "beta"))
+          (should (null s3-manager--bucket))
+          (should (s3-manager-test--wait
+                   (lambda () (null s3-manager--status)))))
+        (kill-buffer shown)))))
+
+(ert-deftest s3-manager-test-switch-profile-purges-the-old-profile ()
+  "Section 5.4's invalidation table promises this."
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("alpha" "beta"))
+    (let ((s3-manager--cache (make-hash-table :test #'equal))
+          (s3-manager-cache-max-entries 200)
+          (shown nil))
+      (dolist (key '(("alpha" nil "one" "") ("alpha" nil "one" "p/")
+                     ("beta" nil "one" "")))
+        (s3-manager--cache-put key nil nil nil))
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--profile "alpha")
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "beta"))
+                  ((symbol-function 's3-manager--bucket-buffer)
+                   (lambda (&rest _) (current-buffer)))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (b &rest _) (setq shown b)))
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-switch-profile)))
+      (should (null (s3-manager--cache-get '("alpha" nil "one" ""))))
+      (should (null (s3-manager--cache-get '("alpha" nil "one" "p/"))))
+      ;; The profile switched to keeps whatever it had.
+      (should (s3-manager--cache-get '("beta" nil "one" ""))))))
+
+(ert-deftest s3-manager-test-switch-profile-to-the-same-one-keeps-the-cache ()
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("alpha"))
+    (let ((s3-manager--cache (make-hash-table :test #'equal))
+          (s3-manager-cache-max-entries 200))
+      (s3-manager--cache-put '("alpha" nil "one" "") nil nil nil)
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--profile "alpha")
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "alpha"))
+                  ((symbol-function 's3-manager--bucket-buffer)
+                   (lambda (&rest _) (current-buffer)))
+                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-switch-profile)))
+      (should (s3-manager--cache-get '("alpha" nil "one" ""))))))
+
+(ert-deftest s3-manager-test-switch-profile-prefix-arg-rereads ()
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("stale"))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (cl-letf (((symbol-function 's3-manager-read-profile) #'ignore)
+                ((symbol-function 's3-manager--check-version) #'ignore))
+        (s3-manager-switch-profile t))
+      (should (null s3-manager--profiles)))))
+
 (provide 's3-manager-test)
 
 ;;; s3-manager-test.el ends here

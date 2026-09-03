@@ -993,6 +993,18 @@ back is instant, which is the most common thing a user does with one.")
   "Forget the cached listing for KEY."
   (remhash key s3-manager--cache))
 
+(defun s3-manager--cache-purge-profile (profile)
+  "Forget every cached listing belonging to PROFILE.  Return the count.
+Keys are collected before removal: `remhash' during `maphash' is not
+documented as safe."
+  (let ((doomed nil))
+    (maphash (lambda (key _page)
+               (when (equal (nth 0 key) profile)
+                 (push key doomed)))
+             s3-manager--cache)
+    (mapc (lambda (key) (remhash key s3-manager--cache)) doomed)
+    (length doomed)))
+
 (defun s3-manager--cache-purge (profile endpoint bucket &optional prefix)
   "Forget cached listings for BUCKET under PROFILE and ENDPOINT.
 With PREFIX, forget only that prefix and everything beneath it.  Return
@@ -2031,6 +2043,36 @@ and ask the AWS CLI for it again."
   (s3-manager-read-profile
    (lambda (profile)
      (pop-to-buffer (s3-manager--bucket-buffer profile)))))
+
+;;;###autoload
+(defun s3-manager-switch-profile (&optional reread-profiles)
+  "Choose a different AWS profile and show its buckets.
+
+Opens the chosen profile's bucket list rather than re-pointing this
+buffer: buffer names carry the profile, and a bucket present under one
+profile need not exist under another.
+
+Listings cached for the profile being left are dropped.  They cannot be
+served wrongly -- the cache key includes the profile -- but a profile
+switch usually means that account is no longer what is being worked on,
+so keeping them only costs room in a capped table.
+
+With a prefix argument REREAD-PROFILES, ask the CLI for the profile list
+again first, for a profile added since the list was cached."
+  (interactive "P")
+  (s3-manager--check-executable)
+  (s3-manager--check-version)
+  (when reread-profiles
+    (setq s3-manager--profiles nil))
+  (let ((previous s3-manager--profile))
+    (s3-manager-read-profile
+     (lambda (profile)
+       (when (and previous (not (equal profile previous)))
+         (let ((dropped (s3-manager--cache-purge-profile previous)))
+           (unless (zerop dropped)
+             (message "S3: dropped %d cached listing%s for %s"
+                      dropped (if (= dropped 1) "" "s") previous))))
+       (pop-to-buffer (s3-manager--bucket-buffer profile))))))
 
 (provide 's3-manager)
 
