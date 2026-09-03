@@ -130,13 +130,16 @@ when given, is a file the double writes its arguments to."
               (s3-manager--aws-async
                '("s3api" "list-objects-v2" "--bucket" "b"
                  "--prefix" "a dir/with \"quotes\"")
+               :profile "production"
                :on-success (lambda (p) (setq result (list :ok p)))
                :on-error (lambda (e) (setq result (list :err e))))))
           (should (eq (car result) :ok))
           (should (equal (with-temp-buffer
                            (insert-file-contents argv-file)
                            (split-string (buffer-string) "\n" t))
-                         '("s3api" "list-objects-v2" "--bucket" "b"
+                         '("--profile" "production"
+                           "--no-cli-pager" "--no-cli-auto-prompt"
+                           "s3api" "list-objects-v2" "--bucket" "b"
                            "--prefix" "a dir/with \"quotes\""))))
       (delete-file argv-file))))
 
@@ -379,7 +382,7 @@ convert every \\r to \\n, which destroys progress parsing."
   (let ((segments nil)
         (result 'pending))
     (s3-manager-test--with-fake-aws
-        (:stderr "Completed 1 of 2\\rCompleted 2 of 2\\r")
+        (:stdout "Completed 1 of 2\\rCompleted 2 of 2\\rdownload: done\\n")
       (s3-manager-test--collect result
         (s3-manager--aws-async
          '("s3" "cp" "s3://b/k" "/tmp/k")
@@ -388,7 +391,36 @@ convert every \\r to \\n, which destroys progress parsing."
          :on-success (lambda (p) (setq result (list :ok p)))
          :on-error (lambda (e) (setq result (list :err e))))))
     (should (eq (car result) :ok))
+    ;; One report per chunk, carrying the most recent segment: earlier
+    ;; progress lines in the same chunk have already been superseded.
+    (should (equal segments '("download: done")))))
+
+(ert-deftest s3-manager-test-transport-progress-final-partial-segment ()
+  "A trailing segment with no delimiter must still be reported.
+Progress lines overwrite one another, so holding a partial line back
+means losing the last one the CLI ever emits."
+  (let ((segments nil) (result 'pending))
+    (s3-manager-test--with-fake-aws (:stdout "Completed 2 of 2")
+      (s3-manager-test--collect result
+        (s3-manager--aws-async '("s3" "cp" "s3://b/k" "/tmp/k")
+                               :parse nil
+                               :on-progress (lambda (x) (push x segments))
+                               :on-success (lambda (p) (setq result (list :ok p)))
+                               :on-error (lambda (e) (setq result (list :err e))))))
     (should (member "Completed 2 of 2" segments))))
+
+(ert-deftest s3-manager-test-transport-progress-stream-override ()
+  "`:progress-stream stderr' still works for callers that need it."
+  (let ((segments nil) (result 'pending))
+    (s3-manager-test--with-fake-aws (:stderr "tick one\\rtick two\\r")
+      (s3-manager-test--collect result
+        (s3-manager--aws-async '("s3" "cp" "s3://b/k" "/tmp/k")
+                               :parse nil
+                               :progress-stream 'stderr
+                               :on-progress (lambda (x) (push x segments))
+                               :on-success (lambda (p) (setq result (list :ok p)))
+                               :on-error (lambda (e) (setq result (list :err e))))))
+    (should (member "tick two" segments))))
 
 
 ;;;; Transport: exit-code classification
@@ -426,6 +458,105 @@ For `s3api' they are ordinary failures and must not be softened."
                                  :on-success (lambda (p) (setq result (list :ok p)))
                                  :on-error (lambda (e) (setq result (list :err e))))))
       (should (eq (nth 0 (cadr result)) 's3-manager-cli-error)))))
+
+(ert-deftest s3-manager-test-transport-partial-with-realistic-argv ()
+  "Partial-success detection must survive the global flags.
+
+Regression: the service name was read as (car ARGS) while callers
+prepended `s3-manager--base-args', so it was always \"--profile\" and
+exit 1/2 from `aws s3' were never recognised.  The earlier tests missed
+this by calling the transport with a bare argument list."
+  (let ((result 'pending))
+    (s3-manager-test--with-fake-aws (:stderr "one object failed\\n" :exit 1)
+      (s3-manager-test--collect result
+        (s3-manager--aws-async '("s3" "rm" "s3://b/p/" "--recursive")
+                               :profile "production"
+                               :on-success (lambda (p) (setq result (list :ok p)))
+                               :on-error (lambda (e) (setq result (list :err e))))))
+    (should (eq (nth 0 (cadr result)) 's3-manager-partial-error))))
+
+(ert-deftest s3-manager-test-register-tracks-and-releases-the-process ()
+  "`:register' is what makes a request cancellable, and it self-clears."
+  (with-temp-buffer
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws (:stdout "{}")
+        (s3-manager--aws-async '("s3api" "list-buckets")
+                               :buffer (current-buffer)
+                               :register t
+                               :on-success (lambda (p) (setq result (list :ok p))))
+        (should (processp s3-manager--process))
+        (should (s3-manager-test--wait
+                 (lambda () (not (eq result 'pending))))))
+      (should (null s3-manager--process))))
+  ;; Without :register the slot is left alone, so a transfer survives
+  ;; navigation instead of being cancelled by it.
+  (with-temp-buffer
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws (:stdout "{}")
+        (s3-manager--aws-async '("s3" "cp" "s3://b/k" "/tmp/k")
+                               :buffer (current-buffer)
+                               :parse nil
+                               :on-success (lambda (p) (setq result (list :ok p))))
+        (should (null s3-manager--process))
+        (should (s3-manager-test--wait
+                 (lambda () (not (eq result 'pending)))))))))
+
+(ert-deftest s3-manager-test-cancel-covers-the-post-exit-window ()
+  "Cancelling must work after the process exits but before dispatch.
+
+Dispatch waits for the stderr pipe as well as the process, so a request
+can be past its main sentinel and still pending.  Guarding cancellation
+on `process-live-p' skipped exactly that window.  The double holds its
+stderr open past its own exit to reproduce it."
+  (with-temp-buffer
+    (let ((generation-before s3-manager--generation)
+          (fired nil)
+          proc)
+      (let ((process-environment (cons "FAKE_AWS_HOLD_STDERR=3"
+                                       process-environment)))
+        (s3-manager-test--with-fake-aws (:stdout "{}")
+          (s3-manager--aws-async '("s3api" "list-buckets")
+                                 :buffer (current-buffer)
+                                 :register t
+                                 :generation s3-manager--generation
+                                 :on-success (lambda (_) (setq fired 'success))
+                                 :on-error (lambda (_) (setq fired 'error)))
+          (setq proc s3-manager--process)
+          ;; The process exits, but the stderr pipe is still held open.
+          (should (s3-manager-test--wait
+                   (lambda () (not (process-live-p proc)))))
+          (should (null fired))          ; dispatch is genuinely still pending
+          (s3-manager--cancel)
+          (should (> s3-manager--generation generation-before))
+          (s3-manager-test--wait #'ignore 0.5)))
+      (should (null fired)))))
+
+(ert-deftest s3-manager-test-cancel-bumps-generation-without-a-process ()
+  "The generation guard must advance even when there is nothing to kill."
+  (with-temp-buffer
+    (let ((before s3-manager--generation))
+      (s3-manager--cancel)
+      (should (> s3-manager--generation before)))))
+
+(ert-deftest s3-manager-test-timeout-when-stderr-outlives-the-process ()
+  "The timeout is the only rescue when the stderr pipe never closes.
+
+If the CLI exits while a grandchild holds its stderr open, the barrier
+never completes.  Guarding the timer on process liveness meant it did
+nothing precisely then, and the request hung forever."
+  (let ((before (length (s3-manager-test--scratch-buffers)))
+        (result 'pending))
+    (let ((process-environment (cons "FAKE_AWS_HOLD_STDERR=10"
+                                     process-environment)))
+      (s3-manager-test--with-fake-aws (:stdout "{}")
+        (let ((s3-manager-timeout 1))
+          (s3-manager-test--collect result
+            (s3-manager--aws-async
+             '("s3api" "list-buckets")
+             :on-success (lambda (p) (setq result (list :ok p)))
+             :on-error (lambda (e) (setq result (list :err e))))))))
+    (should (eq (nth 0 (cadr result)) 's3-manager-timeout-error))
+    (should (= before (length (s3-manager-test--scratch-buffers))))))
 
 (ert-deftest s3-manager-test-transport-signal-is-not-an-exit-code ()
   "A signalled process reports the signal number, not an AWS exit code.
@@ -495,12 +626,12 @@ It must be surfaced, and it must not prevent resource cleanup."
         (fired nil))
     (with-temp-buffer
       (s3-manager-test--with-fake-aws (:delay "5")
-        (setq s3-manager--process
-              (s3-manager--aws-async
-               '("s3api" "list-buckets")
-               :buffer (current-buffer)
-               :on-success (lambda (_) (setq fired 'success))
-               :on-error (lambda (_) (setq fired 'error))))
+        (s3-manager--aws-async
+         '("s3api" "list-buckets")
+         :buffer (current-buffer)
+         :register t
+         :on-success (lambda (_) (setq fired 'success))
+         :on-error (lambda (_) (setq fired 'error)))
         (should (process-live-p s3-manager--process))
         (s3-manager--cancel)
         (s3-manager-test--wait #'ignore 0.3)))
@@ -575,10 +706,26 @@ It must be surfaced, and it must not prevent resource cleanup."
         (:stdout "aws-cli/2.33.30 Python/3.13.11 Linux/7.0 exe/x86_64\\n")
       (should (equal (s3-manager--cli-version) "2.33.30")))))
 
-(ert-deftest s3-manager-test-cli-version-is-cached ()
-  (let ((s3-manager--cli-version "2.20.0"))
-    (let ((s3-manager-aws-program "definitely-not-a-program"))
-      (should (equal (s3-manager--cli-version) "2.20.0")))))
+(ert-deftest s3-manager-test-cli-version-is-cached-per-program ()
+  "A successful probe is cached, but only for the program it probed.
+Caching a failure would make the remedy the error message suggests --
+install the CLI, or set `s3-manager-aws-program' -- ineffective until
+Emacs restarted."
+  (let ((s3-manager--cli-version (cons "some-aws" "2.20.0")))
+    (let ((s3-manager-aws-program "some-aws"))
+      (should (equal (s3-manager--cli-version) "2.20.0")))
+    ;; A different program must be probed afresh, not answered from cache.
+    (let ((s3-manager-aws-program "s3-manager-no-such-program"))
+      (should (eq (s3-manager--cli-version) 'missing)))))
+
+(ert-deftest s3-manager-test-cli-missing-is-not-cached ()
+  "After installing the CLI the next probe must succeed without a restart."
+  (let ((s3-manager--cli-version nil))
+    (let ((s3-manager-aws-program "s3-manager-no-such-program"))
+      (should (eq (s3-manager--cli-version) 'missing)))
+    (should (null s3-manager--cli-version))
+    (s3-manager-test--with-fake-aws (:stdout "aws-cli/2.33.30 Python/3.13\\n")
+      (should (equal (s3-manager--cli-version) "2.33.30")))))
 
 (ert-deftest s3-manager-test-cli-missing-is-reported ()
   (let ((s3-manager--cli-version nil)
@@ -588,9 +735,9 @@ It must be surfaced, and it must not prevent resource cleanup."
 
 (ert-deftest s3-manager-test-cli-too-old-is-rejected ()
   "Below 2.13.0 the CLI ignores endpoint_url in ~/.aws/config silently."
-  (let ((s3-manager--cli-version "2.9.1"))
+  (let ((s3-manager--cli-version (cons s3-manager-aws-program "2.9.1")))
     (should-error (s3-manager--check-cli) :type 'user-error))
-  (let ((s3-manager--cli-version "2.13.0"))
+  (let ((s3-manager--cli-version (cons s3-manager-aws-program "2.13.0")))
     (should (equal (s3-manager--check-cli) "2.13.0"))))
 
 

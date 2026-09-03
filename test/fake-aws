@@ -17,6 +17,13 @@ if [ -n "$FAKE_AWS_ARGV_FILE" ]; then
     for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_AWS_ARGV_FILE"
 fi
 
+# Spawn a grandchild that inherits stderr and outlives us, so the stderr pipe
+# stays open after this process exits.  That stalls a completion barrier which
+# waits on both the process and its stderr stream.
+if [ -n "$FAKE_AWS_HOLD_STDERR" ]; then
+    sleep "$FAKE_AWS_HOLD_STDERR" &
+fi
+
 [ -n "$FAKE_AWS_DELAY" ] && sleep "$FAKE_AWS_DELAY"
 [ -n "$FAKE_AWS_STDOUT" ] && printf '%b' "$FAKE_AWS_STDOUT"
 [ -n "$FAKE_AWS_STDERR" ] && printf '%b' "$FAKE_AWS_STDERR" >&2

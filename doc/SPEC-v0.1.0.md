@@ -160,7 +160,9 @@ exceptions other than the `--version` check in §2.2.
   "Run the AWS CLI asynchronously with ARGS, a list of strings.
 
 ARGS are passed as an argument vector — never through a shell.
-Global flags from `s3-manager--base-args' are prepended by the caller.
+ARGS is the *service* invocation only, e.g. ("s3api" "list-buckets");
+the global flags for PROFILE are prepended by this function, not by
+the caller.  See §11.1 for why.
 
 On exit code 0, call ON-SUCCESS with the parsed stdout: an alist when
 PARSE is non-nil (the default), or the raw string when PARSE is nil.
@@ -966,12 +968,22 @@ keys in the map.
 Prepended to every invocation:
 
 ```elisp
-(defun s3-manager--base-args ()
-  (append (list "--profile" s3-manager--profile)
-          (when-let ((url (s3-manager--endpoint-for s3-manager--profile)))
+(defun s3-manager--base-args (profile)
+  (append (when profile (list "--profile" profile))
+          (when-let* ((url (s3-manager--endpoint-for profile)))
             (list "--endpoint-url" url))
-          (list "--no-cli-pager")))
+          (list "--no-cli-pager" "--no-cli-auto-prompt")))
 ```
+
+**The transport prepends these, not the caller.** If callers assembled the
+full vector, the first element would be a global flag rather than the service
+name — and the exit-code classification in §12 depends on knowing whether the
+command is an `aws s3` transfer. Centralising it also means no call site can
+forget the two guard flags.
+
+`--no-cli-auto-prompt` joins `--no-cli-pager`: a user with `cli_auto_prompt`
+enabled in `~/.aws/config` would otherwise get an invocation that blocks on
+interactive input forever.
 
 `--output json` is added only for `s3api` commands; the `s3` commands do not
 emit JSON.
@@ -1198,6 +1210,7 @@ Every non-zero exit is routed to one handler, which:
 | 0 | Success | proceed (but check `Errors` for `delete-objects`, §11.6) |
 | 1 | **`aws s3` only:** one or more transfers failed | **partial** — report *and* refresh |
 | 2 | **`aws s3` only:** one or more files skipped | **partial** — report *and* refresh |
+| *(signal)* | Killed by a signal | **not an exit code** — see below |
 | 130 | Interrupted (SIGINT) | silent — this is our own cancellation |
 | 252 | Command syntax invalid ✅ *verified* | report as a bug in the package |
 | 253 | Invalid environment or configuration | **documented but never observed** — do not branch on it |
@@ -1217,6 +1230,13 @@ proceeds with cache invalidation and re-listing.
 
 Code 252 indicates the package constructed an invalid command line, so its
 report should invite a bug report rather than blame the user.
+
+**A signalled process does not report an exit code at all.** When
+`process-status` is `signal`, `process-exit-status` returns the *signal number*.
+Read as an exit code, SIGHUP and SIGINT arrive as 1 and 2 — the two values that
+mean partial success — so a transfer killed outright would be reported as having
+partly worked. The sentinel must record which of `exit` and `signal` occurred
+and classify accordingly.
 
 **Classify by stderr text, not by 253 vs 255.** Every environment failure tested
 — missing credentials, a nonexistent profile, an unreachable endpoint — returned
