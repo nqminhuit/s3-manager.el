@@ -79,12 +79,19 @@ satisfied before the process has run at all."
     (funcall predicate)))
 
 (cl-defmacro s3-manager-test--with-fake-aws
-    ((&key stdout stderr (exit 0) delay linger argv-file) &rest body)
+    ((&key stdout stderr (exit 0) delay linger argv-file
+           head-stdout head-stderr head-exit)
+     &rest body)
   "Run BODY with the AWS CLI replaced by the test double.
 STDOUT, STDERR, EXIT, DELAY and LINGER drive the double's behaviour;
 ARGV-FILE, when given, is a file the double writes its arguments to.
 LINGER keeps the process alive after writing, so a test can observe
-transient state that completion would otherwise clear."
+transient state that completion would otherwise clear.
+
+HEAD-STDOUT, HEAD-STDERR and HEAD-EXIT answer a `head-object'
+invocation separately.  An upload probes and then transfers, and the
+probe reporting 404 while the transfer succeeds is the ordinary case;
+one exit code for both cannot express it."
   (declare (indent 1))
   `(let* ((s3-manager-aws-program s3-manager-test--fake-aws)
           (s3-manager-timeout 10)
@@ -98,7 +105,11 @@ transient state that completion would otherwise clear."
                          (format "FAKE_AWS_EXIT=%s" ,exit)
                          (concat "FAKE_AWS_DELAY=" (or ,delay ""))
                          (concat "FAKE_AWS_LINGER=" (or ,linger ""))
-                         (concat "FAKE_AWS_ARGV_FILE=" (or ,argv-file "")))
+                         (concat "FAKE_AWS_ARGV_FILE=" (or ,argv-file ""))
+                         (concat "FAKE_AWS_HEAD_STDOUT=" (or ,head-stdout ""))
+                         (concat "FAKE_AWS_HEAD_STDERR=" (or ,head-stderr ""))
+                         (concat "FAKE_AWS_HEAD_EXIT="
+                                 (if ,head-exit (format "%s" ,head-exit) "")))
                    process-environment)))
      ,@body))
 
@@ -2670,6 +2681,304 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "U") #'s3-manager-unmark-all))
   (should (eq (keymap-lookup s3-manager-mode-map "x") #'s3-manager-execute))
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
+
+
+;;;; Upload
+
+(defconst s3-manager-test--head-404
+  (concat "An error occurred (404) when calling the HeadObject operation:"
+          " Not Found")
+  "The stderr the CLI produces for a key that does not exist.")
+
+(defconst s3-manager-test--head-403
+  (concat "An error occurred (403) when calling the HeadObject operation:"
+          " Forbidden")
+  "The stderr real AWS produces for a key the caller may not look at.")
+
+(defmacro s3-manager-test--with-upload-source (var &rest body)
+  "Bind VAR to a readable temporary file and run BODY, then remove it."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "s3-upload" nil ".txt" "payload\n")))
+     (unwind-protect (progn ,@body)
+       (when (file-exists-p ,var) (delete-file ,var)))))
+
+(ert-deftest s3-manager-test-upload-key-name-derivation ()
+  "The key is the source's leaf, and an unusable name is refused.
+Refused rather than replaced with a fallback: inventing a name for a
+downloaded copy costs nothing, whereas inventing one for an upload
+writes the user's bytes to a key they never named."
+  (should (equal (s3-manager--upload-key-name "/a/b/c.txt") "c.txt"))
+  (should (equal (s3-manager--upload-key-name "/a/b/dir/") "dir"))
+  (should (equal (s3-manager--upload-key-name "/a/b/has space.txt")
+                 "has space.txt"))
+  ;; A leading tilde needs no guard here: nothing expands it on the S3 side.
+  (should (equal (s3-manager--upload-key-name "/a/b/~weird") "~weird"))
+  (should-error (s3-manager--upload-key-name "/") :type 'user-error))
+
+(ert-deftest s3-manager-test-upload-key-uses-the-listing-prefix ()
+  "The destination is the prefix on screen, not the row point is on."
+  (should (equal (s3-manager--upload-key "/home/u/a.txt" "docs/") "docs/a.txt"))
+  (should (equal (s3-manager--upload-key "/home/u/a.txt" "") "a.txt")))
+
+(ert-deftest s3-manager-test-upload-argv-probes-then-transfers ()
+  "A single-file upload is one head-object probe and one `s3 cp'.
+The probe is `s3api', so exits 1 and 2 stay hard errors there; the
+transfer is `s3', where they mean partial success."
+  (let ((argv-file (make-temp-file "s3-upload-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-source source
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) source))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-upload)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records argv-file))
+                               2)))))))
+          (let* ((records (s3-manager-test--argv-records argv-file))
+                 (probe (nth 0 records))
+                 (transfer (nth 1 records))
+                 (name (file-name-nondirectory source)))
+            (should (equal probe
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3api" "head-object"
+                                 "--bucket" "media" "--key" name
+                                 "--output" "json")))
+            (should (equal transfer
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp" source (concat "s3://media/" name)
+                                 "--progress-frequency" "1")))
+            ;; Both suppress the progress the mode line needs.
+            (should-not (member "--quiet" transfer))
+            (should-not (member "--only-show-errors" transfer))
+            (should-not (member "--recursive" transfer))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-upload-proceeds-when-the-key-is-absent ()
+  "A 404 from the probe means nothing is being overwritten: no prompt."
+  (let ((argv-file (make-temp-file "s3-upload-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-source source
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) source))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (&rest _) (error "Must not prompt when absent")))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-upload)
+                ;; The counter is transient -- the fake CLI can start and
+                ;; finish between polls -- so wait on the invocations.
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records
+                                        argv-file))
+                               2)))))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (member "head-object" (nth 0 records)))
+            (should (member "cp" (nth 1 records)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-upload-confirms-before-overwriting ()
+  "An existing key must be named, with its size and date, before it goes."
+  (let ((prompt nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (p) (setq prompt p) nil)))
+      (should-error
+       (s3-manager--upload-confirm-overwrite
+        (s3-manager-test--json "head-object.json") "s3://media/README.md")
+       :type 'user-error))
+    (should (string-match-p "s3://media/README.md" prompt))
+    (should (string-match-p "12 MiB" prompt))
+    (should (string-match-p "2026-09-01" prompt))))
+
+(ert-deftest s3-manager-test-upload-refusal-transfers-nothing ()
+  "Declining the overwrite must leave the object untouched."
+  (let ((argv-file (make-temp-file "s3-upload-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-source source
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) source))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 0
+                   :head-stdout (json-serialize
+                                 '((ContentLength . 10)
+                                   (LastModified . "2026-09-01T00:00:00+00:00"))))
+                (s3-manager-upload)
+                ;; Let the probe land and the timer fire.
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 1 (length (s3-manager-test--argv-records
+                                         argv-file))))))
+                (s3-manager-test--wait #'ignore 0.3))))
+          ;; The probe ran; nothing else did.
+          (should (= 1 (length (s3-manager-test--argv-records argv-file)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-head-object-403-is-not-absence ()
+  "Only a 404 means absent.  Everything else is a failed check.
+Reading a 403 as absence would silently overwrite an object the user was
+merely forbidden to look at."
+  (should (s3-manager--head-object-absent-p
+           (list 's3-manager-cli-error "aws s3api head-object" 254
+                 s3-manager-test--head-404)))
+  (should-not (s3-manager--head-object-absent-p
+               (list 's3-manager-cli-error "aws s3api head-object" 254
+                     s3-manager-test--head-403)))
+  ;; Unreachable endpoint, and a timeout, which carries no exit code at all.
+  (should-not (s3-manager--head-object-absent-p
+               (list 's3-manager-cli-error "aws s3api head-object" 255
+                     "Could not connect to the endpoint URL")))
+  (should-not (s3-manager--head-object-absent-p
+               (list 's3-manager-timeout-error "aws s3api head-object" nil
+                     "No response after 120 seconds")))
+  (should-not (s3-manager--head-object-absent-p
+               (list 's3-manager-cli-error "aws s3api head-object" 254 nil))))
+
+(ert-deftest s3-manager-test-upload-asks-when-the-check-fails ()
+  "A failed check is reported and asked about, never assumed either way.
+Real AWS answers 403 rather than 404 for a missing key when the caller
+lacks s3:ListBucket, so refusing outright would make upload useless
+under a tight policy -- and proceeding silently would be an unannounced
+overwrite."
+  (let ((asked nil))
+    (s3-manager-test--with-fresh-error-buffer
+      (s3-manager-test--with-upload-source source
+        (s3-manager-test--in-object-buffer
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) source))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (p) (setq asked p) nil))
+                    ((symbol-function 'display-buffer) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :head-exit 254
+                 :head-stderr s3-manager-test--head-403)
+              (s3-manager-upload)
+              (should (s3-manager-test--wait (lambda () asked)))))))
+      ;; Asked, and the service's own words were recorded.
+      (should (string-match-p "Upload anyway" asked))
+      (should (string-match-p "403" (s3-manager-test--error-text))))))
+
+(ert-deftest s3-manager-test-upload-refuses-in-the-bucket-list ()
+  "There is no prefix to upload into, and the user must not be asked first."
+  (let ((asked nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--bucket nil)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) (setq asked t) "/tmp/x")))
+        (should-error (s3-manager-upload) :type 'user-error)
+        (should (null asked))))))
+
+(ert-deftest s3-manager-test-upload-refuses-an-unusable-source ()
+  "A missing path, a directory, and an irregular file are all refused."
+  (s3-manager-test--in-object-buffer
+    (cl-letf (((symbol-function 'read-file-name)
+               (lambda (&rest _) "/tmp/s3-manager-definitely-absent-xyz")))
+      (should-error (s3-manager-upload) :type 'user-error))
+    (let ((directory (make-temp-file "s3-upload-dir" t)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) directory)))
+            (should-error (s3-manager-upload) :type 'user-error))
+        (delete-directory directory t)))))
+
+(ert-deftest s3-manager-test-upload-refuses-a-source-that-vanished ()
+  "The window between the prompt and the transfer is real: a probe round
+trip and an unbounded confirmation sit inside it."
+  (let ((source (make-temp-file "s3-upload" nil ".txt" "x\n")))
+    (delete-file source)
+    (s3-manager-test--in-object-buffer
+      (should-error
+       (s3-manager--upload-start source "s3://media/x.txt" "x.txt" "")
+       :type 'user-error)
+      (should (zerop s3-manager--transfers)))))
+
+(ert-deftest s3-manager-test-after-upload-invalidates-and-restores ()
+  "The listing on screen has changed, so its cache entry must go first."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal)))
+      (s3-manager--cache-put (s3-manager--cache-key)
+                             tabulated-list-entries s3-manager--entries nil)
+      (s3-manager--cache-put (s3-manager--cache-key "other/") nil nil nil)
+      (s3-manager--after-upload "" "README.md")
+      ;; This prefix was dropped; an unrelated one was not.
+      (should (null (s3-manager--cache-get (s3-manager--cache-key))))
+      (should (s3-manager--cache-get (s3-manager--cache-key "other/"))))))
+
+(ert-deftest s3-manager-test-after-upload-does-not-reload-a-buffer-that-moved-on ()
+  "A transfer outlives navigation, so the refresh must name its own
+destination rather than whatever is on screen when it lands."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal))
+          (reloaded nil))
+      (s3-manager--cache-put (s3-manager--cache-key "docs/") nil nil nil)
+      (setq s3-manager--prefix "elsewhere/")
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (&rest _) (setq reloaded t))))
+        (s3-manager--after-upload "docs/" "docs/a.txt"))
+      ;; Cache entry for the destination is gone, but the buffer showing
+      ;; something else was left alone.
+      (should (null (s3-manager--cache-get (s3-manager--cache-key "docs/"))))
+      (should (null reloaded)))))
+
+(ert-deftest s3-manager-test-overwrite-prompt-is-deferred-off-the-sentinel ()
+  "The prompt must not run inside the process sentinel.
+
+A sentinel runs at whatever point in the command loop Emacs had reached
+when the pipe became readable -- inside another command, inside an
+unrelated minibuffer read, inside redisplay -- and `y-or-n-p' there
+re-enters the minibuffer from that arbitrary point.
+`s3-manager--profiles-resolved' hands its prompt to a zero-second timer
+for exactly this reason; upload takes the same hop.
+
+`s3-manager-timeout' is nil here so the transport schedules no timer of
+its own and the only thing captured is the hop under test."
+  (let ((thunks nil)
+        (prompted nil))
+    (s3-manager-test--with-upload-source source
+      (s3-manager-test--in-object-buffer
+        (cl-letf (((symbol-function 'read-file-name)
+                   (lambda (&rest _) source))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (setq prompted t) nil))
+                  ((symbol-function 'run-at-time)
+                   (lambda (delay _repeat fn &rest _)
+                     (push (cons delay fn) thunks)
+                     nil))
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-test--with-fake-aws
+              (:stdout ""
+               :head-exit 0
+               :head-stdout (json-serialize
+                             '((ContentLength . 10)
+                               (LastModified . "2026-09-01T00:00:00+00:00"))))
+            (let ((s3-manager-timeout nil))
+              (s3-manager-upload)
+              (should (s3-manager-test--wait (lambda () thunks)))))
+          ;; The probe has answered and scheduled work, and has not prompted.
+          (should (null prompted))
+          (should (= 1 (length thunks)))
+          (should (equal 0 (car (car thunks))))
+          ;; The deferred thunk is what prompts.
+          (funcall (cdr (car thunks)))
+          (should prompted))))))
+
+(ert-deftest s3-manager-test-upload-key-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "P") #'s3-manager-upload)))
 
 
 ;;;; Point restoration by key

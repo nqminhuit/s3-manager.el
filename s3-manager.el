@@ -141,23 +141,23 @@ Governs listings and other metadata calls.  Transfers use
 Separate from `s3-manager-timeout' because the two measure different
 things.  A listing that has not answered in two minutes is stuck; a
 transfer that has been running for two minutes may simply be large.
-The timer in `s3-manager--aws-async\=' is armed once for a total
+The timer in `s3-manager--aws-async' is armed once for a total
 duration rather than reset by activity, so any wall-clock value kills a
 healthy transfer that is merely big -- measured, with the CLI still
 running and reporting progress at the moment it was killed.
 
 nil is therefore the only correct default until there is a watchdog
-measuring silence rather than elapsed time.  The CLI\='s own connect and
+measuring silence rather than elapsed time.  The CLI's own connect and
 read timeouts still apply, so a transfer to a black hole does not hang
 forever."
   :type '(choice (const :tag "No timeout" nil) integer))
 
 (defcustom s3-manager-display-errors t
-  "Whether a failure shows `s3-manager--error-buffer\=' as well as recording it.
+  "Whether a failure shows `s3-manager--error-buffer' as well as recording it.
 
-Every failure is recorded either way, with the CLI\='s own stderr intact;
+Every failure is recorded either way, with the CLI's own stderr intact;
 this only decides whether the report is put on screen.  The default is
-non-nil because the echo-area summary is transient -- the next `message\='
+non-nil because the echo-area summary is transient -- the next `message'
 overwrites it, which during a transfer is under a second -- and an error
 the user never saw is indistinguishable from one that never happened."
   :type 'boolean)
@@ -442,8 +442,8 @@ The recording half of `s3-manager--report-error', separate so that a
 background probe the user did not ask for can still leave a trace
 instead of being dropped.  The buffer is appended to rather than
 replaced: the previous failure is often what explains this one, and the
-CLI\='s stderr is reproduced verbatim, line for line, because a summary
-of someone else\='s error message is a guess."
+CLI's stderr is reproduced verbatim, line for line, because a summary
+of someone else's error message is a guess."
   (with-current-buffer (get-buffer-create s3-manager--error-buffer)
     (let ((inhibit-read-only t))
       (unless (derived-mode-p 'special-mode) (special-mode))
@@ -462,7 +462,7 @@ of someone else\='s error message is a guess."
 (defun s3-manager--local-error (context detail)
   "Return an error tuple describing a local failure in CONTEXT.
 DETAIL is the message.  Local failures have no exit code, but they are
-worth recording in the same place as the CLI\='s: a temporary directory
+worth recording in the same place as the CLI's: a temporary directory
 that could not be removed is exactly as interesting as a refused
 request, and rather harder to notice."
   (list 's3-manager-error context nil detail))
@@ -922,9 +922,9 @@ PREFIX is the prefix being left and ENTRY is the row point was on, so
 (defvar-local s3-manager--restore-key nil
   "S3 key to put point on once the pending listing arrives.
 
-`s3-manager--restore-target\=' cannot serve here.  It holds an
-`s3-manager-entry\=', which is compared with `equal\=', and only a
-*directory* entry can be synthesized in advance -- see the struct\='s own
+`s3-manager--restore-target' cannot serve here.  It holds an
+`s3-manager-entry', which is compared with `equal', and only a
+*directory* entry can be synthesized in advance -- see the struct's own
 docstring.  An object that has just been uploaded cannot: its Size and
 LastModified belong to the server, not to the local file, so an entry
 built from what is known locally would match nothing and point would
@@ -1238,6 +1238,7 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
   "U" #'s3-manager-unmark-all
   "x" #'s3-manager-execute
   "D" #'s3-manager-delete
+  "P" #'s3-manager-upload
   "!" #'s3-manager-show-errors)
 
 ;; Evil's state keymaps take precedence over a major-mode map, and its normal
@@ -1538,7 +1539,7 @@ The timestamps are ISO-8601, so they order correctly as strings."
 (defun s3-manager--goto-key (key)
   "Put point on the row whose entry has KEY, or leave point alone.
 
-Unlike `s3-manager--goto-entry\=' there is no fallback to `point-min\='.
+Unlike `s3-manager--goto-entry' there is no fallback to `point-min'.
 A key that is not on screen is an ordinary outcome here -- an object
 just uploaded can sort past the end of a truncated listing -- and
 jerking point to the top of the buffer then is worse than leaving it
@@ -2040,9 +2041,9 @@ input."
   "Name of the buffer showing what an operation would do.")
 
 (defun s3-manager--show-dry-run (heading output)
-  "Display OUTPUT under HEADING in `s3-manager--dry-run-buffer\='.
+  "Display OUTPUT under HEADING in `s3-manager--dry-run-buffer'.
 
-Replaced rather than appended, unlike `s3-manager--error-buffer\=': a dry
+Replaced rather than appended, unlike `s3-manager--error-buffer': a dry
 run is a question with exactly one current answer, and the previous
 answer described a different target.  Empty output is spelled out
 rather than left blank, because a blank buffer reads as a failure and
@@ -2089,6 +2090,19 @@ listed."
 ;; Bytes move with `aws s3 cp' rather than `s3api get-object': it performs a
 ;; multipart parallel download above 8MB, reports progress, and preserves the
 ;; object's modification time, none of which get-object does.
+
+(declare-function dired-dwim-target-directory "dired-aux" ())
+
+(defun s3-manager--dwim-directory ()
+  "Return a Dired directory visible in another window, or nil.
+
+`dired-dwim-target-directory' is documented for exactly this -- its own
+comment says a non-Dired buffer may want to profit from it -- and it
+returns nil when the user has turned `dired-dwim-target' off, so this
+follows their setting rather than imposing one."
+  (and (bound-and-true-p dired-dwim-target)
+       (require 'dired-aux nil t)
+       (dired-dwim-target-directory)))
 
 (defun s3-manager--s3-uri (key)
   "Return the s3:// URI for KEY in this buffer's bucket."
@@ -2207,6 +2221,197 @@ set up in advance."
              "--recursive" "--progress-frequency" "1")
        (format "downloading %s to %s"
                prefix (abbreviate-file-name destination))))))
+
+(defun s3-manager--upload-key-name (source)
+  "Return the S3 leaf name for local SOURCE.
+
+The mirror image of `s3-manager--view-file-name', and it differs from
+it in two ways because it runs in the opposite direction.  A leading
+`~' needs no guard: nothing expands tildes on the S3 side, and SOURCE
+has been through `expand-file-name' already.  And a name that cannot be
+used is refused rather than replaced with a fallback -- inventing a name
+for a downloaded copy costs nothing, whereas inventing one for an upload
+writes the user's bytes to a key they never named."
+  (let ((name (file-name-nondirectory (directory-file-name source))))
+    (when (member name '("" "." ".."))
+      (user-error "Cannot derive an object name from %s" source))
+    name))
+
+(defun s3-manager--upload-key (source prefix)
+  "Return the destination key for uploading SOURCE into PREFIX."
+  (concat prefix (s3-manager--upload-key-name source)))
+
+(defun s3-manager--upload-source ()
+  "Read a local file to upload, and return its absolute path."
+  (let ((source (expand-file-name
+                 (read-file-name "Upload file: "
+                                 (s3-manager--dwim-directory) nil t))))
+    ;; MUSTMATCH is advisory -- a default, a history entry, or completion
+    ;; ignoring it all reach here -- and these checks also narrow the window
+    ;; between this prompt and the transfer, which for a single file spans a
+    ;; round trip and an unbounded confirmation.
+    (unless (file-exists-p source)
+      (user-error "%s does not exist" source))
+    (when (file-directory-p source)
+      ;; Recursive upload is a separate operation with its own confirmation.
+      (user-error "%s is a directory; uploading one is not supported yet"
+                  source))
+    (unless (file-regular-p source)
+      ;; A fifo or a character device would make `aws s3 cp' read forever,
+      ;; and `s3-manager-transfer-timeout' is nil, so nothing would stop it.
+      (user-error "%s is not a regular file" source))
+    (unless (file-readable-p source)
+      (user-error "%s is not readable" source))
+    source))
+
+(defun s3-manager--after-upload (prefix key)
+  "Refresh after an upload of KEY into PREFIX.
+
+PREFIX is the destination recorded when the upload started rather than
+this buffer's prefix now: a transfer is deliberately outside the
+generation guard, so the user may have navigated while it ran, and
+invalidating whatever is current then would clear the wrong entry and
+reload a listing nobody asked about.  The listing is re-read only when
+the destination is still the one on screen; otherwise dropping it from
+the cache is enough, and it is re-read when the user returns."
+  (s3-manager--cache-invalidate (s3-manager--cache-key prefix))
+  (when (equal prefix s3-manager--prefix)
+    (s3-manager--reload nil key)))
+
+(defun s3-manager--upload-start (source uri key prefix)
+  "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards."
+  ;; Re-checked here rather than only at the prompt: a head-object round trip
+  ;; and an unbounded `y-or-n-p' sit between the two, and a file removed in
+  ;; that window would otherwise be reported as a partial transfer failure
+  ;; for a file that was never opened.
+  (unless (file-readable-p source)
+    (user-error "%s is no longer readable" source))
+  (let ((done (lambda () (s3-manager--after-upload prefix key))))
+    (s3-manager--transfer
+     (list "s3" "cp" source uri "--progress-frequency" "1")
+     (format "uploading %s to %s" (abbreviate-file-name source) uri)
+     done
+     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
+     ;; exactly as in `s3-manager--delete-prefix'.
+     done)))
+
+(defun s3-manager--upload-later (buffer thunk)
+  "Run THUNK in BUFFER from a zero-second timer.
+
+The transport's callbacks run inside a process sentinel, and a prompt
+there re-enters the minibuffer from whatever Emacs happened to be doing
+when the CLI answered.  `s3-manager--profiles-resolved' already hands
+its prompt to a timer for this reason; this does the same, and both
+branches take the hop so the ordering does not depend on the answer.
+
+A `user-error' from THUNK is the user declining and gets an echo-area
+line.  Anything else is a real failure and is reported in full: a signal
+raised inside a timer is otherwise left to the timer machinery, which
+is easy to miss entirely."
+  (run-at-time
+   0 nil
+   (lambda ()
+     (when (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (condition-case err
+             (funcall thunk)
+           (user-error (message "S3: %s" (error-message-string err)))
+           (error
+            (s3-manager--report-error
+             (s3-manager--local-error "Upload" (error-message-string err))
+             "upload"))))))))
+
+(defun s3-manager--head-object-absent-p (err)
+  "Return non-nil when ERR is `head-object' reporting that the key is absent.
+
+An allowlist, never a denylist.  Exit 254 with a 403 is a permission
+error, 255 is an unreachable endpoint, and a timeout carries no exit
+code at all; reading any of them as absence would silently overwrite an
+object the user was merely forbidden to look at.  Both facts matched
+here were measured against the CLI: absence is exit 254 plus this
+sentence on stderr, and the parenthesised status is botocore's own
+format string rather than the service's wording, which is why it is the
+same across S3-compatible endpoints."
+  (and (eq (nth 0 err) 's3-manager-cli-error)
+       (eql (nth 2 err) 254)
+       (string-match-p
+        "An error occurred (404) when calling the HeadObject operation"
+        (or (nth 3 err) ""))))
+
+(defun s3-manager--upload-confirm-overwrite (response uri)
+  "Confirm overwriting URI, which `head-object' RESPONSE says exists.
+Signals a `user-error' when the answer is no."
+  (unless (y-or-n-p
+           (format "%s already exists (%s, modified %s).  Overwrite? "
+                   uri
+                   (s3-manager--format-size
+                    (alist-get 'ContentLength response))
+                   (s3-manager--format-date
+                    (alist-get 'LastModified response))))
+    (user-error "Upload aborted")))
+
+(defun s3-manager--upload-probe (source uri key prefix)
+  "Check whether KEY exists, then upload SOURCE to URI.
+
+`aws s3 cp' overwrites without a word and has no flag that would stop
+it, so `s3api head-object' is the only way to ask first."
+  (let ((origin (current-buffer)))
+    (message "S3: checking %s..." uri)
+    (s3-manager--aws-async
+     (list "s3api" "head-object"
+           "--bucket" s3-manager--bucket "--key" key
+           "--output" "json")
+     :profile s3-manager--profile
+     :buffer origin
+     ;; No :register -- that slot belongs to the listing, and taking it would
+     ;; orphan a fetch in flight and let `^' cancel this probe.  No
+     ;; :generation either: the user asked for this upload and must get an
+     ;; answer even if they have navigated since, which is also why URI, KEY
+     ;; and PREFIX were captured before the call.
+     :name "s3-head-object"
+     :on-success
+     (lambda (response)
+       (s3-manager--upload-later
+        origin
+        (lambda ()
+          (s3-manager--upload-confirm-overwrite response uri)
+          (s3-manager--upload-start source uri key prefix))))
+     :on-error
+     (lambda (err)
+       (if (s3-manager--head-object-absent-p err)
+           (s3-manager--upload-later
+            origin
+            (lambda () (s3-manager--upload-start source uri key prefix)))
+         ;; Not absence: the check itself failed.  Real AWS answers 403
+         ;; rather than 404 for a missing key when the caller lacks
+         ;; s3:ListBucket, so refusing outright would make upload useless
+         ;; under a tight policy -- but proceeding silently would be an
+         ;; unannounced overwrite.  Report it, then ask.
+         (s3-manager--report-error err "head-object")
+         (s3-manager--upload-later
+          origin
+          (lambda ()
+            (unless (y-or-n-p
+                     (format "Could not check whether %s exists.  Upload anyway? "
+                             uri))
+              (user-error "Upload aborted"))
+            (s3-manager--upload-start source uri key prefix))))))))
+
+(defun s3-manager-upload ()
+  "Upload a local file into the prefix being shown.
+
+The destination is this listing's own prefix, under the file's own
+name, regardless of where point is; the prompts name the full target
+URI, so there is nothing to infer."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "%s" (substitute-command-keys
+                      "Not an object listing; \\[s3-manager-open] a bucket first")))
+  (let* ((source (s3-manager--upload-source))
+         (prefix s3-manager--prefix)
+         (key (s3-manager--upload-key source prefix))
+         (uri (s3-manager--s3-uri key)))
+    (s3-manager--upload-probe source uri key prefix)))
 
 (defun s3-manager--entry-at-point ()
   "Return the entry on the current line, or signal a `user-error'.

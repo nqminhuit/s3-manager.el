@@ -68,6 +68,7 @@ bucket opens it; `RET` on a prefix descends into it.
 | `+` | fetch the next page of a truncated listing |
 | `g` | refresh, bypassing the cache |
 | `C-u g` | refresh, dropping every cached listing for this bucket |
+| `P` | upload a local file into the current prefix |
 | `G` | download the object at point |
 | `R` | download everything under the prefix at point |
 | `d` | mark the object at point for deletion |
@@ -107,6 +108,21 @@ Other commands, not bound to keys:
   remove, without removing it
 - `M-x s3-manager-clear-cache`, `M-x s3-manager-forget-profiles`
 - `M-x s3-manager-list-profiles`
+
+### Uploading
+
+`P` asks for a local file and uploads it into the prefix you are looking at,
+under the file's own name — not under whatever row point happens to be on.
+
+S3 replaces an existing object without a word, and `aws s3 cp` has no flag that
+would stop it, so the upload is preceded by a `head-object` check. If the key
+already exists you are told its size and last-modified date and asked before
+anything is sent. If the check itself fails — real AWS answers 403 rather than
+404 for a missing key when you lack `s3:ListBucket` — the error is reported and
+you are asked whether to upload anyway, because neither assuming nor refusing
+would be honest.
+
+Directory upload is not in this release yet; `P` refuses one and says so.
 
 ### When something fails
 

@@ -28,6 +28,20 @@ if [ -n "$FAKE_AWS_HOLD_STDERR" ]; then
     sleep "$FAKE_AWS_HOLD_STDERR" &
 fi
 
+# A single command can invoke the CLI more than once with different services
+# -- an upload probes with `head-object' and then transfers with `s3 cp' --
+# and the two must be able to succeed and fail independently.  When
+# FAKE_AWS_HEAD_EXIT is set, a head-object invocation is answered from the
+# FAKE_AWS_HEAD_* variables and returns here, leaving the plain variables to
+# describe every other call.
+for arg in "$@"; do
+    if [ "$arg" = "head-object" ] && [ -n "$FAKE_AWS_HEAD_EXIT" ]; then
+        [ -n "$FAKE_AWS_HEAD_STDOUT" ] && printf '%b' "$FAKE_AWS_HEAD_STDOUT"
+        [ -n "$FAKE_AWS_HEAD_STDERR" ] && printf '%b' "$FAKE_AWS_HEAD_STDERR" >&2
+        exit "$FAKE_AWS_HEAD_EXIT"
+    fi
+done
+
 [ -n "$FAKE_AWS_DELAY" ] && sleep "$FAKE_AWS_DELAY"
 [ -n "$FAKE_AWS_STDOUT" ] && printf '%b' "$FAKE_AWS_STDOUT"
 [ -n "$FAKE_AWS_STDERR" ] && printf '%b' "$FAKE_AWS_STDERR" >&2
