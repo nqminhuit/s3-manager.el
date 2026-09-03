@@ -61,10 +61,12 @@
     (funcall predicate)))
 
 (cl-defmacro s3-manager-test--with-fake-aws
-    ((&key stdout stderr (exit 0) delay argv-file) &rest body)
+    ((&key stdout stderr (exit 0) delay linger argv-file) &rest body)
   "Run BODY with the AWS CLI replaced by the test double.
-STDOUT, STDERR, EXIT and DELAY drive the double's behaviour; ARGV-FILE,
-when given, is a file the double writes its arguments to."
+STDOUT, STDERR, EXIT, DELAY and LINGER drive the double's behaviour;
+ARGV-FILE, when given, is a file the double writes its arguments to.
+LINGER keeps the process alive after writing, so a test can observe
+transient state that completion would otherwise clear."
   (declare (indent 1))
   `(let* ((s3-manager-aws-program s3-manager-test--fake-aws)
           (s3-manager-timeout 10)
@@ -77,6 +79,7 @@ when given, is a file the double writes its arguments to."
                          (concat "FAKE_AWS_STDERR=" (or ,stderr ""))
                          (format "FAKE_AWS_EXIT=%s" ,exit)
                          (concat "FAKE_AWS_DELAY=" (or ,delay ""))
+                         (concat "FAKE_AWS_LINGER=" (or ,linger ""))
                          (concat "FAKE_AWS_ARGV_FILE=" (or ,argv-file "")))
                    process-environment)))
      ,@body))
@@ -1732,6 +1735,232 @@ equality is structural."
 (ert-deftest s3-manager-test-load-more-is-bound ()
   (should (eq (keymap-lookup s3-manager-mode-map "+") #'s3-manager-load-more))
   (should (eq (keymap-lookup s3-manager-mode-map "g") #'s3-manager-refresh)))
+
+
+;;;; Transfers
+
+(defmacro s3-manager-test--in-object-buffer (&rest body)
+  "Run BODY in a buffer showing a rendered object listing."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (s3-manager-mode)
+     (setq s3-manager--profile "production"
+           s3-manager--bucket "media"
+           s3-manager--prefix "")
+     (setq tabulated-list-format s3-manager--object-list-format)
+     (tabulated-list-init-header)
+     (let ((s3-manager--cache (make-hash-table :test #'equal)))
+       (s3-manager--render-objects
+        (s3-manager-test--json "list-objects-root.json")))
+     ,@body))
+
+(defun s3-manager-test--goto-object ()
+  "Put point on the first object row."
+  (s3-manager--goto-entry
+   (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                    s3-manager--entries))))
+
+(defun s3-manager-test--goto-directory ()
+  "Put point on the first directory row."
+  (s3-manager--goto-entry
+   (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'directory))
+                    s3-manager--entries))))
+
+(ert-deftest s3-manager-test-format-progress ()
+  (should (equal (s3-manager--format-progress
+                  "Completed 70.5 KiB/70.5 KiB (558.5 KiB/s) with 1 file(s) remaining")
+                 "70.5 KiB/70.5 KiB 558.5 KiB/s"))
+  ;; Anything unrecognised is truncated rather than dropped.
+  (let ((formatted (s3-manager--format-progress (make-string 200 ?x))))
+    (should (<= (length formatted) 40))))
+
+(ert-deftest s3-manager-test-s3-uri ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media")
+    (should (equal (s3-manager--s3-uri "videos/a.mp4") "s3://media/videos/a.mp4"))
+    (should (equal (s3-manager--s3-uri "videos/") "s3://media/videos/"))))
+
+(ert-deftest s3-manager-test-get-argv ()
+  "Downloading uses `s3 cp', which does multipart and reports progress."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (destination (expand-file-name "README.md" (make-temp-file "s3dl" t))))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) destination)))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-get)
+              (should (s3-manager-test--wait
+                       (lambda () (zerop s3-manager--transfers))))))
+          (let ((argv (with-temp-buffer
+                        (insert-file-contents argv-file)
+                        (split-string (buffer-string) "\n" t))))
+            (should (equal argv
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp" "s3://media/README.md" destination
+                                 "--progress-frequency" "1")))
+            ;; Both of these suppress the progress output the mode line needs.
+            (should-not (member "--quiet" argv))
+            (should-not (member "--only-show-errors" argv))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-get-recursive-argv ()
+  (let ((argv-file (make-temp-file "s3-getr-argv"))
+        (destination (file-name-as-directory (make-temp-file "s3dlr" t))))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-directory)
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (&rest _) destination)))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-get-recursive)
+              (should (s3-manager-test--wait
+                       (lambda () (zerop s3-manager--transfers))))))
+          (let ((argv (with-temp-buffer
+                        (insert-file-contents argv-file)
+                        (split-string (buffer-string) "\n" t))))
+            (should (equal argv
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp" "s3://media/images/" destination
+                                 "--recursive" "--progress-frequency" "1")))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-get-refuses-a-prefix ()
+  (s3-manager-test--in-object-buffer
+    (s3-manager-test--goto-directory)
+    (should-error (s3-manager-get) :type 'user-error)))
+
+(ert-deftest s3-manager-test-get-recursive-refuses-an-object ()
+  (s3-manager-test--in-object-buffer
+    (s3-manager-test--goto-object)
+    (should-error (s3-manager-get-recursive) :type 'user-error)))
+
+(ert-deftest s3-manager-test-get-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-get) :type 'user-error)
+    (should-error (s3-manager-get-recursive) :type 'user-error)))
+
+(ert-deftest s3-manager-test-get-confirms-before-overwriting ()
+  "`aws s3 cp' overwrites silently, so this is the only chance to ask."
+  (let ((destination (make-temp-file "s3-existing")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) destination))
+                    ((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+            (should-error (s3-manager-get) :type 'user-error))
+          ;; Nothing was started.
+          (should (zerop s3-manager--transfers)))
+      (delete-file destination))))
+
+(ert-deftest s3-manager-test-get-into-a-directory-uses-the-object-name ()
+  (let ((directory (file-name-as-directory (make-temp-file "s3dldir" t)))
+        (argv-file (make-temp-file "s3-getdir-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) directory)))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-get)
+              (should (s3-manager-test--wait
+                       (lambda () (zerop s3-manager--transfers))))))
+          (let ((argv (with-temp-buffer
+                        (insert-file-contents argv-file)
+                        (split-string (buffer-string) "\n" t))))
+            (should (member (expand-file-name "README.md" directory) argv))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-transfer-is-not-cancellable-by-navigation ()
+  "Pressing `^' must not abort a multi-gigabyte download.
+
+A transfer is deliberately not registered in `s3-manager--process', so
+`s3-manager--cancel' -- which every navigation runs -- cannot reach it."
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t))))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination)))
+        (s3-manager-test--with-fake-aws (:stdout "" :delay "1")
+          (s3-manager-get)
+          (should (= 1 s3-manager--transfers))
+          ;; The slot the canceller consults stays empty.
+          (should (null s3-manager--process))
+          (s3-manager--cancel)
+          (should (s3-manager-test--wait
+                   (lambda () (zerop s3-manager--transfers))))
+          ;; It ran to completion despite the cancel.
+          (should (null s3-manager--transfer-status)))))))
+
+(ert-deftest s3-manager-test-transfer-progress-reaches-the-mode-line ()
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t)))
+        (seen nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination)))
+        (s3-manager-test--with-fake-aws
+            (:stdout "Completed 1.0 KiB/2.0 KiB (500 B/s) with 1 file(s) remaining\\r"
+             :linger "0.5")
+          (s3-manager-get)
+          ;; Collect every status observed, since completion clears it.
+          (s3-manager-test--wait
+           (lambda ()
+             (push s3-manager--transfer-status seen)
+             (zerop s3-manager--transfers)))))
+      (should (member "1.0 KiB/2.0 KiB 500 B/s" seen))
+      ;; Cleared once nothing is running.
+      (should (null s3-manager--transfer-status))
+      (should (equal (s3-manager--mode-line-status) "")))))
+
+(ert-deftest s3-manager-test-concurrent-transfers-are-counted ()
+  "Finishing one transfer must not hide another still running."
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t))))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination)))
+        (s3-manager-test--with-fake-aws (:stdout "" :delay "0.4")
+          (s3-manager-get)
+          (s3-manager-get)
+          (should (= 2 s3-manager--transfers))
+          (should (string-match-p "2: " (s3-manager--mode-line-status)))
+          (should (s3-manager-test--wait
+                   (lambda () (zerop s3-manager--transfers))))
+          (should (null s3-manager--transfer-status)))))))
+
+(ert-deftest s3-manager-test-failed-transfer-reports-and-clears ()
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*"))
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t))))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination)))
+        (s3-manager-test--with-fake-aws
+            (:stderr "fatal error: An error occurred (404) calling HeadObject\\n"
+             :exit 1)
+          (s3-manager-get)
+          (should (s3-manager-test--wait
+                   (lambda () (zerop s3-manager--transfers))))))
+      ;; The counter came back down and the indicator is gone.
+      (should (null s3-manager--transfer-status))
+      (should (get-buffer "*S3 Manager Error*"))
+      (with-current-buffer "*S3 Manager Error*"
+        ;; Exit 1 from `aws s3' is partial success, not a flat failure.
+        (should (string-match-p "partial" (buffer-string))))))
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*")))
+
+(ert-deftest s3-manager-test-transfer-keys-are-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "G") #'s3-manager-get))
+  (should (eq (keymap-lookup s3-manager-mode-map "R")
+              #'s3-manager-get-recursive)))
 
 (provide 's3-manager-test)
 

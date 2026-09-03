@@ -33,8 +33,9 @@
 ;;   M-x s3-manager        choose a profile, list its buckets
 ;;   C-u M-x s3-manager    re-read the profile list first
 ;;
-;; In an S3 buffer: RET enters a bucket or prefix, `^' goes up a level,
-;; `g' refreshes and `q' buries it.
+;; In an S3 buffer: RET enters a bucket or prefix, `^' goes up a level, `+'
+;; loads the next page of a truncated listing, `G' downloads the object at
+;; point, `R' downloads a prefix recursively, `g' refreshes and `q' buries it.
 ;;
 ;; Two properties are treated as non-negotiable throughout:
 ;;
@@ -49,8 +50,8 @@
 ;; key in ~/.aws/config, which silently sends every request to AWS instead of
 ;; the configured S3-compatible endpoint.
 ;;
-;; Transfers and deletion are not implemented yet.  See doc/SPEC-v0.1.0.md
-;; for the full design; section references in the code below point into it.
+;; Deletion is not implemented yet.  See doc/SPEC-v0.1.0.md for the full
+;; design; section references in the code below point into it.
 
 ;;; Code:
 
@@ -98,6 +99,10 @@ everything already seen and discards it -- quadratic in the number of
 entries.  Equal values make the cut land on a page boundary, which
 yields a genuine server-side cursor instead."
   :type 'integer)
+
+(defcustom s3-manager-download-directory "~/Downloads/"
+  "Directory offered by default when downloading."
+  :type 'directory)
 
 (defcustom s3-manager-cache-max-entries 200
   "Maximum number of listings held in the cache.
@@ -773,6 +778,14 @@ PREFIX is the prefix being left and ENTRY is the row point was on, so
 (defvar-local s3-manager--restore-target nil
   "Entry to put point on once the pending listing arrives.")
 
+(defvar-local s3-manager--transfers 0
+  "Number of transfers started from this buffer that are still running.
+Counted rather than flagged so that finishing one does not hide the
+progress of another still going.")
+
+(defvar-local s3-manager--transfer-status nil
+  "Most recent progress line from a running transfer, or nil.")
+
 
 ;;;; Data model
 
@@ -963,12 +976,30 @@ in the header line rather than here."
       (format "*s3: %s/%s*" (or profile "default") bucket)
     (format "*s3: %s*" (or profile "default"))))
 
+(defun s3-manager--format-progress (line)
+  "Condense an `aws s3' progress LINE for display in a mode line.
+
+The CLI emits lines like \"Completed 70.5 KiB/70.5 KiB (558.5 KiB/s)
+with 1 file(s) remaining\", which is far too long, so the transferred
+amount and the rate are pulled out of it."
+  (if (string-match "\\`Completed \\([^(]*?\\) (\\([^)]*\\))" line)
+      (format "%s %s" (string-trim (match-string 1 line))
+              (match-string 2 line))
+    (truncate-string-to-width (string-trim line) 40 nil nil t)))
+
 (defun s3-manager--mode-line-status ()
   "Return the `mode-line-process' fragment for this buffer."
-  (pcase s3-manager--status
-    ('loading " [loading]")
-    ('error (propertize " [error]" 'face 'error))
-    (_ "")))
+  (concat
+   (pcase s3-manager--status
+     ('loading " [loading]")
+     ('error (propertize " [error]" 'face 'error))
+     (_ ""))
+   (when (and (> s3-manager--transfers 0) s3-manager--transfer-status)
+     (format " [%s%s]"
+             (if (> s3-manager--transfers 1)
+                 (format "%d: " s3-manager--transfers)
+               "")
+             s3-manager--transfer-status))))
 
 (defun s3-manager--update-header-line ()
   "Refresh the header line from this buffer's state."
@@ -1015,7 +1046,9 @@ in the header line rather than here."
   ;; whose first argument is IGNORE-AUTO -- so `C-u g' could never reach the
   ;; whole-bucket purge.  `revert-buffer-function' still works for M-x.
   "g" #'s3-manager-refresh
-  "+" #'s3-manager-load-more)
+  "+" #'s3-manager-load-more
+  "G" #'s3-manager-get
+  "R" #'s3-manager-get-recursive)
 
 (define-derived-mode s3-manager-mode tabulated-list-mode "S3"
   "Major mode for browsing S3 buckets and objects.
@@ -1370,6 +1403,121 @@ TARGET, when given, is the entry to put point on once the listing lands."
                                                     parent))))
       (setq s3-manager--prefix parent)
       (s3-manager--reload target)))))
+
+;;;; Transfers
+;;
+;; Bytes move with `aws s3 cp' rather than `s3api get-object': it performs a
+;; multipart parallel download above 8MB, reports progress, and preserves the
+;; object's modification time, none of which get-object does.
+
+(defun s3-manager--s3-uri (key)
+  "Return the s3:// URI for KEY in this buffer's bucket."
+  (format "s3://%s/%s" s3-manager--bucket key))
+
+(defun s3-manager--transfer-finished ()
+  "Note that one transfer in this buffer has stopped."
+  (setq s3-manager--transfers (max 0 (1- s3-manager--transfers)))
+  (when (zerop s3-manager--transfers)
+    (setq s3-manager--transfer-status nil))
+  (force-mode-line-update))
+
+(defun s3-manager--transfer (args description)
+  "Run the transfer ARGS, reporting progress in the current buffer.
+DESCRIPTION names the operation in messages and error reports."
+  (cl-incf s3-manager--transfers)
+  (setq s3-manager--transfer-status "starting")
+  (force-mode-line-update)
+  (message "S3: %s..." description)
+  (s3-manager--aws-async
+   args
+   :profile s3-manager--profile
+   :buffer (current-buffer)
+   ;; Deliberately neither :register nor :generation.  Registering would let
+   ;; navigation cancel the transfer, and aborting a multi-gigabyte download
+   ;; because the user pressed `^' would be indefensible.  Omitting the
+   ;; generation keeps progress reporting into the buffer that started it even
+   ;; after that buffer has moved on, which is what the user wants to see.
+   :parse nil
+   :progress-stream 'stdout
+   ;; No --quiet and no --only-show-errors: both suppress the progress this
+   ;; depends on.  --progress-frequency throttles it at the source.
+   :on-progress (lambda (segment)
+                  (setq s3-manager--transfer-status
+                        (s3-manager--format-progress segment))
+                  (force-mode-line-update))
+   :on-success (lambda (_output)
+                 (s3-manager--transfer-finished)
+                 (message "S3: %s -- done" description))
+   :on-error (lambda (err)
+               (s3-manager--transfer-finished)
+               (s3-manager--report-error err description))))
+
+(defun s3-manager--read-destination-file (name)
+  "Read a local destination for an object called NAME."
+  (let* ((directory (file-name-as-directory
+                     (expand-file-name s3-manager-download-directory)))
+         (chosen (expand-file-name
+                  (read-file-name (format "Download %s to: " name)
+                                  directory nil nil name)))
+         ;; Naming a directory means "into it, under the object's own name".
+         (destination (if (file-directory-p chosen)
+                          (expand-file-name name chosen)
+                        chosen)))
+    ;; `aws s3 cp' overwrites without asking, so this is the only chance.
+    (when (and (file-exists-p destination)
+               (not (y-or-n-p (format "%s exists.  Overwrite? " destination))))
+      (user-error "Download aborted"))
+    (let ((parent (file-name-directory destination)))
+      (unless (file-directory-p parent)
+        (make-directory parent t)))
+    destination))
+
+(defun s3-manager-get ()
+  "Download the object at point."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (let ((entry (s3-manager--entry-at-point)))
+    (unless (eq (s3-manager-entry-type entry) 'object)
+      (user-error "%s"
+                  (substitute-command-keys
+                   "That is a prefix; use \\[s3-manager-get-recursive]")))
+    (let* ((key (s3-manager-entry-key entry))
+           (destination (s3-manager--read-destination-file
+                         (s3-manager-entry-display-name entry))))
+      (s3-manager--transfer
+       (list "s3" "cp" (s3-manager--s3-uri key) destination
+             "--progress-frequency" "1")
+       (format "downloading %s to %s" key (abbreviate-file-name destination))))))
+
+(defun s3-manager-get-recursive ()
+  "Download every object under the prefix at point."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (let ((entry (s3-manager--entry-at-point)))
+    (unless (eq (s3-manager-entry-type entry) 'directory)
+      (user-error "%s"
+                  (substitute-command-keys
+                   "That is an object; use \\[s3-manager-get]")))
+    (let* ((prefix (s3-manager-entry-key entry))
+           (leaf (directory-file-name (s3-manager-entry-display-name entry)))
+           (default (expand-file-name
+                     leaf (expand-file-name s3-manager-download-directory)))
+           (destination (file-name-as-directory
+                         (expand-file-name
+                          (read-directory-name
+                           (format "Download %s recursively to: " prefix)
+                           default nil nil)))))
+      (unless (file-directory-p destination)
+        (unless (y-or-n-p (format "Create %s? " destination))
+          (user-error "Download aborted"))
+        (make-directory destination t))
+      (s3-manager--transfer
+       (list "s3" "cp" (s3-manager--s3-uri prefix) destination
+             "--recursive" "--progress-frequency" "1")
+       (format "downloading %s to %s"
+               prefix (abbreviate-file-name destination))))))
 
 (defun s3-manager--entry-at-point ()
   "Return the entry on the current line, or signal a `user-error'.

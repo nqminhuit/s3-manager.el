@@ -28,4 +28,8 @@ fi
 [ -n "$FAKE_AWS_STDOUT" ] && printf '%b' "$FAKE_AWS_STDOUT"
 [ -n "$FAKE_AWS_STDERR" ] && printf '%b' "$FAKE_AWS_STDERR" >&2
 
+# Stay alive after writing, so a test can observe transient state -- progress
+# in the mode line, say -- that completion would otherwise clear immediately.
+[ -n "$FAKE_AWS_LINGER" ] && sleep "$FAKE_AWS_LINGER"
+
 exit "${FAKE_AWS_EXIT:-0}"

@@ -393,10 +393,23 @@ detachment is the optimization; the counter is the correctness mechanism.
 `s3-manager--process` and `s3-manager--start-request` govern **listings only**.
 A `s3 cp` download registers no entry there and is never cancelled by
 navigation: aborting a 4 GB download because the user pressed `^` would be
-indefensible. A transfer captures its origin buffer for progress reporting, the
-generation guard silently stops it painting the mode line once that buffer has
-moved on, and completion is announced with `message`. This asymmetry is
-intentional and must be commented in the source.
+indefensible. This asymmetry is intentional and must be commented in the source.
+
+A transfer captures its origin buffer for progress reporting but **passes no
+generation**. An earlier draft of this section had the generation guard stop
+progress once the buffer moved on; that is wrong. The mode-line indicator
+describes the *transfer*, not the listing, and a download that keeps running
+while the user browses elsewhere in the same bucket should keep reporting —
+otherwise the feedback disappears for the entire remainder of a long transfer.
+Killing the buffer still stops it, via the `buffer-live-p` half of the guard.
+
+Concurrent transfers are **counted**, not flagged, so that one finishing does
+not clear an indicator another still needs.
+
+Progress lines are condensed before display: the CLI emits
+`Completed 70.5 KiB/70.5 KiB (558.5 KiB/s) with 1 file(s) remaining`, which is
+far wider than a mode line, so the transferred amount and rate are extracted
+and anything unrecognised is truncated.
 
 `(add-hook 'kill-buffer-hook #'s3-manager--cancel nil t)` in the mode body kills
 any in-flight *listing* when the buffer dies — without it, `:noquery t` means an
