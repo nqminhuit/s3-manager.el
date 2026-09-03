@@ -75,6 +75,7 @@ bucket opens it; `RET` on a prefix descends into it.
 | `x` | delete the marked objects |
 | `D` | delete the object at point, or the prefix at point recursively |
 | `n` / `p` | next / previous line |
+| `!` | show the accumulated error reports |
 | `q` | bury the buffer |
 
 Navigation reuses the selected window, like Dired: entering a bucket, moving
@@ -106,6 +107,17 @@ Other commands, not bound to keys:
   remove, without removing it
 - `M-x s3-manager-clear-cache`, `M-x s3-manager-forget-profiles`
 - `M-x s3-manager-list-profiles`
+
+### When something fails
+
+Failures are never summarised away. Every one is appended to `*S3 Manager
+Error*` with the command, the exit code, and the CLI's own stderr reproduced
+verbatim — the service's wording, not a paraphrase of it. The echo area gets a
+one-line summary that names that buffer, and the buffer is shown as well unless
+you set `s3-manager-display-errors` to nil. `!` opens it at any time.
+
+A batch operation reports each failure individually rather than as a count, so
+"deleted 7, 2 failed" is always accompanied by which two, and why.
 
 ### Deleting
 
@@ -149,6 +161,7 @@ If editing the AWS config is not an option, override from Emacs instead:
 | `s3-manager-cache-max-entries` | `200` | cached listings retained |
 | `s3-manager-endpoint-alist` | `nil` | per-profile endpoint override |
 | `s3-manager-endpoint-url` | `nil` | endpoint override for all profiles |
+| `s3-manager-display-errors` | `t` | show the error report as well as recording it |
 
 The two timeouts are separate because they measure different things. A listing
 that has not answered in two minutes is stuck; a transfer that has been running

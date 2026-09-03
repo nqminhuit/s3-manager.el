@@ -315,6 +315,177 @@ listing failure."
   (kill-buffer "*S3 Manager Error*"))
 
 
+(defmacro s3-manager-test--with-fresh-error-buffer (&rest body)
+  "Run BODY with no accumulated error reports, and clean up afterwards."
+  (declare (indent 0))
+  `(progn
+     (when (get-buffer s3-manager--error-buffer)
+       (kill-buffer s3-manager--error-buffer))
+     (unwind-protect (progn ,@body)
+       (when (get-buffer s3-manager--error-buffer)
+         (kill-buffer s3-manager--error-buffer)))))
+
+(defun s3-manager-test--error-text ()
+  "Return the accumulated error report text, or nil if there is none."
+  (when-let* ((buffer (get-buffer s3-manager--error-buffer)))
+    (with-current-buffer buffer (buffer-string))))
+
+(ert-deftest s3-manager-test-error-report-keeps-stderr-verbatim ()
+  "Every line of the CLI's stderr must survive, not just the summarised one.
+Summarising is a guess at which line mattered; the report is where the
+service's own words have to be recoverable in full."
+  (s3-manager-test--with-fresh-error-buffer
+    (s3-manager--report-error
+     (list 's3-manager-cli-error "aws s3 cp x s3://b/k" 1
+           (concat "upload failed: ./x to s3://b/k\n"
+                   "An error occurred (SlowDown) when calling the PutObject"
+                   " operation: Please reduce your request rate\n"
+                   "completed 3 of 4 parts"))
+     "s3 cp")
+    (let ((text (s3-manager-test--error-text)))
+      (should (string-match-p "upload failed: ./x to s3://b/k" text))
+      (should (string-match-p "Please reduce your request rate" text))
+      ;; The line the summariser ignored is retained too.
+      (should (string-match-p "completed 3 of 4 parts" text))
+      (should (string-match-p "one or more transfers failed" text)))))
+
+(ert-deftest s3-manager-test-error-summary-names-the-report-buffer ()
+  "The echo line is transient, so it must say where the detail lives."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((echoed nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (setq echoed (apply #'format format args))))
+                ((symbol-function 'display-buffer) #'ignore))
+        (s3-manager--report-error
+         (list 's3-manager-cli-error "aws s3api head-object" 254
+               "An error occurred (403) when calling the HeadObject operation")
+         "head-object"))
+      (should (string-match-p "403 on HeadObject" echoed))
+      (should (string-match-p (regexp-quote s3-manager--error-buffer) echoed)))))
+
+(ert-deftest s3-manager-test-errors-are-displayed-when-configured ()
+  "`s3-manager-display-errors' decides display, never recording.
+An error that is recorded but never shown is indistinguishable from one
+that never happened, which is why the default is to show it."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((shown nil)
+          (err (list 's3-manager-cli-error "aws s3api list-buckets" 255
+                     "Unable to locate credentials")))
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (push buffer shown)))
+                ((symbol-function 'message) #'ignore))
+        (let ((s3-manager-display-errors t))
+          (s3-manager--report-error err "list-buckets"))
+        (should (= 1 (length shown)))
+        (let ((s3-manager-display-errors nil))
+          (s3-manager--report-error err "list-buckets"))
+        ;; Still one: the second call recorded without displaying.
+        (should (= 1 (length shown))))
+      ;; Both calls are in the report regardless of whether they were shown.
+      (let ((text (s3-manager-test--error-text))
+            (headers 0)
+            (start 0))
+        (while (string-match "^=== " text start)
+          (setq headers (1+ headers)
+                start (match-end 0)))
+        (should (= 2 headers))))))
+
+(ert-deftest s3-manager-test-version-probe-failure-is-recorded ()
+  "A failed version probe must leave a trace instead of being dropped.
+It was `:on-error #'ignore', so there was no way to discover why the
+too-old-CLI warning never appeared.  It still must not interrupt: the
+user did not ask for this call."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((echoed nil))
+      (s3-manager-test--with-fake-aws (:stderr "boom" :exit 255)
+        (let ((s3-manager--cli-version nil))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format &rest args)
+                       (push (apply #'format format args) echoed))))
+            (s3-manager--check-version)
+            (should (s3-manager-test--wait
+                     (lambda () (s3-manager-test--error-text)) 5)))))
+      (should (string-match-p "boom" (s3-manager-test--error-text)))
+      (should (string-match-p "aws --version" (s3-manager-test--error-text)))
+      ;; Recorded, not reported: nothing was echoed about it.
+      (should-not (seq-find (lambda (m) (string-match-p "boom" m)) echoed)))))
+
+(ert-deftest s3-manager-test-directory-cleanup-failure-is-reported ()
+  "A temp directory that cannot be removed must say so.
+Silence would leave downloaded object bytes on disk while the package
+behaved as though it had cleaned up."
+  (s3-manager-test--with-fresh-error-buffer
+    (cl-letf (((symbol-function 'delete-directory)
+               (lambda (&rest _) (error "Permission denied")))
+              ((symbol-function 'message) #'ignore))
+      (s3-manager--discard-directory "/tmp/s3-manager-nonexistent-xyz"))
+    (let ((text (s3-manager-test--error-text)))
+      (should (string-match-p "Permission denied" text))
+      (should (string-match-p "s3-manager-nonexistent-xyz" text))
+      (should (string-match-p "view cleanup" text)))))
+
+(ert-deftest s3-manager-test-view-discard-forgets-even-when-deletion-fails ()
+  "The pending set must not grow when cleanup fails, or `kill-emacs-hook'
+retries a directory forever."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((s3-manager--view-pending (list "/tmp/s3-manager-nonexistent-xyz")))
+      (cl-letf (((symbol-function 'delete-directory)
+                 (lambda (&rest _) (error "Permission denied")))
+                ((symbol-function 'message) #'ignore))
+        (s3-manager--view-discard "/tmp/s3-manager-nonexistent-xyz"))
+      (should (null s3-manager--view-pending)))))
+
+(ert-deftest s3-manager-test-interruption-is-announced ()
+  "Exit 130 was an empty `cond' branch, so an interruption vanished.
+It cannot be our own cancel -- that detaches the sentinels before
+killing -- so it is a real interruption from outside and must be said
+out loud.  It is still not a failure report: nothing went wrong."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((echoed nil)
+          (called nil))
+      (s3-manager-test--with-fake-aws (:exit 130)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format &rest args)
+                     (push (apply #'format format args) echoed))))
+          (s3-manager--aws-async '("s3api" "list-buckets")
+                                 :on-success (lambda (_) (setq called 'success))
+                                 :on-error (lambda (_) (setq called 'error)))
+          (should (s3-manager-test--wait
+                   (lambda () (seq-find (lambda (m)
+                                          (string-match-p "interrupted" m))
+                                        echoed))
+                   5))))
+      ;; Announced, but neither callback ran and nothing was reported.
+      (should (null called))
+      (should (null (s3-manager-test--error-text))))))
+
+(ert-deftest s3-manager-test-callback-failure-survives-in-the-report ()
+  "A signalling callback is a bug in this package, and must be recoverable.
+It was only `message'd, so it was gone by the next keystroke."
+  (s3-manager-test--with-fresh-error-buffer
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (s3-manager--safe-funcall
+       (lambda (_) (error "Deliberate callback bug")) nil "on-success"))
+    (let ((text (s3-manager-test--error-text)))
+      (should (string-match-p "Deliberate callback bug" text))
+      (should (string-match-p "on-success callback" text)))))
+
+(ert-deftest s3-manager-test-show-errors-without-any ()
+  "`s3-manager-show-errors' must not create an empty report buffer."
+  (s3-manager-test--with-fresh-error-buffer
+    (let ((shown nil))
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (push buffer shown)))
+                ((symbol-function 'message) #'ignore))
+        (s3-manager-show-errors)
+        (should (null shown))
+        (should (null (get-buffer s3-manager--error-buffer)))))))
+
+(ert-deftest s3-manager-test-show-errors-key-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "!") #'s3-manager-show-errors)))
+
+
 ;;;; Transport: success paths
 
 (ert-deftest s3-manager-test-transport-success ()
@@ -627,8 +798,11 @@ It must be surfaced, and it must not prevent resource cleanup."
                       messages))
     (should (= before (length (s3-manager-test--scratch-buffers))))))
 
-(ert-deftest s3-manager-test-transport-interrupt-is-silent ()
-  "Exit 130 is our own cancellation; it must not surface as an error."
+(ert-deftest s3-manager-test-transport-interrupt-runs-no-callbacks ()
+  "Exit 130 must not surface as an error, nor run either callback.
+It is announced in the echo area -- see
+`s3-manager-test-interruption-is-announced' -- but an interruption is
+not a failure, so nothing is reported and nothing downstream runs."
   (let ((fired nil))
     (s3-manager-test--with-fake-aws (:exit 130)
       (let ((proc (s3-manager--aws-async

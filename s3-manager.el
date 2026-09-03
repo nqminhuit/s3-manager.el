@@ -152,6 +152,16 @@ read timeouts still apply, so a transfer to a black hole does not hang
 forever."
   :type '(choice (const :tag "No timeout" nil) integer))
 
+(defcustom s3-manager-display-errors t
+  "Whether a failure shows `s3-manager--error-buffer\=' as well as recording it.
+
+Every failure is recorded either way, with the CLI\='s own stderr intact;
+this only decides whether the report is put on screen.  The default is
+non-nil because the echo-area summary is transient -- the next `message\='
+overwrites it, which during a transfer is under a second -- and an error
+the user never saw is indistinguishable from one that never happened."
+  :type 'boolean)
+
 (defconst s3-manager-minimum-cli-version "2.13.0"
   "Oldest AWS CLI release this package supports.
 2.13.0 is the first release honouring `endpoint_url' in ~/.aws/config;
@@ -316,9 +326,12 @@ Runs at most once per session for a given `s3-manager-aws-program'."
               (format "AWS CLI %s is older than %s: `endpoint_url' in ~/.aws/config is ignored, so requests go to AWS rather than your configured endpoint"
                       version s3-manager-minimum-cli-version)
               :warning)))))
-     ;; A failed probe is not worth interrupting the user for; the command
-     ;; they actually asked for will report its own errors.
-     :on-error #'ignore)))
+     ;; A failed probe is not worth interrupting the user for -- the command
+     ;; they actually asked for will report its own errors -- but it must not
+     ;; vanish either, or there is no way to find out why the version warning
+     ;; never appeared.  Recorded, not reported.
+     :on-error (lambda (err)
+                 (s3-manager--record-error err "aws --version")))))
 
 
 ;;;; Command construction
@@ -421,29 +434,61 @@ ERR is (CONDITION COMMAND EXIT-CODE DETAIL)."
                            (split-string (string-trim detail) "\n"))))
      (format "exit %s" (nth 2 err)))))
 
-(defun s3-manager--report-error (err &optional context)
-  "Record ERR in `s3-manager--error-buffer' and summarize it in the echo area.
+(defun s3-manager--record-error (err &optional context)
+  "Append ERR to `s3-manager--error-buffer' without disturbing the user.
 CONTEXT, when given, is a short string naming the operation.
 
-The buffer is appended to rather than replaced, and is never displayed
-automatically: a permission error on one object during a browse should
-not steal the user's window."
-  (let ((summary (s3-manager--summarize-error err)))
-    (with-current-buffer (get-buffer-create s3-manager--error-buffer)
-      (let ((inhibit-read-only t))
-        (unless (derived-mode-p 'special-mode) (special-mode))
-        (goto-char (point-max))
-        (insert (format "\n=== %s  %s\n"
-                        (format-time-string "%F %T") (or context "")))
-        (insert (format "condition : %s\n" (nth 0 err)))
-        (insert (format "command   : %s\n" (nth 1 err)))
-        (insert (format "exit code : %s%s\n" (nth 2 err)
-                        (s3-manager--exit-code-gloss (nth 2 err))))
-        (insert "stderr    :\n")
-        (dolist (line (split-string (or (nth 3 err) "(none)") "\n"))
-          (insert "  " line "\n"))))
-    (message "S3: %s" summary)
+The recording half of `s3-manager--report-error', separate so that a
+background probe the user did not ask for can still leave a trace
+instead of being dropped.  The buffer is appended to rather than
+replaced: the previous failure is often what explains this one, and the
+CLI\='s stderr is reproduced verbatim, line for line, because a summary
+of someone else\='s error message is a guess."
+  (with-current-buffer (get-buffer-create s3-manager--error-buffer)
+    (let ((inhibit-read-only t))
+      (unless (derived-mode-p 'special-mode) (special-mode))
+      (goto-char (point-max))
+      (insert (format "\n=== %s  %s\n"
+                      (format-time-string "%F %T") (or context "")))
+      (insert (format "condition : %s\n" (nth 0 err)))
+      (insert (format "command   : %s\n" (nth 1 err)))
+      (insert (format "exit code : %s%s\n" (nth 2 err)
+                      (s3-manager--exit-code-gloss (nth 2 err))))
+      (insert "stderr    :\n")
+      (dolist (line (split-string (or (nth 3 err) "(none)") "\n"))
+        (insert "  " line "\n")))
+    (current-buffer)))
+
+(defun s3-manager--local-error (context detail)
+  "Return an error tuple describing a local failure in CONTEXT.
+DETAIL is the message.  Local failures have no exit code, but they are
+worth recording in the same place as the CLI\='s: a temporary directory
+that could not be removed is exactly as interesting as a refused
+request, and rather harder to notice."
+  (list 's3-manager-error context nil detail))
+
+(defun s3-manager--report-error (err &optional context)
+  "Record ERR in `s3-manager--error-buffer' and tell the user about it.
+CONTEXT, when given, is a short string naming the operation.
+
+The echo area gets a one-line summary that always names the buffer
+holding the detail, and the buffer itself is displayed when
+`s3-manager-display-errors' is non-nil -- in another window, the way
+`compile' surfaces a failure, never stealing the selected one."
+  (let ((buffer (s3-manager--record-error err context))
+        (summary (s3-manager--summarize-error err)))
+    (when s3-manager-display-errors
+      (display-buffer buffer))
+    (message "S3: %s -- see %s" summary s3-manager--error-buffer)
     summary))
+
+;;;###autoload
+(defun s3-manager-show-errors ()
+  "Display the accumulated AWS CLI failure reports."
+  (interactive)
+  (if-let* ((buffer (get-buffer s3-manager--error-buffer)))
+      (display-buffer buffer)
+    (message "S3: no errors recorded this session")))
 
 
 ;;;; The transport primitive
@@ -458,8 +503,16 @@ WHAT names the callback for the report."
     (condition-case err
         (funcall fn arg)
       (error
-       (message "s3-manager: %s callback failed: %s"
-                what (error-message-string err))))))
+       ;; Recorded as well as messaged: this is a bug in the package rather
+       ;; than a service failure, and an echo-area line about it is gone by
+       ;; the next keystroke.
+       (s3-manager--record-error
+        (s3-manager--local-error (format "%s callback" what)
+                                 (error-message-string err))
+        "internal")
+       (message "s3-manager: %s callback failed: %s -- see %s"
+                what (error-message-string err)
+                s3-manager--error-buffer)))))
 
 (defun s3-manager--kill-buffer-safely (buffer)
   "Kill BUFFER if it is still live."
@@ -634,7 +687,14 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                                                 exit-code)
                                       stderr))
                               nil))
-                    ((eql exit-code 130)) ; the CLI's own SIGINT status
+                    ((eql exit-code 130)
+                     ;; The CLI's own SIGINT status.  This is not our own
+                     ;; cancel -- `s3-manager--cancel' detaches the sentinels
+                     ;; before killing, so a cancelled request never arrives
+                     ;; here -- which makes this a real interruption from
+                     ;; outside, and saying nothing would leave an abandoned
+                     ;; command indistinguishable from one that never ran.
+                     (message "S3: interrupted (%s)" (car args)))
                     ((eql exit-code 0)
                      (condition-case parse-err
                          (deliver nil (if parse
@@ -1162,7 +1222,8 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
   "u" #'s3-manager-unmark
   "U" #'s3-manager-unmark-all
   "x" #'s3-manager-execute
-  "D" #'s3-manager-delete)
+  "D" #'s3-manager-delete
+  "!" #'s3-manager-show-errors)
 
 ;; Evil's state keymaps take precedence over a major-mode map, and its normal
 ;; state -- the state this mode gets, since it is in none of Evil's state
@@ -1567,18 +1628,31 @@ failed or timed-out transfer, or an origin buffer killed mid-download,
 which suppresses the callbacks entirely --- would otherwise leave the
 object's bytes in the temporary directory.")
 
+(defun s3-manager--discard-directory (directory)
+  "Delete DIRECTORY and its contents, reporting a failure rather than hiding it.
+Silence here would leave downloaded object bytes in the temporary
+directory while the package behaved as though it had cleaned up."
+  (condition-case err
+      (delete-directory directory t)
+    (error
+     (s3-manager--record-error
+      (s3-manager--local-error (format "delete-directory %s" directory)
+                               (error-message-string err))
+      "view cleanup")
+     (message "S3: could not remove %s -- see %s"
+              directory s3-manager--error-buffer))))
+
 (defun s3-manager--view-discard (directory)
   "Delete a pending view DIRECTORY and forget it."
   (setq s3-manager--view-pending (delete directory s3-manager--view-pending))
-  (ignore-errors (delete-directory directory t)))
+  (s3-manager--discard-directory directory))
 
 (defun s3-manager--view-discard-all ()
   "Delete every view directory still awaiting a buffer.
 Installed on `kill-emacs-hook': it is the only thing that can recover a
 download whose origin buffer was killed before it finished, since that
 suppresses the callbacks."
-  (mapc (lambda (directory) (ignore-errors (delete-directory directory t)))
-        s3-manager--view-pending)
+  (mapc #'s3-manager--discard-directory s3-manager--view-pending)
   (setq s3-manager--view-pending nil))
 
 (add-hook 'kill-emacs-hook #'s3-manager--view-discard-all)
