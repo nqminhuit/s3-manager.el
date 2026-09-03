@@ -33,11 +33,12 @@
 ;;   M-x s3-manager        choose a profile, list its buckets
 ;;   C-u M-x s3-manager    re-read the profile list first
 ;;
-;; In an S3 buffer: RET enters a bucket or prefix, `^' goes up a level, `+'
-;; loads the next page of a truncated listing, `G' downloads the object at
-;; point and `R' a prefix recursively, `d' marks an object for deletion and
-;; `x' deletes everything marked, `D' deletes the object or prefix at point
-;; outright, `g' refreshes and `q' buries the buffer.
+;; In an S3 buffer: RET enters a bucket or prefix, or opens a small object
+;; read-only; `^' goes up a level; `+' loads the next page of a truncated
+;; listing; `G' downloads the object at point and `R' a prefix recursively;
+;; `d' marks an object for deletion and `x' deletes everything marked; `D'
+;; deletes the object or prefix at point outright; `g' refreshes and `q'
+;; buries the buffer.
 ;;
 ;; Two properties are treated as non-negotiable throughout:
 ;;
@@ -105,6 +106,14 @@ yields a genuine server-side cursor instead."
 (defcustom s3-manager-download-directory "~/Downloads/"
   "Directory offered by default when downloading."
   :type 'directory)
+
+(defcustom s3-manager-view-max-size (* 10 1024 1024)
+  "Largest object, in bytes, that RET will open in a buffer.
+
+RET is the most frequently pressed key in the listing, so it must never
+be an unbounded operation.  Anything larger is refused with its size and
+a pointer at `s3-manager-get'."
+  :type 'integer)
 
 (defcustom s3-manager-cache-max-entries 200
   "Maximum number of listings held in the cache.
@@ -1392,7 +1401,7 @@ TARGET, when given, is the entry to put point on once the listing lands."
       (s3-manager--set-prefix (s3-manager-entry-key id))
       (s3-manager--reload))
      (t
-      (user-error "Opening objects is not implemented yet")))))
+      (s3-manager-view)))))
 
 (defun s3-manager-up ()
   "Move to the parent prefix, or back to the bucket list."
@@ -1418,6 +1427,79 @@ TARGET, when given, is the entry to put point on once the listing lands."
                                                     parent))))
       (s3-manager--set-prefix parent)
       (s3-manager--reload target)))))
+
+;;;; Viewing
+
+(defvar-local s3-manager--view-file nil
+  "Local copy this buffer is displaying, deleted when the buffer dies.")
+
+(defun s3-manager--view-file-name (entry)
+  "Return a safe leaf file name for viewing ENTRY.
+
+S3 keys are arbitrary strings and may legally be or contain \"..\", so
+the name is taken from the leaf only and rejected outright if it could
+name anything other than a file inside its own directory.  Building a
+path from a key directly would let one escape the temporary directory."
+  (let ((name (file-name-nondirectory
+               (directory-file-name (s3-manager-entry-display-name entry)))))
+    (if (or (member name '("" "." "..")) (string-match-p "/" name))
+        "s3-object"
+      name)))
+
+(defun s3-manager--view-destination (entry)
+  "Return a fresh temporary path to download ENTRY to.
+A directory of its own per view, so that objects of the same name in
+different prefixes cannot collide and the buffer keeps the object's own
+name."
+  (expand-file-name
+   (s3-manager--view-file-name entry)
+   (file-name-as-directory (make-temp-file "s3-manager-view-" t))))
+
+(defun s3-manager--view-cleanup ()
+  "Delete the local copy behind the current buffer."
+  (when s3-manager--view-file
+    (let ((directory (file-name-directory s3-manager--view-file)))
+      (ignore-errors (delete-file s3-manager--view-file))
+      ;; Only ever this view's own directory, and only when now empty.
+      (ignore-errors (delete-directory directory)))))
+
+(defun s3-manager--display-view (file uri)
+  "Show FILE, a local copy of URI, in a read-only buffer."
+  (let ((buffer (find-file-noselect file)))
+    (with-current-buffer buffer
+      (setq s3-manager--view-file file)
+      (setq-local header-line-format (format " %s  (read-only copy)" uri))
+      ;; The copy is disposable: remove it with the buffer rather than
+      ;; leaving downloaded object data lying in the temporary directory.
+      (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t)
+      (read-only-mode 1))
+    (pop-to-buffer buffer)))
+
+(defun s3-manager-view ()
+  "Open the object at point in a read-only buffer."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (let ((entry (s3-manager--entry-at-point)))
+    (unless (and (s3-manager-entry-p entry)
+                 (eq (s3-manager-entry-type entry) 'object))
+      (user-error "Point is not on an object"))
+    (let ((size (or (s3-manager-entry-size entry) 0)))
+      (when (> size s3-manager-view-max-size)
+        (user-error
+         "%s"
+         (substitute-command-keys
+          (format "%s is %s -- too large to open; \\[s3-manager-get] downloads it"
+                  (s3-manager-entry-display-name entry)
+                  (s3-manager--format-size size)))))
+      (let* ((key (s3-manager-entry-key entry))
+             (uri (s3-manager--s3-uri key))
+             (destination (s3-manager--view-destination entry)))
+        (s3-manager--transfer
+         (list "s3" "cp" uri destination "--progress-frequency" "1")
+         (format "opening %s" key)
+         (lambda () (s3-manager--display-view destination uri)))))))
+
 
 ;;;; Marks
 ;;
@@ -1708,9 +1790,10 @@ input."
     (setq s3-manager--transfer-status nil))
   (force-mode-line-update))
 
-(defun s3-manager--transfer (args description)
+(defun s3-manager--transfer (args description &optional on-done)
   "Run the transfer ARGS, reporting progress in the current buffer.
-DESCRIPTION names the operation in messages and error reports."
+DESCRIPTION names the operation in messages and error reports.
+ON-DONE, when given, is called with no arguments after it succeeds."
   (cl-incf s3-manager--transfers)
   (setq s3-manager--transfer-status "starting")
   (force-mode-line-update)
@@ -1734,7 +1817,8 @@ DESCRIPTION names the operation in messages and error reports."
                   (force-mode-line-update))
    :on-success (lambda (_output)
                  (s3-manager--transfer-finished)
-                 (message "S3: %s -- done" description))
+                 (message "S3: %s -- done" description)
+                 (when on-done (funcall on-done)))
    :on-error (lambda (err)
                (s3-manager--transfer-finished)
                (s3-manager--report-error err description))))

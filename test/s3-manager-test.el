@@ -1453,20 +1453,6 @@ equality is structural."
               (kill-buffer objects)))
         (kill-buffer buckets)))))
 
-(ert-deftest s3-manager-test-open-an-object-is-not-implemented ()
-  "RET on an object must say so rather than doing something surprising."
-  (with-temp-buffer
-    (s3-manager-mode)
-    (setq s3-manager--bucket "media" s3-manager--prefix "")
-    (setq tabulated-list-format s3-manager--object-list-format)
-    (tabulated-list-init-header)
-    (s3-manager--render-objects
-     (s3-manager-test--json "list-objects-root.json"))
-    (s3-manager--goto-entry
-     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
-                      s3-manager--entries)))
-    (should-error (s3-manager-open) :type 'user-error)))
-
 (ert-deftest s3-manager-test-entry-at-point-refuses-empty-rows ()
   (with-temp-buffer
     (s3-manager-mode)
@@ -2303,6 +2289,148 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "U") #'s3-manager-unmark-all))
   (should (eq (keymap-lookup s3-manager-mode-map "x") #'s3-manager-execute))
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
+
+
+;;;; Viewing
+
+(ert-deftest s3-manager-test-view-file-name-cannot-escape ()
+  "S3 keys may be or contain \"..\", which must not name a parent directory.
+
+Building a temporary path from a key directly lets one escape the
+directory it is meant to live in: `(expand-file-name \"../../etc/passwd\"
+\"/tmp/root/\")' is \"/etc/passwd\"."
+  (dolist (case '(("README.md" . "README.md")
+                  ("a.tar.gz" . "a.tar.gz")
+                  (".." . "s3-object")
+                  ("." . "s3-object")
+                  ("" . "s3-object")))
+    (let ((entry (s3-manager-entry--create
+                  :type 'object :key "k" :display-name (car case))))
+      (should (equal (s3-manager--view-file-name entry) (cdr case)))))
+  ;; Only the leaf is taken, so a separator in the name cannot reach past
+  ;; the view directory: "a/../b" becomes the plain name "b".
+  (let* ((entry (s3-manager-entry--create
+                 :type 'object :key "k" :display-name "a/../b"))
+         (name (s3-manager--view-file-name entry)))
+    (should (equal name "b"))
+    (should (equal (expand-file-name name "/tmp/root/") "/tmp/root/b"))))
+
+(ert-deftest s3-manager-test-view-destination-is-inside-its-own-directory ()
+  (let* ((entry (s3-manager-entry--create
+                 :type 'object :key "x/README.md" :display-name "README.md"))
+         (path (s3-manager--view-destination entry))
+         (directory (file-name-directory path)))
+    (unwind-protect
+        (progn
+          (should (equal (file-name-nondirectory path) "README.md"))
+          (should (file-directory-p directory))
+          ;; Nothing above the per-view directory is named.
+          (should (equal path (expand-file-name "README.md" directory))))
+      (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest s3-manager-test-view-refuses-large-objects ()
+  "RET is the most-pressed key and must never be unbounded."
+  (s3-manager-test--in-many-buffer
+    (let ((s3-manager-view-max-size 5))
+      (s3-manager--goto-entry
+       (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                        s3-manager--entries)))
+      ;; a.txt is 10 bytes in the fixture, over the 5-byte limit here.
+      (should-error (s3-manager-view) :type 'user-error)
+      (should (zerop s3-manager--transfers)))))
+
+(ert-deftest s3-manager-test-view-refuses-a-prefix ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry (s3-manager--directory-entry "sub/" ""))
+    (should-error (s3-manager-view) :type 'user-error)))
+
+(ert-deftest s3-manager-test-view-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-view) :type 'user-error)))
+
+(ert-deftest s3-manager-test-view-downloads-and-opens-read-only ()
+  "The object is fetched to a private copy and shown read-only."
+  (let ((argv-file (make-temp-file "s3-view-argv"))
+        (view-buffer nil))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager-test--goto-object)
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _) (setq view-buffer buffer)))
+                    ((symbol-function 'message) #'ignore))
+            ;; The double writes the object's contents to the destination
+            ;; path, which is the last positional argument.
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (cl-letf* ((original (symbol-function 's3-manager--transfer))
+                         ((symbol-function 's3-manager--transfer)
+                          (lambda (args description &optional on-done)
+                            ;; Create the file the real CLI would have made.
+                            (write-region "hello from s3\n" nil (nth 3 args)
+                                          nil 'silent)
+                            (funcall original args description on-done))))
+                (s3-manager-view)
+                (should (s3-manager-test--wait
+                         (lambda () (buffer-live-p view-buffer)))))))
+          (let ((argv (car (s3-manager-test--argv-records argv-file))))
+            (should (member "s3://media/a.txt" argv))
+            (should (member "cp" argv)))
+          (with-current-buffer view-buffer
+            (should buffer-read-only)
+            (should (equal (buffer-string) "hello from s3\n"))
+            (should (equal (buffer-name) "a.txt"))
+            (should (string-match-p "s3://media/a\\.txt" header-line-format))
+            (should s3-manager--view-file)))
+      (when (buffer-live-p view-buffer) (kill-buffer view-buffer))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-view-picks-a-major-mode-from-the-name ()
+  "Visiting a real file is what buys normal mode detection.
+The object keeps its own name, so `auto-mode-alist' applies as usual."
+  (let* ((entry (s3-manager-entry--create
+                 :type 'object :key "lib/thing.el" :display-name "thing.el"))
+         (path (s3-manager--view-destination entry))
+         (directory (file-name-directory path))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (write-region ";;; thing.el --- x\n(defun thing () nil)\n"
+                        nil path nil 'silent)
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (b &rest _) (setq buffer b))))
+            (s3-manager--display-view path "s3://media/lib/thing.el"))
+          (with-current-buffer buffer
+            (should (eq major-mode 'emacs-lisp-mode))
+            (should buffer-read-only)))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest s3-manager-test-view-copy-is-removed-with-the-buffer ()
+  "Downloaded object data must not be left lying in the temp directory."
+  (let* ((entry (s3-manager-entry--create
+                 :type 'object :key "a.txt" :display-name "a.txt"))
+         (path (s3-manager--view-destination entry))
+         (directory (file-name-directory path)))
+    (write-region "data\n" nil path nil 'silent)
+    (should (file-exists-p path))
+    (let ((buffer (find-file-noselect path)))
+      (with-current-buffer buffer
+        (setq s3-manager--view-file path)
+        (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t))
+      (kill-buffer buffer))
+    (should-not (file-exists-p path))
+    (should-not (file-directory-p directory))))
+
+(ert-deftest s3-manager-test-ret-on-an-object-views-it ()
+  "RET dispatches to viewing rather than reporting it unimplemented."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (let ((called nil))
+      (cl-letf (((symbol-function 's3-manager-view)
+                 (lambda () (setq called t))))
+        (s3-manager-open))
+      (should called))))
 
 (provide 's3-manager-test)
 
