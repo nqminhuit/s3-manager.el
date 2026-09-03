@@ -144,10 +144,17 @@ If editing the AWS config is not an option, override from Emacs instead:
 | `s3-manager-page-size` | `1000` | entries per listing request (`MaxKeys`) |
 | `s3-manager-download-directory` | `"~/Downloads/"` | default download target |
 | `s3-manager-view-max-size` | 10 MiB | above this, `RET` refuses and suggests `G` |
-| `s3-manager-timeout` | `120` | seconds before a CLI call is abandoned |
+| `s3-manager-timeout` | `120` | seconds before a listing or metadata call is abandoned |
+| `s3-manager-transfer-timeout` | `nil` | seconds before a *transfer* is abandoned; `nil` waits indefinitely |
 | `s3-manager-cache-max-entries` | `200` | cached listings retained |
 | `s3-manager-endpoint-alist` | `nil` | per-profile endpoint override |
 | `s3-manager-endpoint-url` | `nil` | endpoint override for all profiles |
+
+The two timeouts are separate because they measure different things. A listing
+that has not answered in two minutes is stuck; a transfer that has been running
+for two minutes may simply be large. The timer is armed for a total duration
+rather than reset by activity, so any wall-clock value would kill a healthy
+transfer for being big — hence `nil`.
 
 Listings are cached per `(profile, endpoint, bucket, prefix)`, so moving back
 up a level is instant. Nothing expires on a timer — `g` is one keystroke, which

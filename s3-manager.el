@@ -129,7 +129,27 @@ this only decides what is dropped when the cap is reached."
 
 (defcustom s3-manager-timeout 120
   "Seconds before an AWS CLI invocation is abandoned.
-Set to nil to wait indefinitely."
+Set to nil to wait indefinitely.
+
+Governs listings and other metadata calls.  Transfers use
+`s3-manager-transfer-timeout' instead; see why there."
+  :type '(choice (const :tag "No timeout" nil) integer))
+
+(defcustom s3-manager-transfer-timeout nil
+  "Seconds before a transfer is abandoned, or nil to wait indefinitely.
+
+Separate from `s3-manager-timeout' because the two measure different
+things.  A listing that has not answered in two minutes is stuck; a
+transfer that has been running for two minutes may simply be large.
+The timer in `s3-manager--aws-async\=' is armed once for a total
+duration rather than reset by activity, so any wall-clock value kills a
+healthy transfer that is merely big -- measured, with the CLI still
+running and reporting progress at the moment it was killed.
+
+nil is therefore the only correct default until there is a watchdog
+measuring silence rather than elapsed time.  The CLI\='s own connect and
+read timeouts still apply, so a transfer to a black hole does not hang
+forever."
   :type '(choice (const :tag "No timeout" nil) integer))
 
 (defconst s3-manager-minimum-cli-version "2.13.0"
@@ -1966,6 +1986,10 @@ set up in advance."
    ;; generation keeps progress reporting into the buffer that started it even
    ;; after that buffer has moved on, which is what the user wants to see.
    :parse nil
+   ;; Not `s3-manager-timeout': that deadline is measured from the start of
+   ;; the process, so a transfer big enough to outlast it is killed while
+   ;; healthy and reported as "No response after 120 seconds".
+   :timeout s3-manager-transfer-timeout
    :progress-stream 'stdout
    ;; No --quiet and no --only-show-errors: both suppress the progress this
    ;; depends on.  --progress-frequency throttles it at the source.

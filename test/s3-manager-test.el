@@ -2045,6 +2045,71 @@ A transfer is deliberately not registered in `s3-manager--process', so
           ;; It ran to completion despite the cancel.
           (should (null s3-manager--transfer-status)))))))
 
+(ert-deftest s3-manager-test-transfer-outlives-the-listing-timeout ()
+  "A transfer must not be killed for being large.
+
+`s3-manager-timeout' arms a timer for a total duration, not for a period
+of silence, so before `s3-manager-transfer-timeout' existed any transfer
+running longer than it was deleted mid-flight and reported as
+`s3-manager-timeout-error' -- while the CLI was alive and still writing
+progress.  Here the listing timeout is one second and the transfer takes
+three."
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t)))
+        (reported nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination))
+                ((symbol-function 's3-manager--report-error)
+                 (lambda (err &rest _) (push (car err) reported))))
+        (s3-manager-test--with-fake-aws (:stdout "" :delay "3")
+          (let ((s3-manager-timeout 1)
+                (s3-manager-transfer-timeout nil))
+            (s3-manager-get)
+            (should (s3-manager-test--wait
+                     (lambda () (zerop s3-manager--transfers))
+                     10)))))
+      (should (null reported))
+      (should (null s3-manager--transfer-status)))))
+
+(ert-deftest s3-manager-test-transfer-timeout-is-honoured-when-set ()
+  "Setting `s3-manager-transfer-timeout' must still bound a transfer.
+The default is nil, but nil must be a choice rather than the only
+behaviour -- otherwise the fix above is indistinguishable from deleting
+the timeout code."
+  (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t)))
+        (reported nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (&rest _) destination))
+                ((symbol-function 's3-manager--report-error)
+                 (lambda (err &rest _) (push (car err) reported))))
+        (s3-manager-test--with-fake-aws (:stdout "" :delay "3")
+          (let ((s3-manager-transfer-timeout 1))
+            (s3-manager-get)
+            (should (s3-manager-test--wait
+                     (lambda () reported) 10)))))
+      (should (equal reported '(s3-manager-timeout-error))))))
+
+(ert-deftest s3-manager-test-listings-still-time-out ()
+  "The transfer fix must not disable the timeout everywhere.
+A listing that never answers is stuck, and `s3-manager-timeout' is what
+releases it."
+  (let ((reported nil))
+    (s3-manager-test--with-fake-aws (:stdout "" :delay "3")
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--profile "production"
+              s3-manager--bucket "media"
+              s3-manager--prefix "")
+        (let ((s3-manager-timeout 1))
+          (cl-letf (((symbol-function 's3-manager--report-error)
+                     (lambda (err &rest _) (push (car err) reported))))
+            (s3-manager--fetch-listing)
+            (should (s3-manager-test--wait (lambda () reported) 10))))
+        (should (equal reported '(s3-manager-timeout-error)))))))
+
 (ert-deftest s3-manager-test-transfer-progress-reaches-the-mode-line ()
   (let ((destination (expand-file-name "x" (make-temp-file "s3dl" t)))
         (seen nil))
