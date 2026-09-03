@@ -1,0 +1,12 @@
+{
+    "Contents": [
+        {"Key": "a.txt", "LastModified": "2026-09-01T00:00:00+00:00", "Size": 10, "StorageClass": "STANDARD"},
+        {"Key": "b.txt", "LastModified": "2026-09-01T00:00:00+00:00", "Size": 20, "StorageClass": "STANDARD"},
+        {"Key": "c.txt", "LastModified": "2026-09-01T00:00:00+00:00", "Size": 30, "StorageClass": "STANDARD"}
+    ],
+    "CommonPrefixes": [
+        {"Prefix": "sub/"}
+    ],
+    "Prefix": "",
+    "RequestCharged": null
+}

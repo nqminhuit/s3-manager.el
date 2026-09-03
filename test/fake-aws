@@ -13,8 +13,12 @@
 # Arguments are echoed to FAKE_AWS_ARGV_FILE when set, so argv construction can
 # be asserted against a real subprocess invocation.
 
+# Appended, one record per invocation, records separated by a blank line.
+# Overwriting would lose the command under test whenever it triggers a
+# follow-up call -- a delete refreshing its listing, for instance.
 if [ -n "$FAKE_AWS_ARGV_FILE" ]; then
-    for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_AWS_ARGV_FILE"
+    { for a in "$@"; do printf '%s\n' "$a"; done; printf '\n'; } \
+        >> "$FAKE_AWS_ARGV_FILE"
 fi
 
 # Spawn a grandchild that inherits stderr and outlives us, so the stderr pipe

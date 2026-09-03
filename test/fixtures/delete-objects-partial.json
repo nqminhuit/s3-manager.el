@@ -1,0 +1,14 @@
+{
+    "Deleted": [
+        {"Key": "a.txt"},
+        {"Key": "b.txt"}
+    ],
+    "Errors": [
+        {
+            "Key": "c.txt",
+            "Code": "AccessDenied",
+            "Message": "Access Denied"
+        }
+    ],
+    "RequestCharged": null
+}

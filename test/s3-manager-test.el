@@ -46,6 +46,24 @@
     (insert (s3-manager-test--fixture name))
     (s3-manager--parse-json (current-buffer))))
 
+(defun s3-manager-test--argv-records (file)
+  "Return the argument vectors the test double recorded in FILE.
+One list per invocation, in order.  Commands that trigger a follow-up
+call -- a delete refreshing its listing -- produce more than one."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (mapcar (lambda (record) (split-string record "\n" t))
+            (split-string (buffer-string) "\n\n" t))))
+
+(defun s3-manager-test--wait-for-argv (file count)
+  "Wait until FILE holds at least COUNT recorded invocations, and return them.
+Waiting on `s3-manager--status' does not work for commands that start
+from an idle buffer: the status is already nil, so the predicate is
+satisfied before the process has run at all."
+  (s3-manager-test--wait
+   (lambda () (>= (length (s3-manager-test--argv-records file)) count)))
+  (s3-manager-test--argv-records file))
+
 (defun s3-manager-test--scratch-buffers ()
   "Return the transport's scratch buffers that are currently alive."
   (seq-filter (lambda (b)
@@ -1961,6 +1979,308 @@ A transfer is deliberately not registered in `s3-manager--process', so
   (should (eq (keymap-lookup s3-manager-mode-map "G") #'s3-manager-get))
   (should (eq (keymap-lookup s3-manager-mode-map "R")
               #'s3-manager-get-recursive)))
+
+
+;;;; Marks
+
+(defmacro s3-manager-test--in-many-buffer (&rest body)
+  "Run BODY in a buffer showing three objects and one prefix."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (s3-manager-mode)
+     (setq s3-manager--profile "production"
+           s3-manager--bucket "media"
+           s3-manager--prefix "")
+     (setq tabulated-list-format s3-manager--object-list-format)
+     (tabulated-list-init-header)
+     (let ((s3-manager--cache (make-hash-table :test #'equal)))
+       (s3-manager--render-objects
+        (s3-manager-test--json "list-objects-many.json")))
+     ,@body))
+
+(defun s3-manager-test--mark-line-chars ()
+  "Return the mark column of every printed row, top to bottom."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((chars nil))
+      (while (not (eobp))
+        (push (buffer-substring (line-beginning-position)
+                                (+ (line-beginning-position) 1))
+              chars)
+        (forward-line 1))
+      (nreverse chars))))
+
+(ert-deftest s3-manager-test-mark-and-unmark ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (should (equal (s3-manager--marked-keys) '("a.txt")))
+    ;; `d' advances, Dired-style, so a second one marks the next row.
+    (s3-manager-mark-delete)
+    (should (equal (s3-manager--marked-keys) '("a.txt" "b.txt")))
+    ;; And `u' removes going back over them.
+    (goto-char (point-min))
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "a.txt"))
+                      s3-manager--entries)))
+    (s3-manager-unmark)
+    (should (equal (s3-manager--marked-keys) '("b.txt")))))
+
+(ert-deftest s3-manager-test-marks-appear-in-the-buffer ()
+  "The reserved padding column is where the tag goes."
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "b.txt"))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (should (member "D" (s3-manager-test--mark-line-chars)))
+    (should (= 1 (seq-count (lambda (c) (equal c "D"))
+                            (s3-manager-test--mark-line-chars))))))
+
+(ert-deftest s3-manager-test-marks-survive-a-repaint ()
+  "`tabulated-list-print' erases the buffer, so marks must be re-applied.
+
+Its UPDATE argument is no help: it leaves stale tags on unchanged rows
+rather than preserving live ones."
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "b.txt"))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (should (member "D" (s3-manager-test--mark-line-chars)))
+    (s3-manager--print-list)
+    (should (equal (s3-manager--marked-keys) '("b.txt")))
+    (should (member "D" (s3-manager-test--mark-line-chars)))))
+
+(ert-deftest s3-manager-test-marks-survive-a-re-sort ()
+  "Marks are keyed by S3 key, not by line, so sorting cannot move them."
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "c.txt"))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (setq tabulated-list-sort-key '("Size" . t))
+    (s3-manager--print-list)
+    (should (equal (s3-manager--marked-keys) '("c.txt")))
+    (should (member "D" (s3-manager-test--mark-line-chars)))))
+
+(ert-deftest s3-manager-test-unmark-all ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (s3-manager-mark-delete)
+    (should (= 2 (length (s3-manager--marked-keys))))
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (s3-manager-unmark-all))
+    (should (null (s3-manager--marked-keys)))
+    (should-not (member "D" (s3-manager-test--mark-line-chars)))))
+
+(ert-deftest s3-manager-test-prefixes-cannot-be-marked ()
+  "Batch-deleting several prefixes behind one confirmation is too blunt."
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry (s3-manager--directory-entry "sub/" ""))
+    (should-error (s3-manager-mark-delete) :type 'user-error)
+    (should (null (s3-manager--marked-keys)))))
+
+(ert-deftest s3-manager-test-marks-are-dropped-when-the-prefix-changes ()
+  "Marks name keys in one listing.
+
+Carried into another prefix they would be invisible yet still acted on
+by `x', which would delete objects the user cannot see."
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (should (= 1 (hash-table-count s3-manager--marks)))
+    (s3-manager--set-prefix "sub/")
+    (should (zerop (hash-table-count s3-manager--marks)))
+    ;; Re-showing the same prefix keeps them, as `g' should.
+    (s3-manager--set-prefix "sub/")
+    (should (zerop (hash-table-count s3-manager--marks)))))
+
+
+;;;; Deletion
+
+(ert-deftest s3-manager-test-delete-payload ()
+  "The payload is JSON in one argv element, so keys need no escaping by us."
+  (let ((payload (s3-manager--delete-payload '("a/b.txt" "we\"ird\nkey"))))
+    (should (equal payload
+                   "{\"Objects\":[{\"Key\":\"a/b.txt\"},{\"Key\":\"we\\\"ird\\nkey\"}]}"))))
+
+(ert-deftest s3-manager-test-execute-argv ()
+  (let ((argv-file (make-temp-file "s3-del-argv")))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager--goto-entry
+           (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "a.txt"))
+                            s3-manager--entries)))
+          (s3-manager-mark-delete)
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws
+                (:stdout (s3-manager-test--fixture "delete-objects-ok.json")
+                 :argv-file argv-file)
+              (s3-manager-execute)
+              (should (s3-manager-test--wait
+                       (lambda ()
+                         (zerop (hash-table-count s3-manager--marks)))))))
+          (let ((argv (car (s3-manager-test--argv-records argv-file))))
+            (should (equal (seq-take argv 8)
+                           '("--profile" "production"
+                             "--no-cli-pager" "--no-cli-auto-prompt"
+                             "s3api" "delete-objects" "--bucket" "media")))
+            (should (equal (cadr (member "--delete" argv))
+                           "{\"Objects\":[{\"Key\":\"a.txt\"}]}"))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-execute-refuses-without-marks ()
+  (s3-manager-test--in-many-buffer
+    (should-error (s3-manager-execute) :type 'user-error)))
+
+(ert-deftest s3-manager-test-execute-aborts-on-refusal ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                      s3-manager--entries)))
+    (s3-manager-mark-delete)
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+      (should-error (s3-manager-execute) :type 'user-error))
+    ;; The marks are still there, so the user can reconsider.
+    (should (= 1 (length (s3-manager--marked-keys))))))
+
+(ert-deftest s3-manager-test-partial-delete-is-not-reported-as-success ()
+  "`delete-objects' exits 0 even when individual keys fail.
+
+The Errors array has to be read on the success path; ignoring it would
+report a partial deletion as a complete one."
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*"))
+  (let ((messages nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager--goto-entry
+       (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                        s3-manager--entries)))
+      (s3-manager-mark-delete)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (s3-manager-test--with-fake-aws
+            (:stdout (s3-manager-test--fixture "delete-objects-partial.json"))
+          (s3-manager-execute)
+          (should (s3-manager-test--wait
+                   (lambda () (seq-find (lambda (m) (string-match-p "failed" m))
+                                        messages)))))))
+    (should (seq-find (lambda (m) (string-match-p "deleted 2, 1 failed" m))
+                      messages))
+    (should (get-buffer "*S3 Manager Error*"))
+    (with-current-buffer "*S3 Manager Error*"
+      (should (string-match-p "AccessDenied" (buffer-string)))
+      (should (string-match-p "c\\.txt" (buffer-string)))))
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*")))
+
+(ert-deftest s3-manager-test-execute-chunks-at-1000 ()
+  "delete-objects takes at most 1000 keys per call."
+  (let ((keys (mapcar (lambda (i) (format "k%d" i)) (number-sequence 1 2500))))
+    (let ((chunks (seq-partition keys 1000)))
+      (should (= 3 (length chunks)))
+      (should (= 1000 (length (nth 0 chunks))))
+      (should (= 1000 (length (nth 1 chunks))))
+      (should (= 500 (length (nth 2 chunks)))))))
+
+(ert-deftest s3-manager-test-delete-object-argv-and-confirmation ()
+  (let ((argv-file (make-temp-file "s3-del1-argv"))
+        (prompts nil))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager--goto-entry
+           (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) "b.txt"))
+                            s3-manager--entries)))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (prompt) (push prompt prompts) t))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws (:stdout "{}" :argv-file argv-file)
+              (s3-manager-delete)
+              (should (= 2 (length (s3-manager-test--wait-for-argv
+                                    argv-file 2))))))
+          ;; The prompt names the full URI, not a bare key.
+          (should (seq-find (lambda (p) (string-match-p "s3://media/b\\.txt" p))
+                            prompts))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (equal (car records)
+                           '("--profile" "production"
+                             "--no-cli-pager" "--no-cli-auto-prompt"
+                             "s3api" "delete-object"
+                             "--bucket" "media" "--key" "b.txt"
+                             "--output" "json")))
+            ;; And the listing was re-read afterwards.
+            (should (member "list-objects-v2" (cadr records)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-recursive-delete-demands-a-typed-yes ()
+  "The one unbounded destructive operation must not ride on one keystroke."
+  (let ((argv-file (make-temp-file "s3-rm-argv"))
+        (used-yes-or-no nil))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager--goto-entry (s3-manager--directory-entry "sub/" ""))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (&rest _) (error "y-or-n-p is too weak here")))
+                    ((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (setq used-yes-or-no prompt) t))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-delete)
+              (should (s3-manager-test--wait-for-argv argv-file 1))))
+          (should used-yes-or-no)
+          (should (string-match-p "Recursively delete ALL" used-yes-or-no))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (equal (car records)
+                           '("--profile" "production"
+                             "--no-cli-pager" "--no-cli-auto-prompt"
+                             "s3" "rm" "s3://media/sub/"
+                             "--recursive" "--only-show-errors")))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-recursive-delete-abort ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager--goto-entry (s3-manager--directory-entry "sub/" ""))
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+      (should-error (s3-manager-delete) :type 'user-error))))
+
+(ert-deftest s3-manager-test-recursive-delete-purges-the-cache-below ()
+  "Everything at or under the deleted prefix must be forgotten."
+  (let ((s3-manager--cache (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "media"
+            s3-manager--prefix "")
+      (dolist (prefix '("" "sub/" "sub/deep/" "other/"))
+        (s3-manager--cache-put (list "p" nil "media" prefix) nil nil nil))
+      (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
+        (s3-manager--after-delete "sub/"))
+      (should (null (s3-manager--cache-get '("p" nil "media" "sub/"))))
+      (should (null (s3-manager--cache-get '("p" nil "media" "sub/deep/"))))
+      (should (s3-manager--cache-get '("p" nil "media" "other/")))
+      (should (s3-manager--cache-get '("p" nil "media" ""))))))
+
+(ert-deftest s3-manager-test-delete-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-delete) :type 'user-error)
+    (should-error (s3-manager-execute) :type 'user-error)))
+
+(ert-deftest s3-manager-test-delete-keys-are-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "d") #'s3-manager-mark-delete))
+  (should (eq (keymap-lookup s3-manager-mode-map "u") #'s3-manager-unmark))
+  (should (eq (keymap-lookup s3-manager-mode-map "U") #'s3-manager-unmark-all))
+  (should (eq (keymap-lookup s3-manager-mode-map "x") #'s3-manager-execute))
+  (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
 
 (provide 's3-manager-test)
 
