@@ -33,7 +33,8 @@
 ;;   M-x s3-manager        choose a profile, list its buckets
 ;;   C-u M-x s3-manager    re-read the profile list first
 ;;
-;; In an S3 buffer, `g' refreshes and `q' buries it.
+;; In an S3 buffer: RET enters a bucket or prefix, `^' goes up a level,
+;; `g' refreshes and `q' buries it.
 ;;
 ;; Two properties are treated as non-negotiable throughout:
 ;;
@@ -48,9 +49,8 @@
 ;; key in ~/.aws/config, which silently sends every request to AWS instead of
 ;; the configured S3-compatible endpoint.
 ;;
-;; Object browsing, transfers and deletion are not implemented yet.  See
-;; doc/SPEC-v0.1.0.md for the full design; section references in the code
-;; below point into it.
+;; Transfers and deletion are not implemented yet.  See doc/SPEC-v0.1.0.md
+;; for the full design; section references in the code below point into it.
 
 ;;; Code:
 
@@ -87,6 +87,17 @@ When nil, the endpoint configured for the profile is used."
   "Alist mapping profile name to endpoint URL.
 Takes precedence over `s3-manager-endpoint-url' for matching profiles."
   :type '(alist :key-type string :value-type string))
+
+(defcustom s3-manager-page-size 1000
+  "Number of entries fetched per listing request.
+
+This is passed as both `--max-items' and `--page-size', and the two must
+stay equal.  Given only `--max-items', the CLI hands back a resume token
+containing a client-side offset, so continuing a listing re-fetches
+everything already seen and discards it -- quadratic in the number of
+entries.  Equal values make the cut land on a page boundary, which
+yields a genuine server-side cursor instead."
+  :type 'integer)
 
 (defcustom s3-manager-timeout 120
   "Seconds before an AWS CLI invocation is abandoned.
@@ -741,6 +752,96 @@ the most recently chosen profile, so repeat use is a single RET."
 (defvar-local s3-manager--status nil
   "Request state of this buffer: nil, `loading' or `error'.")
 
+(defvar-local s3-manager--entries nil
+  "List of `s3-manager-entry' for the current prefix, in arrival order.
+The source of truth; `tabulated-list-entries' is derived from it.")
+
+(defvar-local s3-manager--next-token nil
+  "Opaque continuation token for the next page, or nil when complete.")
+
+(defvar-local s3-manager--history nil
+  "Stack of (PREFIX . ENTRY) recording the way down to here.
+PREFIX is the prefix being left and ENTRY is the row point was on, so
+`s3-manager-up' can restore both.")
+
+(defvar-local s3-manager--restore-target nil
+  "Entry to put point on once the pending listing arrives.")
+
+
+;;;; Data model
+
+(cl-defstruct (s3-manager-entry (:constructor s3-manager-entry--create)
+                                (:copier nil))
+  "One row of an S3 listing: a prefix or an object.
+
+IMPORTANT: instances are used directly as `tabulated-list' entry ids and
+are compared with `equal', which on records is structural rather than
+identity-based.  Every slot must therefore be a pure function of the S3
+response.  Never add mutable state -- a mark, a download progress
+figure, a fetch timestamp -- because changing any slot changes the
+entry's identity, and point restoration across a refresh silently stops
+working.  Marks live in a separate table for exactly this reason.
+
+Restoring point after `s3-manager-up' relies on a synthesized directory
+entry comparing `equal' to the real one, so directory entries must leave
+SIZE, LAST-MODIFIED and STORAGE-CLASS nil."
+  type            ; `directory' or `object'
+  key             ; full S3 key; a directory's key ends in "/"
+  display-name    ; KEY with the parent prefix removed
+  size            ; integer bytes, or nil for a directory
+  last-modified   ; ISO-8601 string, or nil for a directory
+  storage-class)  ; string, or nil
+
+(defun s3-manager--strip-prefix (key prefix)
+  "Return KEY with PREFIX removed from its front."
+  (if (and prefix (not (string-empty-p prefix)) (string-prefix-p prefix key))
+      (substring key (length prefix))
+    key))
+
+(defun s3-manager--parent-prefix (prefix)
+  "Return the prefix one level above PREFIX, or the empty string."
+  (if (string-empty-p prefix)
+      ""
+    ;; Drop the trailing slash first, then everything after the last one.
+    (let ((trimmed (substring prefix 0 (1- (length prefix)))))
+      (if (string-match "\\`\\(.*/\\)[^/]*\\'" trimmed)
+          (match-string 1 trimmed)
+        ""))))
+
+(defun s3-manager--directory-entry (key prefix)
+  "Return a directory entry for KEY as displayed under PREFIX.
+Used both when parsing a listing and when synthesizing the entry to put
+point on after moving up a level; the two must stay identical, since
+they are compared with `equal'."
+  (s3-manager-entry--create
+   :type 'directory
+   :key key
+   :display-name (s3-manager--strip-prefix key prefix)))
+
+(defun s3-manager--entries-from-listing (response prefix)
+  "Convert a `list-objects-v2' RESPONSE taken at PREFIX into entries.
+
+`CommonPrefixes' and `Contents' are both absent rather than empty when
+they do not apply, so neither key may be assumed to exist."
+  (append
+   (mapcar (lambda (common)
+             (s3-manager--directory-entry (alist-get 'Prefix common) prefix))
+           (alist-get 'CommonPrefixes response))
+   (mapcar
+    (lambda (object)
+      (s3-manager-entry--create
+       :type 'object
+       :key (alist-get 'Key object)
+       :display-name (s3-manager--strip-prefix (alist-get 'Key object) prefix)
+       :size (alist-get 'Size object)
+       :last-modified (alist-get 'LastModified object)
+       :storage-class (alist-get 'StorageClass object)))
+    ;; A zero-byte "directory marker" object -- created by the S3 console and
+    ;; by several S3-compatible servers -- has a key equal to the prefix
+    ;; itself.  Left in, every directory shows a phantom blank-named file.
+    (seq-remove (lambda (object) (equal (alist-get 'Key object) prefix))
+                (alist-get 'Contents response)))))
+
 
 ;;;; Rendering helpers
 
@@ -784,12 +885,15 @@ in the header line rather than here."
              ('loading "loading…")
              ('error "failed — see *S3 Manager Error*")
              (_ (let ((n (length tabulated-list-entries)))
-                  (if (zerop n)
-                      "empty"
-                    (format "%d %s" n
-                            (if s3-manager--bucket
-                                (if (= n 1) "entry" "entries")
-                              (if (= n 1) "bucket" "buckets"))))))))))
+                  (concat
+                   (if (zerop n)
+                       "empty"
+                     (format "%d %s" n
+                             (if s3-manager--bucket
+                                 (if (= n 1) "entry" "entries")
+                               (if (= n 1) "bucket" "buckets"))))
+                   ;; The listing was capped by `s3-manager-page-size'.
+                   (when s3-manager--next-token " (truncated)"))))))))
 
 (defun s3-manager--set-status (status)
   "Set this buffer's request STATUS and repaint the indicators."
@@ -802,7 +906,11 @@ in the header line rather than here."
 
 (defvar-keymap s3-manager-mode-map
   :doc "Keymap for `s3-manager-mode'."
-  :parent tabulated-list-mode-map)
+  :parent tabulated-list-mode-map
+  ;; `g' and `q' arrive from `special-mode' via the replaced
+  ;; `revert-buffer-function', so they are deliberately not rebound here.
+  "RET" #'s3-manager-open
+  "^" #'s3-manager-up)
 
 (define-derived-mode s3-manager-mode tabulated-list-mode "S3"
   "Major mode for browsing S3 buckets and objects.
@@ -836,6 +944,16 @@ in the header line rather than here."
   "Column layout for the bucket list.
 `Created' is an ISO-8601 date, so it sorts correctly as a string.")
 
+(defun s3-manager--print-list ()
+  "Print the list, restoring point to `s3-manager--restore-target' if set.
+`tabulated-list-print' REMEMBER-POS matches the id already at point,
+which is useless when the whole listing is being replaced, so moving up
+a level supplies the row to land on explicitly."
+  (let ((target s3-manager--restore-target))
+    (setq s3-manager--restore-target nil)
+    (tabulated-list-print (null target))
+    (when target (s3-manager--goto-entry target))))
+
 (defun s3-manager--render-buckets (response)
   "Render the `s3api list-buckets' RESPONSE into the current buffer."
   (setq tabulated-list-entries
@@ -850,31 +968,39 @@ in the header line rather than here."
                                    (alist-get 'CreationDate bucket))))))
                 (alist-get 'Buckets response)))
   (s3-manager--set-status nil)
-  (tabulated-list-print t)
+  (s3-manager--print-list)
   (s3-manager--update-header-line))
 
-(defun s3-manager--reload ()
-  "Re-fetch whatever the current buffer is showing."
+(defun s3-manager--reload (&optional target)
+  "Re-fetch whatever the current buffer is showing.
+TARGET, when given, is the entry to put point on once it arrives."
   (unless (derived-mode-p 's3-manager-mode)
     (user-error "Not an S3 Manager buffer"))
+  (setq s3-manager--restore-target target)
   ;; Abandon any request still in flight; this also advances the generation,
   ;; so a response already on its way is dropped rather than rendered over
   ;; the newer one.
   (s3-manager--cancel)
   (s3-manager--set-status 'loading)
-  (let ((origin (current-buffer))
-        (generation s3-manager--generation))
+  (let* ((origin (current-buffer))
+         (generation s3-manager--generation)
+         (objects s3-manager--bucket)
+         (context (if objects "list-objects-v2" "list-buckets")))
     (s3-manager--aws-async
-     '("s3api" "list-buckets" "--output" "json")
+     (if objects
+         (s3-manager--list-objects-args)
+       '("s3api" "list-buckets" "--output" "json"))
      :profile s3-manager--profile
      :buffer origin
      :generation generation
      :register t
-     :name "s3-buckets"
-     :on-success #'s3-manager--render-buckets
+     :name (if objects "s3-objects" "s3-buckets")
+     :on-success (if objects
+                     #'s3-manager--render-objects
+                   #'s3-manager--render-buckets)
      :on-error (lambda (err)
                  (s3-manager--set-status 'error)
-                 (s3-manager--report-error err "list-buckets")))))
+                 (s3-manager--report-error err context)))))
 
 (defun s3-manager--revert (&optional _ignore-auto _noconfirm _preserve-modes)
   "Re-fetch the listing.  The `revert-buffer-function' for this mode.
@@ -886,8 +1012,9 @@ Accepts and ignores the three arguments `revert-buffer' supplies."
   (interactive)
   (s3-manager--reload))
 
-(defun s3-manager--bucket-buffer (profile)
-  "Return a bucket-list buffer for PROFILE, with a fetch under way."
+(defun s3-manager--bucket-buffer (profile &optional target)
+  "Return a bucket-list buffer for PROFILE, with a fetch under way.
+TARGET, when given, is the bucket name to put point on once it lands."
   (let ((buffer (get-buffer-create (s3-manager--buffer-name profile))))
     (with-current-buffer buffer
       (unless (derived-mode-p 's3-manager-mode)
@@ -898,8 +1025,178 @@ Accepts and ignores the three arguments `revert-buffer' supplies."
       (setq tabulated-list-format s3-manager--bucket-list-format
             tabulated-list-sort-key '("Name" . nil))
       (tabulated-list-init-header)
-      (s3-manager--reload))
+      (s3-manager--reload target))
     buffer))
+
+;;;; Object listing
+
+(defface s3-manager-directory
+  '((t :inherit font-lock-function-name-face))
+  "Face for prefixes, which stand in for directories, in an S3 listing.")
+
+(defconst s3-manager--object-list-format
+  [("Name" 44 s3-manager--sort-by-name)
+   ("Size" 10 s3-manager--sort-by-size :right-align t)
+   ("Modified" 12 s3-manager--sort-by-time)]
+  "Column layout for the object browser.")
+
+(defun s3-manager--format-size (size)
+  "Return SIZE in bytes as a readable string, or \"-\" when absent."
+  (if (integerp size)
+      (file-size-human-readable size 'iec " ")
+    "-"))
+
+(defun s3-manager--directory-rank (entry)
+  "Return a sort rank for ENTRY placing directories before objects."
+  (if (eq (s3-manager-entry-type entry) 'directory) 0 1))
+
+(defun s3-manager--sort-by (a b accessor predicate)
+  "Order rows A and B by ACCESSOR under PREDICATE, directories first.
+
+A and B are whole `tabulated-list-entries' elements.  Only their ids are
+read: with the UPDATE argument `tabulated-list-print' synthesizes the
+rest, and the displayed strings would sort wrongly anyway -- \"9 B\"
+comes after \"1.8 GiB\" lexicographically."
+  (let* ((ea (car a))
+         (eb (car b))
+         (ra (s3-manager--directory-rank ea))
+         (rb (s3-manager--directory-rank eb)))
+    (if (/= ra rb)
+        (< ra rb)
+      (funcall predicate (funcall accessor ea) (funcall accessor eb)))))
+
+(defun s3-manager--sort-by-name (a b)
+  "Order rows A and B by name, directories first."
+  (s3-manager--sort-by a b #'s3-manager-entry-display-name #'string<))
+
+(defun s3-manager--sort-by-size (a b)
+  "Order rows A and B by size, directories first."
+  (s3-manager--sort-by a b
+                       (lambda (entry) (or (s3-manager-entry-size entry) -1))
+                       #'<))
+
+(defun s3-manager--sort-by-time (a b)
+  "Order rows A and B by modification time, directories first.
+The timestamps are ISO-8601, so they order correctly as strings."
+  (s3-manager--sort-by a b
+                       (lambda (entry)
+                         (or (s3-manager-entry-last-modified entry) ""))
+                       #'string<))
+
+(defun s3-manager--entry-row (entry)
+  "Return the `tabulated-list-entries' element for ENTRY."
+  (let ((directory (eq (s3-manager-entry-type entry) 'directory)))
+    (list entry
+          (vector (if directory
+                      (propertize (s3-manager-entry-display-name entry)
+                                  'face 's3-manager-directory)
+                    (s3-manager-entry-display-name entry))
+                  (if directory "-" (s3-manager--format-size
+                                     (s3-manager-entry-size entry)))
+                  (if directory "-" (s3-manager--format-date
+                                     (s3-manager-entry-last-modified entry)))))))
+
+(defun s3-manager--goto-entry (id)
+  "Put point on the row whose id is `equal' to ID."
+  (goto-char (point-min))
+  (let ((found nil))
+    (while (and (not found) (not (eobp)))
+      (if (equal id (tabulated-list-get-id))
+          (setq found t)
+        (forward-line 1)))
+    (unless found (goto-char (point-min)))))
+
+(defun s3-manager--render-objects (response)
+  "Render a `list-objects-v2' RESPONSE into the current buffer."
+  (setq s3-manager--entries
+        (s3-manager--entries-from-listing response s3-manager--prefix)
+        s3-manager--next-token (alist-get 'NextToken response))
+  (setq tabulated-list-entries
+        (mapcar #'s3-manager--entry-row s3-manager--entries))
+  (s3-manager--set-status nil)
+  (s3-manager--print-list)
+  (s3-manager--update-header-line))
+
+(defun s3-manager--list-objects-args ()
+  "Return the service arguments listing the current bucket and prefix."
+  (append (list "s3api" "list-objects-v2" "--bucket" s3-manager--bucket)
+          ;; Omitted entirely at the bucket root: an empty --prefix is
+          ;; accepted but says nothing.
+          (unless (string-empty-p s3-manager--prefix)
+            (list "--prefix" s3-manager--prefix))
+          (list "--delimiter" "/"
+                "--max-items" (number-to-string s3-manager-page-size)
+                "--page-size" (number-to-string s3-manager-page-size)
+                "--output" "json")))
+
+
+;;;; Navigation
+
+(defun s3-manager--object-buffer (profile bucket prefix &optional target)
+  "Return a buffer browsing BUCKET at PREFIX for PROFILE, fetching now.
+TARGET, when given, is the entry to put point on once the listing lands."
+  (let ((buffer (get-buffer-create (s3-manager--buffer-name profile bucket))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 's3-manager-mode)
+        (s3-manager-mode))
+      (setq s3-manager--profile profile
+            s3-manager--bucket bucket
+            s3-manager--prefix prefix)
+      (setq tabulated-list-format s3-manager--object-list-format)
+      (unless tabulated-list-sort-key
+        (setq tabulated-list-sort-key '("Name" . nil)))
+      (tabulated-list-init-header)
+      (s3-manager--reload target))
+    buffer))
+
+(defun s3-manager-open ()
+  "Enter the directory at point, or open the bucket at point."
+  (interactive)
+  (let ((id (s3-manager--entry-at-point)))
+    (cond
+     ;; In the bucket list the id is the bucket name.
+     ((null s3-manager--bucket)
+      (pop-to-buffer (s3-manager--object-buffer s3-manager--profile id "")))
+     ((eq (s3-manager-entry-type id) 'directory)
+      ;; Remember where we were so `s3-manager-up' can put point back on
+      ;; this row rather than at the top of the parent listing.
+      (push (cons s3-manager--prefix id) s3-manager--history)
+      (setq s3-manager--prefix (s3-manager-entry-key id))
+      (s3-manager--reload))
+     (t
+      (user-error "Opening objects is not implemented yet")))))
+
+(defun s3-manager-up ()
+  "Move to the parent prefix, or back to the bucket list."
+  (interactive)
+  (unless (derived-mode-p 's3-manager-mode)
+    (user-error "Not an S3 Manager buffer"))
+  (cond
+   ((null s3-manager--bucket)
+    (user-error "Already at the bucket list"))
+   ((string-empty-p s3-manager--prefix)
+    (let ((bucket s3-manager--bucket))
+      (pop-to-buffer (s3-manager--bucket-buffer s3-manager--profile bucket))))
+   (t
+    (let* ((parent (s3-manager--parent-prefix s3-manager--prefix))
+           (remembered (and (equal (caar s3-manager--history) parent)
+                            (cdr (pop s3-manager--history))))
+           ;; Arriving here by any route other than descending -- a refresh
+           ;; in the child, say -- leaves no history, so synthesize the entry
+           ;; we are returning to.  Structural `equal' on the struct is what
+           ;; makes the synthesized one match the real row.
+           (target (or remembered
+                       (s3-manager--directory-entry s3-manager--prefix
+                                                    parent))))
+      (setq s3-manager--prefix parent)
+      (s3-manager--reload target)))))
+
+(defun s3-manager--entry-at-point ()
+  "Return the entry on the current line, or signal a `user-error'.
+The only supported way for a command to obtain an entry: rows such as a
+placeholder carry a nil id, and every command must refuse them."
+  (or (tabulated-list-get-id)
+      (user-error "No S3 entry on this line")))
 
 ;;;###autoload
 (defun s3-manager (&optional reread-profiles)

@@ -1,0 +1,13 @@
+{
+    "Contents": [
+        {
+            "Key": "a.txt",
+            "LastModified": "2026-09-01T00:00:00+00:00",
+            "Size": 10,
+            "StorageClass": "STANDARD"
+        }
+    ],
+    "NextToken": "eyJDb250aW51YXRpb25Ub2tlbiI6ICJhYmMifQ==",
+    "Prefix": "",
+    "RequestCharged": null
+}

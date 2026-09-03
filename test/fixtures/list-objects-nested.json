@@ -1,0 +1,21 @@
+{
+    "CommonPrefixes": [
+        {"Prefix": "videos/2026/"}
+    ],
+    "Contents": [
+        {
+            "Key": "videos/",
+            "LastModified": "2026-08-30T00:00:00+00:00",
+            "Size": 0,
+            "StorageClass": "STANDARD"
+        },
+        {
+            "Key": "videos/old.mp4",
+            "LastModified": "2026-09-02T10:30:00+00:00",
+            "Size": 18342123,
+            "StorageClass": "STANDARD"
+        }
+    ],
+    "Prefix": "videos/",
+    "RequestCharged": null
+}

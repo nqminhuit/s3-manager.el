@@ -1,0 +1,17 @@
+{
+    "CommonPrefixes": [
+        {"Prefix": "images/"},
+        {"Prefix": "videos/"}
+    ],
+    "Contents": [
+        {
+            "Key": "README.md",
+            "LastModified": "2026-09-01T08:15:00+00:00",
+            "ETag": "\"9bb58f26192e4ba00f01e2e7b136bbd8\"",
+            "Size": 1234,
+            "StorageClass": "STANDARD"
+        }
+    ],
+    "Prefix": "",
+    "RequestCharged": null
+}

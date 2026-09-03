@@ -1173,6 +1173,303 @@ With :noquery t, Emacs would not even prompt about it at exit."
         (s3-manager-aws-program "s3-manager-no-such-program"))
     (should-error (s3-manager) :type 'user-error)))
 
+
+;;;; Object listing
+
+(ert-deftest s3-manager-test-strip-prefix ()
+  (should (equal (s3-manager--strip-prefix "videos/2026/" "videos/") "2026/"))
+  (should (equal (s3-manager--strip-prefix "README.md" "") "README.md"))
+  (should (equal (s3-manager--strip-prefix "README.md" nil) "README.md"))
+  ;; A key that does not start with the prefix is left alone.
+  (should (equal (s3-manager--strip-prefix "other/x" "videos/") "other/x")))
+
+(ert-deftest s3-manager-test-parent-prefix ()
+  (should (equal (s3-manager--parent-prefix "videos/2026/") "videos/"))
+  (should (equal (s3-manager--parent-prefix "videos/") ""))
+  (should (equal (s3-manager--parent-prefix "") ""))
+  (should (equal (s3-manager--parent-prefix "a/b/c/") "a/b/")))
+
+(ert-deftest s3-manager-test-entries-from-root-listing ()
+  "CommonPrefixes become directories, Contents become objects."
+  (let ((entries (s3-manager--entries-from-listing
+                  (s3-manager-test--json "list-objects-root.json") "")))
+    (should (= (length entries) 3))
+    (should (equal (mapcar #'s3-manager-entry-display-name entries)
+                   '("images/" "videos/" "README.md")))
+    (should (equal (mapcar #'s3-manager-entry-type entries)
+                   '(directory directory object)))
+    (let ((readme (nth 2 entries)))
+      (should (equal (s3-manager-entry-key readme) "README.md"))
+      (should (= (s3-manager-entry-size readme) 1234))
+      (should (equal (s3-manager-entry-storage-class readme) "STANDARD")))))
+
+(ert-deftest s3-manager-test-entries-strip-the-parent-prefix ()
+  (let ((entries (s3-manager--entries-from-listing
+                  (s3-manager-test--json "list-objects-nested.json") "videos/")))
+    (should (member "2026/" (mapcar #'s3-manager-entry-display-name entries)))
+    (should (member "old.mp4" (mapcar #'s3-manager-entry-display-name entries)))
+    ;; Keys stay absolute even though the displayed names are relative.
+    (should (member "videos/old.mp4" (mapcar #'s3-manager-entry-key entries)))))
+
+(ert-deftest s3-manager-test-directory-marker-is-dropped ()
+  "A zero-byte object whose key IS the prefix must not become a row.
+
+The S3 console and several compatible servers create these; left in,
+every directory shows a phantom blank-named file inside itself."
+  (let* ((entries (s3-manager--entries-from-listing
+                   (s3-manager-test--json "list-objects-nested.json") "videos/"))
+         (names (mapcar #'s3-manager-entry-display-name entries)))
+    (should-not (member "" names))
+    (should-not (member "videos/" (mapcar #'s3-manager-entry-key
+                                          (seq-filter
+                                           (lambda (e)
+                                             (eq (s3-manager-entry-type e)
+                                                 'object))
+                                           entries))))
+    (should (= (length entries) 2))))
+
+(ert-deftest s3-manager-test-entries-from-empty-listing ()
+  "Contents and CommonPrefixes are absent, not empty, when nothing matches."
+  (let ((response (s3-manager-test--json "list-objects-empty.json")))
+    (should (null (alist-get 'Contents response)))
+    (should (null (alist-get 'CommonPrefixes response)))
+    (should (null (s3-manager--entries-from-listing response "zzz/")))))
+
+(ert-deftest s3-manager-test-format-size ()
+  (should (equal (s3-manager--format-size 0) "0 B"))
+  (should (equal (s3-manager--format-size 1234) "1.2 KiB"))
+  (should (equal (s3-manager--format-size 1932735283) "1.8 GiB"))
+  ;; Directories carry no size.
+  (should (equal (s3-manager--format-size nil) "-")))
+
+(ert-deftest s3-manager-test-sorters-put-directories-first ()
+  "Directories lead under every column, as in Dired."
+  (let* ((entries (s3-manager--entries-from-listing
+                   (s3-manager-test--json "list-objects-root.json") ""))
+         (rows (mapcar #'s3-manager--entry-row entries)))
+    (dolist (sorter (list #'s3-manager--sort-by-name
+                          #'s3-manager--sort-by-size
+                          #'s3-manager--sort-by-time))
+      (let ((sorted (sort (copy-sequence rows) sorter)))
+        (should (equal (mapcar (lambda (row)
+                                 (s3-manager-entry-type (car row)))
+                               sorted)
+                       '(directory directory object)))))))
+
+(ert-deftest s3-manager-test-size-sorts-numerically ()
+  "The displayed size is a string in which \"9 B\" follows \"1.8 GiB\"."
+  (let* ((small (s3-manager-entry--create :type 'object :key "a" :size 9))
+         (large (s3-manager-entry--create :type 'object :key "b"
+                                          :size 1932735283))
+         (rows (list (s3-manager--entry-row large)
+                     (s3-manager--entry-row small))))
+    (should (equal (mapcar (lambda (row) (s3-manager-entry-size (car row)))
+                           (sort rows #'s3-manager--sort-by-size))
+                   '(9 1932735283)))
+    ;; The lexicographic order the default sorter would have produced.
+    (should (string< "1.8 GiB" "9 B"))))
+
+(ert-deftest s3-manager-test-directory-entries-are-structurally-equal ()
+  "Point restoration on `^' depends on a synthesized entry matching.
+
+The entry is rebuilt rather than remembered when there is no history, so
+it must compare `equal' to the row parsed from the listing.  Adding a
+slot that a real entry fills and a synthetic one does not would break
+this silently."
+  (let* ((parsed (car (s3-manager--entries-from-listing
+                       (s3-manager-test--json "list-objects-nested.json")
+                       "videos/")))
+         (synthetic (s3-manager--directory-entry "videos/2026/" "videos/")))
+    (should (equal (s3-manager-entry-key parsed) "videos/2026/"))
+    (should (equal parsed synthetic))
+    (should-not (eq parsed synthetic))))
+
+(ert-deftest s3-manager-test-list-objects-argv ()
+  "The prefix is omitted at the root, and both paging flags are equal."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media"
+          s3-manager--prefix ""
+          s3-manager-page-size 1000)
+    (should (equal (s3-manager--list-objects-args)
+                   '("s3api" "list-objects-v2" "--bucket" "media"
+                     "--delimiter" "/"
+                     "--max-items" "1000" "--page-size" "1000"
+                     "--output" "json")))
+    (setq s3-manager--prefix "videos/2026/")
+    (should (equal (s3-manager--list-objects-args)
+                   '("s3api" "list-objects-v2" "--bucket" "media"
+                     "--prefix" "videos/2026/"
+                     "--delimiter" "/"
+                     "--max-items" "1000" "--page-size" "1000"
+                     "--output" "json")))))
+
+(ert-deftest s3-manager-test-page-size-flags-stay-equal ()
+  "--max-items alone yields a resume token with a client-side offset,
+making continuation quadratic.  The two flags must always match."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media"
+          s3-manager--prefix ""
+          s3-manager-page-size 250)
+    (let* ((args (s3-manager--list-objects-args))
+           (max-items (cadr (member "--max-items" args)))
+           (page-size (cadr (member "--page-size" args))))
+      (should (equal max-items "250"))
+      (should (equal max-items page-size)))))
+
+(ert-deftest s3-manager-test-truncated-listing-is-flagged ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media" s3-manager--prefix "")
+    (setq tabulated-list-format s3-manager--object-list-format)
+    (tabulated-list-init-header)
+    (s3-manager--render-objects
+     (s3-manager-test--json "list-objects-truncated.json"))
+    (should s3-manager--next-token)
+    (should (string-match-p "truncated" header-line-format))))
+
+
+;;;; Navigation
+
+(ert-deftest s3-manager-test-descend-and-ascend ()
+  "RET into a prefix and `^' back out, with point restored."
+  (s3-manager-test--with-fake-aws
+      (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+    (let ((buffer (s3-manager--object-buffer "production" "media" "")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (equal (buffer-name) "*s3: production/media*"))
+            (should (equal s3-manager--prefix ""))
+            ;; Move to the "videos/" row and enter it.
+            (s3-manager--goto-entry
+             (s3-manager--directory-entry "videos/" ""))
+            (should (equal (s3-manager-entry-key (tabulated-list-get-id))
+                           "videos/"))
+            (s3-manager-open)
+            (should (equal s3-manager--prefix "videos/"))
+            (should (equal (caar s3-manager--history) ""))
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            ;; And back up, landing on the row we came from.
+            (s3-manager-up)
+            (should (equal s3-manager--prefix ""))
+            (should (null s3-manager--history))
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (equal (s3-manager-entry-key (tabulated-list-get-id))
+                           "videos/")))
+        (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-ascend-without-history ()
+  "Arriving somewhere without descending still restores point.
+The entry to land on is synthesized, which only works because struct
+equality is structural."
+  (s3-manager-test--with-fake-aws
+      (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+    (let ((buffer (s3-manager--object-buffer "production" "media" "videos/")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (null s3-manager--history))
+            (s3-manager-up)
+            (should (equal s3-manager--prefix ""))
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (equal (s3-manager-entry-key (tabulated-list-get-id))
+                           "videos/")))
+        (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-up-from-root-returns-to-buckets ()
+  (s3-manager-test--with-fake-aws (:stdout s3-manager-test--one-bucket-json)
+    (let ((objects (s3-manager--object-buffer "production" "media" "")))
+      (unwind-protect
+          (with-current-buffer objects
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (s3-manager-up)
+            (let ((buckets (get-buffer "*s3: production*")))
+              (should buckets)
+              (with-current-buffer buckets
+                (should (null s3-manager--bucket))
+                (should (s3-manager-test--wait
+                         (lambda () (null s3-manager--status))))
+                ;; Point lands on the bucket just left, when it is listed.
+                (should (equal (tabulated-list-get-id) "media")))
+              (kill-buffer buckets)))
+        (kill-buffer objects)))))
+
+(ert-deftest s3-manager-test-up-from-the-bucket-list-refuses ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-up) :type 'user-error)))
+
+(ert-deftest s3-manager-test-open-a-bucket ()
+  "RET in the bucket list opens that bucket's object buffer."
+  (s3-manager-test--with-fake-aws
+      (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+    (let ((buckets (get-buffer-create "*s3: production*")))
+      (unwind-protect
+          (with-current-buffer buckets
+            (s3-manager-mode)
+            (setq s3-manager--profile "production" s3-manager--bucket nil)
+            (setq tabulated-list-format s3-manager--bucket-list-format)
+            (tabulated-list-init-header)
+            (s3-manager--render-buckets
+             (s3-manager-test--json "list-buckets.json"))
+            (goto-char (point-min))
+            (s3-manager--goto-entry "media")
+            (s3-manager-open)
+            (let ((objects (get-buffer "*s3: production/media*")))
+              (should objects)
+              (with-current-buffer objects
+                (should (equal s3-manager--bucket "media"))
+                (should (equal s3-manager--prefix ""))
+                (should (s3-manager-test--wait
+                         (lambda () (null s3-manager--status)))))
+              (kill-buffer objects)))
+        (kill-buffer buckets)))))
+
+(ert-deftest s3-manager-test-open-an-object-is-not-implemented ()
+  "RET on an object must say so rather than doing something surprising."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media" s3-manager--prefix "")
+    (setq tabulated-list-format s3-manager--object-list-format)
+    (tabulated-list-init-header)
+    (s3-manager--render-objects
+     (s3-manager-test--json "list-objects-root.json"))
+    (s3-manager--goto-entry
+     (car (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                      s3-manager--entries)))
+    (should-error (s3-manager-open) :type 'user-error)))
+
+(ert-deftest s3-manager-test-entry-at-point-refuses-empty-rows ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--object-list-format)
+    (tabulated-list-init-header)
+    (setq tabulated-list-entries nil)
+    (tabulated-list-print)
+    (should-error (s3-manager--entry-at-point) :type 'user-error)))
+
+(ert-deftest s3-manager-test-object-buffer-is-reused-across-prefixes ()
+  "One buffer per bucket, not one per prefix."
+  (s3-manager-test--with-fake-aws
+      (:stdout (s3-manager-test--fixture "list-objects-root.json"))
+    (let ((buffer (s3-manager--object-buffer "production" "media" "")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (s3-manager--goto-entry (s3-manager--directory-entry "videos/" ""))
+            (s3-manager-open)
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (eq (current-buffer) buffer))
+            (should (= 1 (length (seq-filter
+                                  (lambda (b)
+                                    (string-prefix-p "*s3: production/"
+                                                     (buffer-name b)))
+                                  (buffer-list))))))
+        (kill-buffer buffer)))))
+
 (provide 's3-manager-test)
 
 ;;; s3-manager-test.el ends here
