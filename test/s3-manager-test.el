@@ -225,8 +225,8 @@ nil rather than as a sentinel."
 
 (ert-deftest s3-manager-test-exit-code-gloss ()
   (should (string-match-p "service" (s3-manager--exit-code-gloss 254)))
-  (should (string-match-p "partial" (s3-manager--exit-code-gloss 1)))
-  (should (string-match-p "partial" (s3-manager--exit-code-gloss 2)))
+  (should (string-match-p "aws s3" (s3-manager--exit-code-gloss 1)))
+  (should (string-match-p "aws s3" (s3-manager--exit-code-gloss 2)))
   (should (string-match-p "s3-manager bug" (s3-manager--exit-code-gloss 252)))
   (should (equal "" (s3-manager--exit-code-gloss 0))))
 
@@ -414,6 +414,56 @@ convert every \\r to \\n, which destroys progress parsing."
                                  :on-error (lambda (e) (setq result (list :err e))))))
       (should (eq (nth 0 (cadr result)) 's3-manager-partial-error))
       (should (= code (nth 2 (cadr result)))))))
+
+(ert-deftest s3-manager-test-transport-partial-is-s3-only ()
+  "Exit 1 and 2 are partial success for `aws s3' only.
+For `s3api' they are ordinary failures and must not be softened."
+  (dolist (code '(1 2))
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws (:stderr "boom\\n" :exit code)
+        (s3-manager-test--collect result
+          (s3-manager--aws-async '("s3api" "list-buckets")
+                                 :on-success (lambda (p) (setq result (list :ok p)))
+                                 :on-error (lambda (e) (setq result (list :err e))))))
+      (should (eq (nth 0 (cadr result)) 's3-manager-cli-error)))))
+
+(ert-deftest s3-manager-test-transport-signal-is-not-an-exit-code ()
+  "A signalled process reports the signal number, not an AWS exit code.
+Read as an exit code, SIGHUP and SIGINT would masquerade as the
+\"partial success\" codes 1 and 2 and a failed transfer would be
+reported as having partly worked."
+  (let ((result 'pending) proc)
+    (s3-manager-test--with-fake-aws (:delay "5")
+      (setq proc (s3-manager--aws-async
+                  '("s3" "cp" "s3://b/k" "/tmp/k")
+                  :on-success (lambda (p) (setq result (list :ok p)))
+                  :on-error (lambda (e) (setq result (list :err e)))))
+      ;; SIGINT is signal 2, which is also the "objects skipped" exit code.
+      (signal-process proc 2)
+      (should (s3-manager-test--wait
+               (lambda () (not (eq result 'pending))))))
+    (should (eq (car result) :err))
+    (should (eq (nth 0 (cadr result)) 's3-manager-cli-error))
+    (should (equal (nth 2 (cadr result)) "signal 2"))))
+
+(ert-deftest s3-manager-test-callback-error-is-reported-not-lost ()
+  "A signal raised in a callback is discarded by Emacs' sentinel machinery.
+It must be surfaced, and it must not prevent resource cleanup."
+  (let ((before (length (s3-manager-test--scratch-buffers)))
+        (messages nil)
+        (done nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (s3-manager-test--with-fake-aws (:stdout "{}")
+        (let ((proc (s3-manager--aws-async
+                     '("s3api" "list-buckets")
+                     :on-success (lambda (_) (error "deliberate callback bug")))))
+          (s3-manager-test--wait (lambda () (not (process-live-p proc))))
+          (s3-manager-test--wait (lambda () (setq done t) nil) 0.2))))
+    (should done)
+    (should (seq-find (lambda (m) (string-match-p "deliberate callback bug" m))
+                      messages))
+    (should (= before (length (s3-manager-test--scratch-buffers))))))
 
 (ert-deftest s3-manager-test-transport-interrupt-is-silent ()
   "Exit 130 is our own cancellation; it must not surface as an error."

@@ -169,9 +169,9 @@ The result is cached for the session."
                 (let ((default-directory (s3-manager--safe-directory)))
                   ;; The one synchronous invocation in the package: local, fast,
                   ;; and everything else depends on its answer.
-                  (if (and (zerop (ignore-errors
-                                    (call-process s3-manager-aws-program
-                                                  nil t nil "--version")))
+                  (if (and (eql 0 (ignore-errors
+                                     (call-process s3-manager-aws-program
+                                                   nil t nil "--version")))
                            (progn (goto-char (point-min))
                                   (looking-at
                                    "aws-cli/\\([0-9]+\\(?:\\.[0-9]+\\)*\\)")))
@@ -219,12 +219,15 @@ and these two strings cost nothing."
 
 (defun s3-manager--command-string (argv)
   "Render ARGV as a redacted, human-readable command line.
-For display only; the result is never executed."
+
+The package never executes this string.  It is quoted anyway, because it
+is shown to the user in `s3-manager--error-buffer' and the natural next
+step is to paste it into a shell to reproduce the failure."
   (s3-manager--redact
    (mapconcat (lambda (a)
-                (if (string-match-p "[[:space:]\"']" a)
-                    (shell-quote-argument a)
-                  a))
+                (if (string-match-p "\\`[A-Za-z0-9_@%+=:,./-]+\\'" a)
+                    a
+                  (shell-quote-argument a)))
               argv " ")))
 
 
@@ -252,14 +255,15 @@ wants."
 
 ;;;; Error reporting
 
-(defconst s3-manager--error-buffer "*S3 Manager Error*")
+(defconst s3-manager--error-buffer "*S3 Manager Error*"
+  "Name of the buffer accumulating AWS CLI failure reports.")
 
 (defun s3-manager--exit-code-gloss (code)
   "Return a short parenthetical explanation of exit CODE."
   (pcase code
     (0 "")
-    (1 " (partial: one or more transfers failed)")
-    (2 " (partial: one or more objects skipped)")
+    (1 " (aws s3: one or more transfers failed)")
+    (2 " (aws s3: one or more objects skipped)")
     (130 " (interrupted)")
     (252 " (invalid command line -- likely an s3-manager bug)")
     (253 " (invalid environment or configuration)")
@@ -316,6 +320,19 @@ not steal the user's window."
 
 ;;;; The transport primitive
 
+(defun s3-manager--safe-funcall (fn arg what)
+  "Call FN with ARG, reporting rather than losing any error it signals.
+
+Callbacks run from a process sentinel, and a signal raised in a sentinel
+is discarded by Emacs: the request would simply appear to hang forever.
+WHAT names the callback for the report."
+  (when fn
+    (condition-case err
+        (funcall fn arg)
+      (error
+       (message "s3-manager: %s callback failed: %s"
+                what (error-message-string err))))))
+
 (defun s3-manager--kill-buffer-safely (buffer)
   "Kill BUFFER if it is still live."
   (when (buffer-live-p buffer) (kill-buffer buffer)))
@@ -333,11 +350,8 @@ started."
     (process-put proc 's3-stdout-buffer nil)
     (process-put proc 's3-stderr-buffer nil)))
 
-(defun s3-manager--cancel (&optional quiet)
-  "Abandon this buffer's in-flight request without running its callbacks.
-QUIET is accepted for symmetry with later callers and is currently
-unused."
-  (ignore quiet)
+(defun s3-manager--cancel ()
+  "Abandon this buffer's in-flight request without running its callbacks."
   (let ((proc s3-manager--process))
     (setq s3-manager--process nil)
     (when (process-live-p proc)
@@ -380,7 +394,7 @@ unterminated tail is carried into the next call."
         (when-let* ((latest (car (last (seq-remove #'string-empty-p complete)))))
           (when (s3-manager--current-p buffer generation)
             (with-current-buffer buffer
-              (funcall callback latest))))))))
+              (s3-manager--safe-funcall callback latest "on-progress"))))))))
 
 (cl-defun s3-manager--aws-async (args
                                  &key on-success on-error on-progress
@@ -397,7 +411,9 @@ ON-SUCCESS is called with the parsed stdout when the CLI exits 0 --- an
 alist when PARSE is non-nil, otherwise the raw string.
 
 ON-ERROR is called with an error object (CONDITION COMMAND EXIT-CODE
-DETAIL) on any other exit.  It defaults to `s3-manager--report-error'.
+DETAIL) on any other exit.  EXIT-CODE is the CLI's integer exit status,
+nil for a timeout, or a string such as \"signal 9\" when the process was
+killed.  It defaults to `s3-manager--report-error'.
 Errors are delivered this way rather than signalled because a signal
 raised in a sentinel is swallowed by Emacs.
 
@@ -419,6 +435,10 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                                         "AWS_CLI_AUTO_PROMPT=off")
                                       process-environment))
          (exit-code nil)
+         (exit-signalled nil)
+         ;; Exit codes 1 and 2 mean "partial success" for the `aws s3'
+         ;; transfer commands only; for `s3api' they are ordinary failures.
+         (transfer-command (equal (car args) "s3"))
          (main-done nil)
          (stderr-done nil)
          (dispatched nil)
@@ -432,8 +452,9 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
            (when (s3-manager--current-p origin generation)
              (with-current-buffer origin
                (if err
-                   (funcall (or on-error #'s3-manager--report-error) err)
-                 (when on-success (funcall on-success payload))))))
+                   (s3-manager--safe-funcall
+                    (or on-error #'s3-manager--report-error) err "on-error")
+                 (s3-manager--safe-funcall on-success payload "on-success")))))
          (dispatch ()
            ;; Runs only once both the process and its stderr pipe have
            ;; finished.  Their sentinels fire in an order that varies from run
@@ -441,24 +462,36 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
            ;; an empty stderr for exactly the failures stderr exists to report.
            (when (and main-done stderr-done (not dispatched))
              (setq dispatched t)
-             (let ((stdout (text stdout-buffer))
-                   (stderr (s3-manager--redact (text stderr-buffer)))
+             (let ((stderr (s3-manager--redact (text stderr-buffer)))
                    (command (s3-manager--command-string argv)))
                (unwind-protect
                    (cond
-                    ((eq exit-code 130)) ; user interrupt: not an error
+                    ;; Killed by a signal.  `process-exit-status' then returns
+                    ;; the signal number, which is not an AWS CLI exit code:
+                    ;; reading it as one would report SIGHUP and SIGINT as the
+                    ;; "partial success" codes 1 and 2.
+                    (exit-signalled
+                     (deliver (list 's3-manager-cli-error command
+                                    (format "signal %s" exit-code)
+                                    (if (string-empty-p stderr)
+                                        (format "Terminated by signal %s"
+                                                exit-code)
+                                      stderr))
+                              nil))
+                    ((eql exit-code 130)) ; the CLI's own SIGINT status
                     ((eql exit-code 0)
                      (condition-case parse-err
                          (deliver nil (if parse
                                           (s3-manager--parse-json stdout-buffer)
-                                        stdout))
+                                        (text stdout-buffer)))
                        (json-error
                         (deliver (list 's3-manager-json-error command 0
                                        (s3-manager--redact
                                         (error-message-string parse-err)))
                                  nil))))
                     (t
-                     (deliver (list (if (memq exit-code '(1 2))
+                     (deliver (list (if (and transfer-command
+                                             (memq exit-code '(1 2)))
                                         's3-manager-partial-error
                                       's3-manager-cli-error)
                                     command exit-code stderr)
@@ -505,10 +538,12 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                               on-progress origin generation)
                            #'internal-default-process-filter)
                  :sentinel (lambda (p _event)
-                             (when (memq (process-status p) '(exit signal))
-                               (setq exit-code (process-exit-status p))
-                               (setq main-done t)
-                               (dispatch)))))
+                             (let ((status (process-status p)))
+                               (when (memq status '(exit signal))
+                                 (setq exit-code (process-exit-status p)
+                                       exit-signalled (eq status 'signal)
+                                       main-done t)
+                                 (dispatch))))))
         (error
          ;; The process never started, so no sentinel will ever run.
          (delete-process stderr-proc)
@@ -533,6 +568,10 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                 (deliver (list 's3-manager-timeout-error command nil
                                (format "No response after %s seconds" timeout))
                          nil)
+                (when (and (buffer-live-p origin)
+                           (eq (buffer-local-value 's3-manager--process origin)
+                               proc))
+                  (with-current-buffer origin (setq s3-manager--process nil)))
                 (s3-manager--cleanup proc)))))))
       proc)))
 
