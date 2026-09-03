@@ -1,0 +1,17 @@
+{
+    "Buckets": [
+        {
+            "Name": "media",
+            "CreationDate": "2026-08-01T10:22:31+00:00"
+        },
+        {
+            "Name": "backups",
+            "CreationDate": "2025-11-14T03:04:05+00:00"
+        }
+    ],
+    "Owner": {
+        "DisplayName": "dev",
+        "ID": "b1946ac92492d2347c6235b4d2611184"
+    },
+    "Prefix": null
+}

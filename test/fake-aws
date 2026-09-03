@@ -1,0 +1,24 @@
+#!/bin/sh
+# Test double for the AWS CLI.
+#
+# Behaviour is driven by environment variables rather than arguments, so tests
+# can exercise s3-manager--aws-async with any argv while still controlling the
+# subprocess result:
+#
+#   FAKE_AWS_STDOUT   text written to stdout   (printf %b: \n \r honoured)
+#   FAKE_AWS_STDERR   text written to stderr   (printf %b)
+#   FAKE_AWS_EXIT     exit code                (default 0)
+#   FAKE_AWS_DELAY    seconds to sleep before exiting (default 0)
+#
+# Arguments are echoed to FAKE_AWS_ARGV_FILE when set, so argv construction can
+# be asserted against a real subprocess invocation.
+
+if [ -n "$FAKE_AWS_ARGV_FILE" ]; then
+    for a in "$@"; do printf '%s\n' "$a"; done > "$FAKE_AWS_ARGV_FILE"
+fi
+
+[ -n "$FAKE_AWS_DELAY" ] && sleep "$FAKE_AWS_DELAY"
+[ -n "$FAKE_AWS_STDOUT" ] && printf '%b' "$FAKE_AWS_STDOUT"
+[ -n "$FAKE_AWS_STDERR" ] && printf '%b' "$FAKE_AWS_STDERR" >&2
+
+exit "${FAKE_AWS_EXIT:-0}"

@@ -1387,10 +1387,26 @@ Verified on this machine:
   attempted (the endpoint is a dead port).
 - `aws s3api get-object --generate-cli-skeleton input` (required args missing) →
   **exit 252**, `the following arguments are required: --bucket, --key`.
+- An invented flag (`--no-such-flag x`) → **exit 252**.
 
 So the parser runs fully and rejects bad command lines offline. This gives the
 fixture-only suite a genuine integration check on the one thing fixtures cannot
 cover: whether the commands we construct are commands the CLI accepts.
+
+**Limitation — the pagination flags must be excluded.** `--max-items`,
+`--page-size` and `--starting-token` are client-side options that botocore
+folds into a `PaginationConfig` structure, which the skeleton generator does not
+recognise:
+
+```
+Parameter validation failed:
+Unknown parameter in input: "PaginationConfig", must be one of: Bucket,
+Delimiter, EncodingType, MaxKeys, Prefix, ContinuationToken, ...
+```
+
+The check therefore validates the **service-level** arguments only. Strip the
+three pagination flags before running it. Verified: the same command exits 0
+without them and 252 with them.
 
 Gate these on `(executable-find "aws")` and skip otherwise, so the suite still
 runs on a machine without the CLI.
