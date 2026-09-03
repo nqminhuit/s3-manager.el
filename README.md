@@ -216,15 +216,36 @@ Dired integration.
 ## Development
 
 ```sh
-# no build tool needed
+# no build tool needed -- files must be compiled in dependency order
 emacs -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' \
-      -f batch-byte-compile s3-manager.el
+      -f batch-byte-compile \
+      s3-manager-core.el s3-manager-process.el s3-manager-model.el \
+      s3-manager-ui.el s3-manager-transfer.el s3-manager-view.el \
+      s3-manager-delete.el s3-manager.el
 emacs -Q --batch -L . -L test -l test/s3-manager-test.el \
       -f ert-run-tests-batch-and-exit
 
 # or via Eask
 eask compile && eask test ert ./test/s3-manager-test.el
 ```
+
+The package is one entry point over six layers, each requiring only the ones
+below it:
+
+| File | | Lines |
+|---|---|---|
+| `s3-manager-core.el` | options, buffer-local state, error reporting | ~460 |
+| `s3-manager-process.el` | the async CLI transport, profiles | ~600 |
+| `s3-manager-model.el` | entries and the listing cache | ~200 |
+| `s3-manager-ui.el` | major mode, rendering, navigation, marks | ~620 |
+| `s3-manager-transfer.el` | download and upload | ~460 |
+| `s3-manager-view.el` | reading a small object | ~180 |
+| `s3-manager-delete.el` | removing objects and prefixes | ~225 |
+| `s3-manager.el` | `M-x s3-manager`, and the requires | ~115 |
+
+The one place the layering runs backwards is the keymap: `s3-manager-ui.el`
+binds commands defined in the files above it, since they operate on the buffer
+it defines. Those six are `declare-function`ed rather than reordered.
 
 Tests need no network and no `~/.aws`: `test/fake-aws` stands in for the CLI,
 with its stdout, stderr, exit code and timing driven by the environment. The

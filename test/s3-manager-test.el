@@ -3721,6 +3721,44 @@ regression it exists to catch."
         (s3-manager-switch-profile t))
       (should (null s3-manager--profiles)))))
 
+;;;; Source hygiene across the split
+
+(defun s3-manager-test--source-files ()
+  "Return the package's source files, or nil if they cannot be located."
+  (when-let* ((dir (file-name-directory
+                    (or (locate-library "s3-manager") ""))))
+    (directory-files dir t "\\`s3-manager\\(-[a-z]+\\)?\\.el\\'")))
+
+(ert-deftest s3-manager-test-no-accidental-file-local-variables ()
+  "No source file may mention the file-local variables marker near its end.
+
+Emacs scans the last 3000 characters of a file for that phrase, so a
+comment about *disabling* it becomes a malformed declaration of it -- and
+that is not hypothetical: splitting the package into smaller files moved
+such a comment from the middle of a 2500-line file into the window, and
+loading the result printed \"Local variables list is not properly
+terminated\".  A test rather than a fixed comment, because the next split
+would reintroduce it."
+  (let ((files (s3-manager-test--source-files)))
+    (skip-unless files)
+    (dolist (file files)
+      (let* ((text (with-temp-buffer
+                     (insert-file-contents file)
+                     (buffer-string)))
+             (tail (substring text (max 0 (- (length text) 3000)))))
+        (should-not
+         (string-match-p (concat "[Ll]ocal " "[Vv]ariables:") tail))))))
+
+(ert-deftest s3-manager-test-every-file-declares-lexical-binding ()
+  "A missing cookie makes a file dynamically bound, silently."
+  (let ((files (s3-manager-test--source-files)))
+    (skip-unless files)
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file nil 0 200)
+        (should (string-match-p "lexical-binding: t" (buffer-string)))))))
+
+
 ;;;; Evil interoperability
 
 ;; Evil is not a dependency of the package -- these tests skip themselves when

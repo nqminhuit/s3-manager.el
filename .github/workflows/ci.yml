@@ -51,15 +51,22 @@ jobs:
           emacs -Q --batch --eval '(unless (and (fboundp (quote json-parse-buffer)) (json-available-p)) (message "no native JSON in this build") (kill-emacs 1))'
 
       - name: Byte-compile, warnings fatal
+        # Every file, in dependency order. A warning in any of them is our
+        # own defect, and the split into layers means a forward reference
+        # across files would otherwise only show up at runtime.
         run: |
           emacs -Q --batch -L . \
                 --eval '(setq byte-compile-error-on-warn t)' \
-                -f batch-byte-compile s3-manager.el
+                -f batch-byte-compile \
+                s3-manager-core.el s3-manager-process.el s3-manager-model.el \
+                s3-manager-ui.el s3-manager-transfer.el s3-manager-view.el \
+                s3-manager-delete.el s3-manager.el
 
       - name: Test the byte-compiled package
         # This is what users actually load, and `-L .` prefers the .elc.
         run: |
           test -f s3-manager.elc
+          test -f s3-manager-core.elc
           emacs -Q --batch -L . -L test \
                 -l test/s3-manager-test.el \
                 -f ert-run-tests-batch-and-exit
@@ -68,7 +75,7 @@ jobs:
         # Macro expansion differs between the compiled and interpreted forms,
         # so a missing top-level `require' can pass one and fail the other.
         run: |
-          rm -f s3-manager.elc
+          rm -f s3-manager*.elc
           emacs -Q --batch -L . -L test \
                 -l test/s3-manager-test.el \
                 -f ert-run-tests-batch-and-exit
