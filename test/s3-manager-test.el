@@ -2672,6 +2672,135 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
 
 
+;;;; Dry runs
+;;
+;; Characterisation tests, written against the behaviour as it stood before
+;; the rendering was shared with the upload dry run.  They assert the
+;; contract, not the implementation, so the extraction is provably a refactor
+;; rather than an assertion that it was one.
+
+(defun s3-manager-test--dry-run-text ()
+  "Return the dry-run buffer's contents, or nil if it does not exist."
+  (when-let* ((buffer (get-buffer "*S3 Manager Dry Run*")))
+    (with-current-buffer buffer (buffer-string))))
+
+(defmacro s3-manager-test--with-fresh-dry-run-buffer (&rest body)
+  "Run BODY with no dry-run buffer present, and clean up afterwards."
+  (declare (indent 0))
+  `(progn
+     (when (get-buffer "*S3 Manager Dry Run*")
+       (kill-buffer "*S3 Manager Dry Run*"))
+     (unwind-protect (progn ,@body)
+       (when (get-buffer "*S3 Manager Dry Run*")
+         (kill-buffer "*S3 Manager Dry Run*")))))
+
+(ert-deftest s3-manager-test-delete-dry-run-argv ()
+  "The preview must carry `--dryrun', or it is a recursive delete."
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--with-fresh-dry-run-buffer
+          (s3-manager-test--in-object-buffer
+            (s3-manager-test--goto-directory)
+            (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "(dryrun) delete: s3://media/images/a.png\n"
+                   :argv-file argv-file)
+                (s3-manager-delete-recursive-dry-run)
+                (should (s3-manager-test--wait
+                         (lambda () (s3-manager-test--dry-run-text)))))))
+          (should (equal (car (s3-manager-test--argv-records argv-file))
+                         (list "--profile" "production"
+                               "--no-cli-pager" "--no-cli-auto-prompt"
+                               "s3" "rm" "s3://media/images/"
+                               "--recursive" "--dryrun"))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-delete-dry-run-renders-the-output ()
+  "The CLI's own lines are shown, under a heading naming the target."
+  (s3-manager-test--with-fresh-dry-run-buffer
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-directory)
+      (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (s3-manager-test--with-fake-aws
+            (:stdout "(dryrun) delete: s3://media/images/a.png\n(dryrun) delete: s3://media/images/b.png\n")
+          (s3-manager-delete-recursive-dry-run)
+          (should (s3-manager-test--wait
+                   (lambda () (s3-manager-test--dry-run-text)))))))
+    (let ((text (s3-manager-test--dry-run-text)))
+      (should (string-match-p "Would delete under s3://media/images/" text))
+      (should (string-match-p "a\\.png" text))
+      (should (string-match-p "b\\.png" text)))
+    (with-current-buffer "*S3 Manager Dry Run*"
+      (should (derived-mode-p 'special-mode))
+      (should (= (point) (point-min))))))
+
+(ert-deftest s3-manager-test-delete-dry-run-empty-is-explicit ()
+  "An empty result must say so rather than showing a blank buffer.
+A blank buffer reads as a failure, and the difference matters when the
+next keystroke would delete whatever this listed."
+  (s3-manager-test--with-fresh-dry-run-buffer
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-directory)
+      (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (s3-manager-test--with-fake-aws (:stdout "   \n  ")
+          (s3-manager-delete-recursive-dry-run)
+          (should (s3-manager-test--wait
+                   (lambda () (s3-manager-test--dry-run-text)))))))
+    (should (string-match-p "(nothing)" (s3-manager-test--dry-run-text)))))
+
+(ert-deftest s3-manager-test-delete-dry-run-replaces-previous-output ()
+  "Two runs must not accumulate: a dry run has one current answer."
+  (s3-manager-test--with-fresh-dry-run-buffer
+    (s3-manager-test--in-object-buffer
+      (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                ((symbol-function 'message) #'ignore))
+        (s3-manager-test--goto-directory)
+        (s3-manager-test--with-fake-aws (:stdout "first-answer\n")
+          (s3-manager-delete-recursive-dry-run)
+          (should (s3-manager-test--wait
+                   (lambda () (s3-manager-test--dry-run-text)))))
+        (s3-manager-test--with-fake-aws (:stdout "second-answer\n")
+          (s3-manager-delete-recursive-dry-run)
+          (should (s3-manager-test--wait
+                   (lambda ()
+                     (string-match-p "second-answer"
+                                     (s3-manager-test--dry-run-text))))))))
+    (let ((text (s3-manager-test--dry-run-text)))
+      (should (string-match-p "second-answer" text))
+      (should-not (string-match-p "first-answer" text)))))
+
+(ert-deftest s3-manager-test-delete-dry-run-refuses-a-non-prefix ()
+  "Only a prefix has anything to preview."
+  (s3-manager-test--in-object-buffer
+    (s3-manager-test--goto-object)
+    (should-error (s3-manager-delete-recursive-dry-run) :type 'user-error))
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-delete-recursive-dry-run) :type 'user-error)))
+
+(ert-deftest s3-manager-test-delete-dry-run-failure-is-reported ()
+  "A failed preview reports rather than leaving a stale buffer on screen."
+  (s3-manager-test--with-fresh-dry-run-buffer
+    (s3-manager-test--with-fresh-error-buffer
+      (s3-manager-test--in-object-buffer
+        (s3-manager-test--goto-directory)
+        (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-test--with-fake-aws
+              (:stderr "An error occurred (AccessDenied) when calling the ListObjectsV2 operation"
+               :exit 254)
+            (s3-manager-delete-recursive-dry-run)
+            (should (s3-manager-test--wait
+                     (lambda () (s3-manager-test--error-text)) 5)))))
+      (should (string-match-p "AccessDenied" (s3-manager-test--error-text)))
+      (should (string-match-p "s3 rm --dryrun" (s3-manager-test--error-text)))
+      (should (null (s3-manager-test--dry-run-text))))))
+
+
 ;;;; Viewing
 
 (ert-deftest s3-manager-test-view-file-name-cannot-escape ()

@@ -1990,6 +1990,29 @@ input."
         (s3-manager--delete-prefix (s3-manager-entry-key entry))
       (s3-manager--delete-object (s3-manager-entry-key entry)))))
 
+(defconst s3-manager--dry-run-buffer "*S3 Manager Dry Run*"
+  "Name of the buffer showing what an operation would do.")
+
+(defun s3-manager--show-dry-run (heading output)
+  "Display OUTPUT under HEADING in `s3-manager--dry-run-buffer\='.
+
+Replaced rather than appended, unlike `s3-manager--error-buffer\=': a dry
+run is a question with exactly one current answer, and the previous
+answer described a different target.  Empty output is spelled out
+rather than left blank, because a blank buffer reads as a failure and
+the difference matters when the next keystroke acts on what this
+listed."
+  (with-current-buffer (get-buffer-create s3-manager--dry-run-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert heading "\n\n")
+      (insert (if (string-empty-p (string-trim (or output "")))
+                  "(nothing)\n"
+                output))
+      (goto-char (point-min)))
+    (unless (derived-mode-p 'special-mode) (special-mode))
+    (display-buffer (current-buffer))))
+
 (defun s3-manager-delete-recursive-dry-run ()
   "Show what deleting the prefix at point would remove, without removing it."
   (interactive)
@@ -2009,16 +2032,8 @@ input."
        :name "s3-rm-dryrun"
        :on-success
        (lambda (output)
-         (with-current-buffer (get-buffer-create "*S3 Manager Dry Run*")
-           (let ((inhibit-read-only t))
-             (erase-buffer)
-             (insert (format "Would delete under %s:\n\n" uri))
-             (insert (if (string-empty-p (string-trim (or output "")))
-                         "(nothing)\n"
-                       output))
-             (goto-char (point-min)))
-           (unless (derived-mode-p 'special-mode) (special-mode))
-           (display-buffer (current-buffer))))
+         (s3-manager--show-dry-run (format "Would delete under %s:" uri)
+                                   output))
        :on-error (lambda (err)
                    (s3-manager--report-error err "s3 rm --dryrun"))))))
 
