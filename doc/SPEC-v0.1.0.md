@@ -784,6 +784,14 @@ The current prefix lives in the header line, not the buffer name. This bounds
 buffer count by buckets visited rather than prefixes visited, still permits
 several concurrent sessions, and keeps `^` under explicit control.
 
+**Navigation displays in the selected window** -- `pop-to-buffer-same-window`,
+never `pop-to-buffer`. [CORRECTED] The first implementation used
+`pop-to-buffer`, which splits a single-window frame: entering a bucket left
+the bucket list on screen beside it, and `RET` on an object opened the copy in
+a second window. Dired does neither. Since `RET` is one key for descending and
+for viewing, both must display the same way, so the view buffer follows the
+same rule.
+
 ### 8.2 Buffer-local state
 
 ```elisp

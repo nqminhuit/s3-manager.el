@@ -1498,7 +1498,7 @@ TARGET, when given, is the entry to put point on once the listing lands."
     (cond
      ;; In the bucket list the id is the bucket name.
      ((null s3-manager--bucket)
-      (pop-to-buffer (s3-manager--object-buffer s3-manager--profile id "")))
+      (pop-to-buffer-same-window (s3-manager--object-buffer s3-manager--profile id "")))
      ((eq (s3-manager-entry-type id) 'directory)
       ;; Remember where we were so `s3-manager-up' can put point back on
       ;; this row rather than at the top of the parent listing.
@@ -1518,7 +1518,7 @@ TARGET, when given, is the entry to put point on once the listing lands."
     (user-error "Already at the bucket list"))
    ((string-empty-p s3-manager--prefix)
     (let ((bucket s3-manager--bucket))
-      (pop-to-buffer (s3-manager--bucket-buffer s3-manager--profile bucket))))
+      (pop-to-buffer-same-window (s3-manager--bucket-buffer s3-manager--profile bucket))))
    (t
     (let* ((parent (s3-manager--parent-prefix s3-manager--prefix))
            (remembered (and (equal (caar s3-manager--history) parent)
@@ -1625,7 +1625,9 @@ name."
       ;; leaving downloaded object data lying in the temporary directory.
       (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t)
       (read-only-mode 1))
-    (pop-to-buffer buffer)))
+    ;; Same window, like `dired-find-file': `RET' is one key for both
+    ;; descending and viewing, so the two must not display differently.
+    (pop-to-buffer-same-window buffer)))
 
 (defun s3-manager-view ()
   "Open the object at point in a read-only buffer."
@@ -2067,7 +2069,7 @@ and ask the AWS CLI for it again."
     (setq s3-manager--profiles nil))
   (s3-manager-read-profile
    (lambda (profile)
-     (pop-to-buffer (s3-manager--bucket-buffer profile)))))
+     (pop-to-buffer-same-window (s3-manager--bucket-buffer profile)))))
 
 ;;;###autoload
 (defun s3-manager-switch-profile (&optional reread-profiles)
@@ -2097,7 +2099,7 @@ again first, for a profile added since the list was cached."
            (unless (zerop dropped)
              (message "S3: dropped %d cached listing%s for %s"
                       dropped (if (= dropped 1) "" "s") previous))))
-       (pop-to-buffer (s3-manager--bucket-buffer profile))))))
+       (pop-to-buffer-same-window (s3-manager--bucket-buffer profile))))))
 
 (provide 's3-manager)
 

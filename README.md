@@ -77,6 +77,13 @@ bucket opens it; `RET` on a prefix descends into it.
 | `n` / `p` | next / previous line |
 | `q` | bury the buffer |
 
+Navigation reuses the selected window, like Dired: entering a bucket, moving
+between prefixes and opening an object all replace what is on screen rather
+than splitting the frame. There is one buffer per profile for the bucket list
+and one per bucket for browsing it, reused across every prefix inside that
+bucket, so the buffer list grows with buckets visited rather than with
+directories entered.
+
 Columns are click-to-sort. Directories always sort first. Name is the last
 column deliberately: `tabulated-list` does not truncate, so putting the one
 unbounded field first would let a long key push the other columns out of

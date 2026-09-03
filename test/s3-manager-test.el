@@ -1591,6 +1591,41 @@ equality is structural."
         (kill-buffer buffer)))))
 
 
+(ert-deftest s3-manager-test-open-reuses-the-window ()
+  "Entering a bucket must reuse the window, as `dired-find-file' does.
+`pop-to-buffer' splits a single-window frame, which is how this first
+shipped: the bucket list stayed on screen beside the bucket just entered,
+and no Emacs file browser behaves that way."
+  (s3-manager-test--with-fake-aws
+      (:stdout s3-manager-test--one-bucket-json)
+    (let ((bucket-buf (s3-manager--bucket-buffer "production"))
+          (object-buf nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer bucket-buf
+              (should (s3-manager-test--wait
+                       (lambda ()
+                         (and (null s3-manager--status)
+                              tabulated-list-entries)))))
+            (delete-other-windows)
+            (switch-to-buffer bucket-buf)
+            (should (= 1 (length (window-list))))
+            (with-current-buffer bucket-buf
+              (goto-char (point-min))
+              ;; Row one is the column-title line: this mode renders it in
+              ;; the buffer rather than the header line.
+              (forward-line 1)
+              (should (equal (tabulated-list-get-id) "media"))
+              (s3-manager-open))
+            (setq object-buf (get-buffer "*s3: production/media*"))
+            (should (bufferp object-buf))
+            (should (= 1 (length (window-list))))
+            (should (eq (window-buffer (selected-window)) object-buf)))
+        (when (buffer-live-p bucket-buf) (kill-buffer bucket-buf))
+        (when (and object-buf (buffer-live-p object-buf))
+          (kill-buffer object-buf))))))
+
+
 ;;;; Cache
 
 (defmacro s3-manager-test--with-clean-cache (&rest body)
@@ -2526,7 +2561,7 @@ The sweep on `kill-emacs-hook' is the only thing left to recover it."
     (unwind-protect
         (s3-manager-test--in-many-buffer
           (s3-manager-test--goto-object)
-          (cl-letf (((symbol-function 'pop-to-buffer)
+          (cl-letf (((symbol-function 'pop-to-buffer-same-window)
                      (lambda (buffer &rest _) (setq view-buffer buffer)))
                     ((symbol-function 'message) #'ignore))
             ;; The double writes the object's contents to the destination
@@ -2567,7 +2602,7 @@ The object keeps its own name, so `auto-mode-alist' applies as usual."
         (progn
           (write-region ";;; thing.el --- x\n(defun thing () nil)\n"
                         nil path nil 'silent)
-          (cl-letf (((symbol-function 'pop-to-buffer)
+          (cl-letf (((symbol-function 'pop-to-buffer-same-window)
                      (lambda (b &rest _) (setq buffer b))))
             (s3-manager--display-view path "s3://media/lib/thing.el"))
           (with-current-buffer buffer
@@ -2591,7 +2626,7 @@ regression it exists to catch."
          (buffer nil))
     (write-region "data\n" nil path nil 'silent)
     (should (file-exists-p path))
-    (cl-letf (((symbol-function 'pop-to-buffer)
+    (cl-letf (((symbol-function 'pop-to-buffer-same-window)
                (lambda (b &rest _) (setq buffer b))))
       (s3-manager--display-view path "s3://media/a.txt"))
     ;; Ownership moved from the pending set to the buffer.
@@ -2633,7 +2668,7 @@ regression it exists to catch."
           (s3-manager-mode)
           (setq s3-manager--profile "alpha")
           (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "beta"))
-                    ((symbol-function 'pop-to-buffer)
+                    ((symbol-function 'pop-to-buffer-same-window)
                      (lambda (b &rest _) (setq shown b)))
                     ((symbol-function 'message) #'ignore))
             (s3-manager-switch-profile)))
@@ -2662,7 +2697,7 @@ regression it exists to catch."
         (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "beta"))
                   ((symbol-function 's3-manager--bucket-buffer)
                    (lambda (&rest _) (current-buffer)))
-                  ((symbol-function 'pop-to-buffer)
+                  ((symbol-function 'pop-to-buffer-same-window)
                    (lambda (b &rest _) (setq shown b)))
                   ((symbol-function 'message) #'ignore))
           (s3-manager-switch-profile)))
@@ -2683,7 +2718,7 @@ regression it exists to catch."
         (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "alpha"))
                   ((symbol-function 's3-manager--bucket-buffer)
                    (lambda (&rest _) (current-buffer)))
-                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'pop-to-buffer-same-window) #'ignore)
                   ((symbol-function 'message) #'ignore))
           (s3-manager-switch-profile)))
       (should (s3-manager--cache-get '("alpha" nil "one" ""))))))
