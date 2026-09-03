@@ -16,5 +16,5 @@ dist/
 # Undo-tree save-files
 *.~undo-tree
 
-# CI test transcript, kept only to check for skipped tests
-test.log
+# Test-only dependencies installed by CI
+.deps/

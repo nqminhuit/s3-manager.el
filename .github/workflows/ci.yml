@@ -89,6 +89,25 @@ jobs:
                 -l test/s3-manager-test.el \
                 --eval '(ert-run-tests-batch-and-exit (quote (not (tag cli))))'
 
+      - name: Install Evil for the keymap tests
+        # Evil is not a dependency of the package; it is installed only so the
+        # keymap-precedence tests run instead of skipping. Deliberately not an
+        # Eask development dependency: `eask install-deps' compiles what it
+        # installs, and the manifest's `byte-compile-error-on-warn' -- correct
+        # for our code -- turns a warning in Evil's own source into a fatal
+        # error.
+        run: |
+          emacs -Q --batch --eval '(progn (require (quote package)) (setq package-user-dir (expand-file-name ".deps") package-archives (quote (("nongnu" . "https://elpa.nongnu.org/nongnu/")))) (package-initialize) (package-refresh-contents) (package-install (quote evil)))'
+
+      - name: Evil integration tests
+        # `skip-unless' makes an absent Evil look like success, so require that
+        # all three tests actually ran rather than trusting a green tick.
+        run: |
+          emacs -Q --batch \
+                --eval '(progn (require (quote package)) (setq package-user-dir (expand-file-name ".deps")) (package-initialize))' \
+                -L . -L test -l test/s3-manager-test.el \
+                --eval '(let ((s (ert-run-tests-batch (quote (tag evil))))) (kill-emacs (if (and (= 3 (ert-stats-completed-expected s)) (zerop (ert-stats-completed-unexpected s))) 0 1)))'
+
       - name: Test with no AWS configuration present
         # A runner has no ~/.aws. Nothing in the suite may depend on one.
         env:
@@ -116,29 +135,13 @@ jobs:
 
       - run: eask info
 
-      - name: Install dependencies
-        # Nothing else does: `eask info' only prints the manifest, and neither
-        # `eask compile' nor `eask test' fetches anything. Without this the
-        # Evil dev dependency is absent and its tests skip.
-        run: eask install-deps --dev
-
       - name: Compile through Eask
         # Proves the manifest still describes the package correctly; without
         # this the Eask file rots unnoticed.
         run: eask compile
 
       - name: Test through Eask
-        # The Evil tests use `skip-unless', so a missing dev dependency makes
-        # them look like success -- which is exactly what happened before the
-        # install step above existed. This job is the only place they run at
-        # all, so require that they did.
-        run: |
-          set -o pipefail
-          eask test ert ./test/s3-manager-test.el 2>&1 | tee test.log
-          if grep -q 'SKIPPED  s3-manager-test-evil' test.log; then
-            echo "::error::Evil tests skipped -- the dev dependency did not load"
-            exit 1
-          fi
+        run: eask test ert ./test/s3-manager-test.el
 
       - name: checkdoc
         # Informational: v0.1.0 targets clean personal-use quality, not MELPA

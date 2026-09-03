@@ -176,8 +176,18 @@ Tests need no network and no `~/.aws`: `test/fake-aws` stands in for the CLI,
 with its stdout, stderr, exit code and timing driven by the environment. The
 few tests that shell out to a real `aws` to validate argument vectors offline
 are tagged `cli` and skip themselves when it is absent; the Evil keymap tests
-are tagged `evil` and skip themselves unless Evil is on the `load-path`
-(`eask test` installs it, the bare `emacs --batch` invocation above does not).
+are tagged `evil` and skip themselves unless Evil is on the `load-path`. To
+run those, put Evil there yourself:
+
+```sh
+emacs -Q --batch -L . -L test -L /path/to/evil \
+      -l test/s3-manager-test.el \
+      --eval '(ert-run-tests-batch-and-exit (quote (tag evil)))'
+```
+
+CI installs Evil from NonGNU ELPA and fails the step if the tests skip rather
+than run -- a `skip-unless` test is worth only as much as the guarantee that
+its dependency is present.
 
 `doc/SPEC-v0.1.0.md` is the design document, including a reference appendix of
 AWS CLI and Emacs subprocess behaviour that was measured rather than assumed.
