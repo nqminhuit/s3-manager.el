@@ -780,6 +780,191 @@ that it still catches real mistakes: an invented flag exits 252 here."
                            "--no-such-flag" "x"
                            "--generate-cli-skeleton" "output")))))))
 
+
+;;;; Profile discovery and selection
+
+(defmacro s3-manager-test--with-clean-profiles (&rest body)
+  "Run BODY with the profile caches empty and restored afterwards."
+  (declare (indent 0))
+  `(let ((s3-manager--profiles nil)
+         (s3-manager--profiles-waiting nil)
+         (s3-manager--profile-history nil))
+     ,@body))
+
+(ert-deftest s3-manager-test-profiles-are-parsed ()
+  "`configure list-profiles' emits bare names, one per line."
+  (s3-manager-test--with-clean-profiles
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws
+          (:stdout "default\\nproduction\\nminio\\n")
+        (s3-manager--with-profiles (lambda (p) (setq result p)))
+        (should (s3-manager-test--wait
+                 (lambda () (not (eq result 'pending))))))
+      (should (equal result '("default" "production" "minio")))
+      (should (equal s3-manager--profiles '("default" "production" "minio"))))))
+
+(ert-deftest s3-manager-test-profiles-uses-no-profile-flag ()
+  "Discovery must not pass --profile: it is what discovers them."
+  (s3-manager-test--with-clean-profiles
+    (let ((argv-file (make-temp-file "s3-profiles-argv"))
+          (result 'pending))
+      (unwind-protect
+          (progn
+            (s3-manager-test--with-fake-aws
+                (:stdout "default\\n" :argv-file argv-file)
+              (s3-manager--with-profiles (lambda (p) (setq result p)))
+              (should (s3-manager-test--wait
+                       (lambda () (not (eq result 'pending))))))
+            (let ((argv (with-temp-buffer
+                          (insert-file-contents argv-file)
+                          (split-string (buffer-string) "\n" t))))
+              (should (equal argv '("--no-cli-pager" "--no-cli-auto-prompt"
+                                    "configure" "list-profiles")))
+              (should-not (member "--profile" argv))))
+        (delete-file argv-file)))))
+
+(ert-deftest s3-manager-test-profiles-empty-is-not-an-error ()
+  "A machine with no ~/.aws exits 0 with no output."
+  (s3-manager-test--with-clean-profiles
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws (:stdout "")
+        (s3-manager--with-profiles (lambda (p) (setq result (list :got p))))
+        (should (s3-manager-test--wait
+                 (lambda () (not (eq result 'pending))))))
+      (should (equal result '(:got nil)))
+      ;; Not cached: the remedy is to run `aws configure', and the next
+      ;; attempt should see that it was run.
+      (should (null s3-manager--profiles)))))
+
+(ert-deftest s3-manager-test-profiles-are-cached ()
+  "A second lookup must not spawn a second process."
+  (s3-manager-test--with-clean-profiles
+    (let ((result 'pending))
+      (s3-manager-test--with-fake-aws (:stdout "default\\n")
+        (s3-manager--with-profiles (lambda (p) (setq result p)))
+        (should (s3-manager-test--wait
+                 (lambda () (not (eq result 'pending))))))
+      ;; With the program pointed at something that cannot run, a cache miss
+      ;; would fail loudly.
+      (let ((s3-manager-aws-program "s3-manager-no-such-program")
+            (again 'pending))
+        (s3-manager--with-profiles (lambda (p) (setq again p)))
+        (should (equal again '("default")))))))
+
+(ert-deftest s3-manager-test-forget-profiles-forces-a-reread ()
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("stale"))
+    (s3-manager-forget-profiles)
+    (should (null s3-manager--profiles))))
+
+(ert-deftest s3-manager-test-concurrent-lookups-share-one-process ()
+  "Two callers must produce one subprocess and one prompt, not two."
+  (s3-manager-test--with-clean-profiles
+    (let ((argv-file (make-temp-file "s3-profiles-argv"))
+          (calls 0)
+          (first 'pending) (second 'pending))
+      (unwind-protect
+          (s3-manager-test--with-fake-aws
+              (:stdout "default\\nproduction\\n" :delay "0.2"
+               :argv-file argv-file)
+            (cl-letf* ((original (symbol-function 's3-manager--aws-async))
+                       ((symbol-function 's3-manager--aws-async)
+                        (lambda (&rest args)
+                          (cl-incf calls)
+                          (apply original args))))
+              (s3-manager--with-profiles (lambda (p) (setq first p)))
+              (s3-manager--with-profiles (lambda (p) (setq second p)))
+              (should (s3-manager-test--wait
+                       (lambda () (not (or (eq first 'pending)
+                                           (eq second 'pending))))))
+              (should (= calls 1))
+              (should (equal first '("default" "production")))
+              (should (equal second first))))
+        (delete-file argv-file)))))
+
+(defvar s3-manager-test--inside-resolver nil
+  "Bound to t only for the dynamic extent of the discovery resolver.")
+
+(ert-deftest s3-manager-test-profile-callbacks-do-not-run-in-a-sentinel ()
+  "Callbacks may prompt, so they must not run inside a process sentinel.
+
+`completing-read' called from a sentinel reenters the minibuffer at an
+arbitrary point in whatever Emacs happened to be doing.  Discovery hands
+control back through a timer first, and this pins that: the resolver is
+what the sentinel calls, so a callback observing its dynamic extent
+would prove the hop had been removed.
+
+Note that `inhibit-quit' cannot be used to detect this -- it is t inside
+timers as well as sentinels."
+  (s3-manager-test--with-clean-profiles
+    (let ((observed 'unset) (result 'pending))
+      (cl-letf* ((original (symbol-function 's3-manager--profiles-resolved))
+                 ((symbol-function 's3-manager--profiles-resolved)
+                  (lambda (&rest args)
+                    (let ((s3-manager-test--inside-resolver t))
+                      (apply original args)))))
+        (s3-manager-test--with-fake-aws (:stdout "default\\n")
+          (s3-manager--with-profiles
+           (lambda (p)
+             (setq observed s3-manager-test--inside-resolver
+                   result p)))
+          (should (s3-manager-test--wait
+                   (lambda () (not (eq result 'pending)))))))
+      (should (equal result '("default")))
+      (should (null observed)))))
+
+(ert-deftest s3-manager-test-cached-profiles-callback-is-synchronous ()
+  "The cached path runs in the caller\='s own extent, so the prompt is normal."
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("default" "production"))
+    (let ((ran nil))
+      (s3-manager--with-profiles (lambda (_) (setq ran t)))
+      ;; No event loop was pumped: this must already have happened.
+      (should ran))))
+
+(ert-deftest s3-manager-test-read-profile-prompts-and-passes-the-choice ()
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("default" "production"))
+    (let (collection chosen)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt coll &rest _)
+                   (setq collection coll)
+                   "production")))
+        (s3-manager-read-profile (lambda (p) (setq chosen p))))
+      (should (equal collection '("default" "production")))
+      (should (equal chosen "production")))))
+
+(ert-deftest s3-manager-test-read-profile-with-none-configured ()
+  "With no profiles there is nothing to prompt for; say so, do not prompt."
+  (s3-manager-test--with-clean-profiles
+    (let ((prompted nil) (chosen 'none) (messages nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (setq prompted t) ""))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (s3-manager-test--with-fake-aws (:stdout "")
+          (s3-manager-read-profile (lambda (p) (setq chosen p)))
+          (s3-manager-test--wait (lambda () messages) 2)))
+      (should-not prompted)
+      (should (eq chosen 'none))
+      (should (seq-find (lambda (m) (string-match-p "aws configure" m))
+                        messages)))))
+
+(ert-deftest s3-manager-test-profile-discovery-failure-is-reported ()
+  (s3-manager-test--with-clean-profiles
+    (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*"))
+    (let ((called nil))
+      (s3-manager-test--with-fake-aws
+          (:stderr "Unable to parse config file\\n" :exit 255)
+        (s3-manager--with-profiles (lambda (_) (setq called t)))
+        (s3-manager-test--wait (lambda () (get-buffer "*S3 Manager Error*")) 2))
+      (should-not called)
+      (should (get-buffer "*S3 Manager Error*"))
+      (with-current-buffer "*S3 Manager Error*"
+        (should (string-match-p "list-profiles" (buffer-string))))
+      (kill-buffer "*S3 Manager Error*"))))
+
 (provide 's3-manager-test)
 
 ;;; s3-manager-test.el ends here

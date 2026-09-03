@@ -654,11 +654,46 @@ S3 Manager: no AWS profiles found. Run `aws configure' first.
 ### 7.2 Selection
 
 ```elisp
-(completing-read "S3 profile: " (s3-manager--profiles) nil t nil
-                 's3-manager--profile-history)
+(completing-read "S3 profile: " profiles nil t nil
+                 's3-manager--profile-history
+                 (car s3-manager--profile-history))
 ```
 
-A history variable is used so that repeat invocations default sensibly.
+A history variable is used so that repeat invocations default sensibly, and the
+most recent choice is the default, so re-selecting is a single `RET`.
+
+**The prompt must not run inside a process sentinel.** Discovery is
+asynchronous, so the naive arrangement — prompt from the `on-success`
+callback — calls `completing-read` from a sentinel, which reenters the
+minibuffer at an arbitrary point in whatever Emacs was doing. Discovery
+therefore hands control back through `run-at-time 0` before invoking its
+callbacks:
+
+```elisp
+(defun s3-manager--with-profiles (callback)
+  "Call CALLBACK with the list of AWS profile names.
+CALLBACK runs immediately when the list is known, and otherwise from a
+timer once the CLI has answered — never from the sentinel, so it is safe
+for it to prompt."
+  ...)
+```
+
+Two consequences worth stating, because both are load-bearing:
+
+- **The cached path is synchronous.** When the profile list is already known,
+  `callback` runs in the caller's own dynamic extent, so the common case is an
+  ordinary interactive prompt with no deferral at all.
+- **Concurrent lookups share one subprocess.** Callbacks arriving while a
+  discovery is in flight are queued. Without this, two quick invocations
+  produce two `aws` processes and two stacked minibuffer prompts.
+
+Note that `inhibit-quit` cannot be used to detect "am I in a sentinel" — it is
+`t` inside timers as well. Testing this property requires observing the
+resolver's own dynamic extent.
+
+An empty profile list is a legitimate success (§18.5), reported as guidance
+rather than an error, and deliberately **not** cached: the remedy is to run
+`aws configure`, and the next attempt should see that it was run.
 
 ### 7.3 Endpoints
 

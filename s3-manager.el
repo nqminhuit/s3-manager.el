@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026 Minh Nguyen
 
-;; Author: Minh Nguyen <minh.q.nguyen@opswat.com>
+;; Author: Minh Nguyen <nqminhuit@gmail.com>
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
@@ -617,6 +617,96 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                   (with-current-buffer origin (setq s3-manager--process nil)))
                 (s3-manager--cleanup proc)))))))
       proc)))
+
+;;;; Profiles
+;;
+;; The package never reads ~/.aws itself.  It asks the CLI for the profile
+;; names and passes the chosen one back with --profile; credentials are the
+;; CLI's business throughout.
+
+(defvar s3-manager--profiles nil
+  "Cached list of AWS CLI profile names, or nil if not yet discovered.
+An empty result is deliberately not cached: the natural response to
+\"no profiles found\" is to run `aws configure', and the next attempt
+should see the result of having done so.")
+
+(defvar s3-manager--profiles-waiting nil
+  "Callbacks awaiting the in-flight profile discovery.
+Non-nil also means a discovery is running, so concurrent callers share
+one subprocess and produce one prompt rather than several.")
+
+(defvar s3-manager--profile-history nil
+  "Minibuffer history of chosen AWS profiles.")
+
+(defun s3-manager--profiles-resolved (profiles err)
+  "Hand PROFILES, or report ERR, to everything waiting on discovery."
+  (let ((waiting (nreverse s3-manager--profiles-waiting)))
+    (setq s3-manager--profiles-waiting nil
+          s3-manager--profiles profiles)
+    (if err
+        (s3-manager--report-error err "configure list-profiles")
+      ;; Leave the sentinel before running callbacks.  They prompt, and
+      ;; `completing-read' inside a process sentinel reenters the minibuffer
+      ;; from arbitrary points in whatever Emacs was doing at the time.
+      (run-at-time
+       0 nil
+       (lambda ()
+         (dolist (callback waiting)
+           (funcall callback profiles)))))))
+
+(defun s3-manager--with-profiles (callback)
+  "Call CALLBACK with the list of AWS profile names.
+
+CALLBACK runs immediately when the list is already known, and otherwise
+from a timer once the CLI has answered -- never from inside the process
+sentinel, so it is safe for it to prompt."
+  (cond
+   (s3-manager--profiles (funcall callback s3-manager--profiles))
+   (s3-manager--profiles-waiting (push callback s3-manager--profiles-waiting))
+   (t
+    (setq s3-manager--profiles-waiting (list callback))
+    (s3-manager--aws-async
+     '("configure" "list-profiles")
+     :parse nil
+     :name "s3-profiles"
+     :on-success (lambda (output)
+                   (s3-manager--profiles-resolved
+                    (split-string (or output "") "\n" t) nil))
+     :on-error (lambda (err) (s3-manager--profiles-resolved nil err))))))
+
+(defun s3-manager-read-profile (callback)
+  "Prompt for an AWS profile and call CALLBACK with the chosen name.
+
+Does nothing but report when no profiles are configured.  The default is
+the most recently chosen profile, so repeat use is a single RET."
+  (s3-manager--with-profiles
+   (lambda (profiles)
+     (if (null profiles)
+         (message
+          "S3: no AWS profiles found.  Run `aws configure' to create one")
+       (funcall callback
+                (completing-read "S3 profile: " profiles nil t nil
+                                 's3-manager--profile-history
+                                 (car s3-manager--profile-history)))))))
+
+;;;###autoload
+(defun s3-manager-forget-profiles ()
+  "Discard the cached AWS profile list so it is read again."
+  (interactive)
+  (setq s3-manager--profiles nil)
+  (message "S3: profile list will be re-read"))
+
+;;;###autoload
+(defun s3-manager-list-profiles ()
+  "Report the AWS profiles the CLI knows about."
+  (interactive)
+  (s3-manager--check-cli)
+  (s3-manager--with-profiles
+   (lambda (profiles)
+     (if profiles
+         (message "S3 profiles: %s" (string-join profiles ", "))
+       (message
+        "S3: no AWS profiles found.  Run `aws configure' to create one")))))
 
 (provide 's3-manager)
 
