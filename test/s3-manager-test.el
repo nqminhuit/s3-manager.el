@@ -2253,7 +2253,13 @@ report a partial deletion as a complete one."
       (should-error (s3-manager-delete) :type 'user-error))))
 
 (ert-deftest s3-manager-test-recursive-delete-purges-the-cache-below ()
-  "Everything at or under the deleted prefix must be forgotten."
+  "Everything at or under the deleted prefix must be forgotten.
+
+And so must the listing that was showing it.  The deleted prefix sits
+*below* that listing, so purging at-and-under the prefix alone leaves
+the parent cached -- and the refresh then redisplays a prefix that no
+longer exists.  Found by watching a real recursive delete: every object
+was gone from S3, yet the row was still on screen."
   (let ((s3-manager--cache (make-hash-table :test #'equal)))
     (with-temp-buffer
       (s3-manager-mode)
@@ -2265,8 +2271,24 @@ report a partial deletion as a complete one."
         (s3-manager--after-delete "sub/"))
       (should (null (s3-manager--cache-get '("p" nil "media" "sub/"))))
       (should (null (s3-manager--cache-get '("p" nil "media" "sub/deep/"))))
-      (should (s3-manager--cache-get '("p" nil "media" "other/")))
-      (should (s3-manager--cache-get '("p" nil "media" ""))))))
+      ;; The listing being shown, which contained the row.
+      (should (null (s3-manager--cache-get '("p" nil "media" ""))))
+      ;; Unrelated prefixes are untouched.
+      (should (s3-manager--cache-get '("p" nil "media" "other/"))))))
+
+(ert-deftest s3-manager-test-single-delete-invalidates-its-listing ()
+  (let ((s3-manager--cache (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "media"
+            s3-manager--prefix "a/")
+      (dolist (prefix '("" "a/" "b/"))
+        (s3-manager--cache-put (list "p" nil "media" prefix) nil nil nil))
+      (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
+        (s3-manager--after-delete))
+      (should (null (s3-manager--cache-get '("p" nil "media" "a/"))))
+      (should (s3-manager--cache-get '("p" nil "media" "")))
+      (should (s3-manager--cache-get '("p" nil "media" "b/"))))))
 
 (ert-deftest s3-manager-test-delete-refuses-in-the-bucket-list ()
   (with-temp-buffer

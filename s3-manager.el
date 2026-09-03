@@ -1505,12 +1505,17 @@ nonetheless act on."
   "Refresh after a deletion, invalidating the affected cache entries.
 With PREFIX, everything at or beneath it is dropped, which is what a
 recursive delete requires."
-  (if prefix
-      (s3-manager--cache-purge s3-manager--profile
-                               (s3-manager--endpoint-for s3-manager--profile)
-                               s3-manager--bucket
-                               prefix)
-    (s3-manager--cache-invalidate (s3-manager--cache-key)))
+  ;; The listing on screen has changed by definition, so drop it first.  A
+  ;; recursive delete does not imply this: the prefix removed sits *below*
+  ;; the listing showing it, so purging at-and-under the prefix leaves the
+  ;; parent cached and the refresh redisplays the prefix that no longer
+  ;; exists.
+  (s3-manager--cache-invalidate (s3-manager--cache-key))
+  (when prefix
+    (s3-manager--cache-purge s3-manager--profile
+                             (s3-manager--endpoint-for s3-manager--profile)
+                             s3-manager--bucket
+                             prefix))
   (s3-manager--reload))
 
 (defun s3-manager--delete-report-errors (errors)
