@@ -2311,19 +2311,29 @@ the cache is enough, and it is re-read when the user returns."
   (when (equal prefix s3-manager--prefix)
     (s3-manager--reload nil key)))
 
-(defun s3-manager--upload-args (source uri recursive)
+(defun s3-manager--upload-args (source uri recursive &optional dry-run)
   "Return the `s3 cp' arguments uploading SOURCE to URI.
 With RECURSIVE, both paths carry a trailing slash and `--recursive' is
-passed.  SOURCE is absolute, so it can never be read as an option."
+passed.  With DRY-RUN, nothing is transferred and the CLI reports what
+it would have sent.  SOURCE is absolute, so it can never be read as an
+option.
+
+Every argument that decides *what* is sent -- the paths, `--recursive',
+the symlink flag -- is shared between the two forms.  A preview that
+could differ from the upload it previews would be worse than no preview,
+since the symlink decision leans on it."
   (append (list "s3" "cp"
                 (if recursive (file-name-as-directory source) source)
                 uri)
           (when recursive '("--recursive"))
           (when (and recursive (not s3-manager-upload-follow-symlinks))
             '("--no-follow-symlinks"))
-          ;; No --quiet and no --only-show-errors: both suppress the progress
-          ;; the mode line depends on.
-          '("--progress-frequency" "1")))
+          (if dry-run
+              '("--dryrun")
+            ;; No --quiet and no --only-show-errors: both suppress the
+            ;; progress the mode line depends on.  Neither belongs in a dry
+            ;; run, which transfers nothing to report on.
+            '("--progress-frequency" "1"))))
 
 (defun s3-manager--upload-start (source uri key prefix &optional recursive)
   "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards.
@@ -2474,6 +2484,41 @@ recursively, after a typed confirmation."
             (user-error "Upload aborted"))
           (s3-manager--upload-start source uri key prefix t))
       (s3-manager--upload-probe source uri key prefix))))
+
+(defun s3-manager-upload-dry-run ()
+  "Show what uploading a local file or directory would write, without writing.
+
+The preview a recursive upload deserves: it names every object that
+would be created, before any of them are.  Symbolic links are resolved
+here exactly as they would be by the upload itself, so a link to a large
+tree shows up as the files it would really send.
+
+No overwrite check.  `--dryrun' reports what would be sent, not what
+would be replaced, and pretending otherwise would need one probe per
+file."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (let* ((source (s3-manager--upload-source))
+         (recursive (file-directory-p source))
+         (key (s3-manager--upload-key source s3-manager--prefix))
+         (uri (s3-manager--s3-uri key)))
+    (message "S3: listing what uploading %s would write..."
+             (abbreviate-file-name source))
+    (s3-manager--aws-async
+     (s3-manager--upload-args source uri recursive t)
+     :profile s3-manager--profile
+     :buffer (current-buffer)
+     :parse nil
+     :name "s3-cp-dryrun"
+     :on-success
+     (lambda (output)
+       (s3-manager--show-dry-run
+        (format "Would upload %s to %s:"
+                (abbreviate-file-name source) uri)
+        output))
+     :on-error (lambda (err)
+                 (s3-manager--report-error err "s3 cp --dryrun")))))
 
 (defun s3-manager--entry-at-point ()
   "Return the entry on the current line, or signal a `user-error'.

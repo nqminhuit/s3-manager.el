@@ -3089,6 +3089,115 @@ its own and the only thing captured is the hop under test."
           (funcall (cdr (car thunks)))
           (should prompted))))))
 
+(ert-deftest s3-manager-test-upload-dry-run-argv ()
+  "A preview transfers nothing: `--dryrun', and no progress to report on."
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-source source
+          (s3-manager-test--with-fresh-dry-run-buffer
+            (s3-manager-test--in-object-buffer
+              (cl-letf (((symbol-function 'read-file-name)
+                         (lambda (&rest _) source))
+                        ((symbol-function 'display-buffer) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "(dryrun) upload: ./x to s3://media/x\n"
+                     :argv-file argv-file)
+                  (s3-manager-upload-dry-run)
+                  (should (s3-manager-test--wait
+                           (lambda () (s3-manager-test--dry-run-text)))))))
+            (let ((argv (car (s3-manager-test--argv-records argv-file)))
+                  (name (file-name-nondirectory source)))
+              (should (equal argv
+                             (list "--profile" "production"
+                                   "--no-cli-pager" "--no-cli-auto-prompt"
+                                   "s3" "cp" source (concat "s3://media/" name)
+                                   "--dryrun")))
+              (should-not (member "--progress-frequency" argv))
+              ;; A preview must not probe: it reports what would be sent,
+              ;; not what would be replaced.
+              (should-not (member "head-object" argv)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-upload-dry-run-directory-argv ()
+  "The recursive preview must describe the recursive upload exactly."
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-tree tree
+          (s3-manager-test--with-fresh-dry-run-buffer
+            (s3-manager-test--in-object-buffer
+              (cl-letf (((symbol-function 'read-file-name)
+                         (lambda (&rest _) tree))
+                        ((symbol-function 'yes-or-no-p)
+                         (lambda (&rest _)
+                           (error "A preview must not ask for confirmation")))
+                        ((symbol-function 'display-buffer) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "(dryrun) upload: ./a.txt to s3://media/t/a.txt\n"
+                     :argv-file argv-file)
+                  (s3-manager-upload-dry-run)
+                  (should (s3-manager-test--wait
+                           (lambda () (s3-manager-test--dry-run-text)))))))
+            (let ((argv (car (s3-manager-test--argv-records argv-file)))
+                  (leaf (file-name-nondirectory tree)))
+              (should (equal argv
+                             (list "--profile" "production"
+                                   "--no-cli-pager" "--no-cli-auto-prompt"
+                                   "s3" "cp"
+                                   (file-name-as-directory tree)
+                                   (concat "s3://media/" leaf "/")
+                                   "--recursive" "--dryrun"))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-dry-run-matches-the-upload-it-previews ()
+  "Every argument deciding *what* is sent must be identical in both forms.
+
+The symlink decision leans on the preview: following links is the CLI's
+default and can pull in a large tree, and the dry run is what makes that
+visible beforehand.  A preview that could resolve links differently from
+the upload would be worse than no preview at all."
+  (dolist (follow '(t nil))
+    (let* ((s3-manager-upload-follow-symlinks follow)
+           (real (s3-manager--upload-args "/tmp/d" "s3://b/d/" t))
+           (preview (s3-manager--upload-args "/tmp/d" "s3://b/d/" t t))
+           (decisive (lambda (args)
+                       (seq-remove
+                        (lambda (a)
+                          (member a '("--dryrun" "--progress-frequency" "1")))
+                        args))))
+      (should (equal (funcall decisive real) (funcall decisive preview)))
+      (should (member "--dryrun" preview))
+      (should-not (member "--dryrun" real))
+      (should-not (member "--progress-frequency" preview)))))
+
+(ert-deftest s3-manager-test-upload-dry-run-renders-and-writes-nothing ()
+  "The preview lands in the shared dry-run buffer, and no transfer starts."
+  (s3-manager-test--with-upload-source source
+    (s3-manager-test--with-fresh-dry-run-buffer
+      (s3-manager-test--in-object-buffer
+        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) source))
+                  ((symbol-function 'display-buffer) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-test--with-fake-aws
+              (:stdout "(dryrun) upload: ./a to s3://media/a\n(dryrun) upload: ./b to s3://media/b\n")
+            (s3-manager-upload-dry-run)
+            (should (s3-manager-test--wait
+                     (lambda () (s3-manager-test--dry-run-text))))))
+        (should (zerop s3-manager--transfers)))
+      (let ((text (s3-manager-test--dry-run-text)))
+        (should (string-match-p "Would upload" text))
+        (should (string-match-p "s3://media/a" text))
+        (should (string-match-p "s3://media/b" text)))
+      (with-current-buffer "*S3 Manager Dry Run*"
+        (should (derived-mode-p 'special-mode))))))
+
+(ert-deftest s3-manager-test-upload-dry-run-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket nil)
+    (should-error (s3-manager-upload-dry-run) :type 'user-error)))
+
 (ert-deftest s3-manager-test-upload-key-is-bound ()
   (should (eq (keymap-lookup s3-manager-mode-map "P") #'s3-manager-upload)))
 

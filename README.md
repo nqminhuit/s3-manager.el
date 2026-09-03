@@ -104,6 +104,8 @@ Other commands, not bound to keys:
 
 - `M-x s3-manager-switch-profile` — pick a different profile (`C-u` re-reads the
   profile list first)
+- `M-x s3-manager-upload-dry-run` — list what `P` would write, without writing
+  it
 - `M-x s3-manager-delete-recursive-dry-run` — list what `D` on a prefix would
   remove, without removing it
 - `M-x s3-manager-clear-cache`, `M-x s3-manager-forget-profiles`
@@ -131,8 +133,13 @@ across the prefix you were looking at.
 
 Symbolic links are followed, which is the CLI's own default — silently skipping
 files you asked to upload is the worse failure — so a link to a large tree
-uploads that tree. Set `s3-manager-upload-follow-symlinks` to nil for
+uploads that tree, and a link beside its own target uploads the same file
+twice. Set `s3-manager-upload-follow-symlinks` to nil for
 `--no-follow-symlinks`.
+
+That is what `M-x s3-manager-upload-dry-run` is for: it names every object that
+would be created, before any of them are, resolving links exactly as the upload
+would. Worth running once on anything you have not sent before.
 
 ### When something fails
 
