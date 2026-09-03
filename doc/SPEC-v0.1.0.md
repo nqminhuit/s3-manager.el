@@ -847,6 +847,28 @@ callers pass all three.
 `tabulated-list-init-header` must be called after `tabulated-list-format` is
 set, and again if the format is ever mutated.
 
+### 9.0 Column order: the variable-width field goes last
+
+`tabulated-list` pads columns but never truncates them, so a value wider than
+its column pushes every column after it out of alignment. Names are the only
+unbounded field here — S3 keys are routinely long and bucket names run to 63
+characters — so Name is the **last** column in both layouts:
+
+```
+       Size Modified   Name
+    92 MiB 2026-09-03  20260809_095247.mp4
+   110 MiB 2026-09-03  TheWisdomOfFatherBrown.TheDuelOfDrHirsch.final.mp4
+   2.8 MiB 2026-09-02  a.png
+```
+
+An overlong name can then only run off the right-hand end, which costs nothing.
+Truncating instead was rejected: the tail of a key is usually the part that
+distinguishes it from its neighbours.
+
+An earlier version of this section put Name first, matching how the columns
+read aloud. Measured against a real prefix, names of 45–53 characters shifted
+the Size column by up to nine places from row to row.
+
 ### 9.1 Type indication
 
 **Rejected alternative: a `Type` column holding `DIR`/`FILE`.** It spends eight

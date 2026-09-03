@@ -1088,10 +1088,11 @@ timers as well as sentinels."
     (tabulated-list-init-header)
     (s3-manager--render-buckets (s3-manager-test--json "list-buckets.json"))
     (should (equal (mapcar #'car tabulated-list-entries) '("media" "backups")))
+    ;; Created first, Name last: see `s3-manager--bucket-list-format'.
     (should (equal (aref (cadr (assoc "media" tabulated-list-entries)) 0)
-                   "media"))
-    (should (equal (aref (cadr (assoc "media" tabulated-list-entries)) 1)
                    "2026-08-01"))
+    (should (equal (aref (cadr (assoc "media" tabulated-list-entries)) 1)
+                   "media"))
     ;; and it actually painted
     (should (string-match-p "media" (buffer-string)))
     (should (string-match-p "backups" (buffer-string)))))
@@ -1314,6 +1315,60 @@ every directory shows a phantom blank-named file inside itself."
   (should (equal (s3-manager--format-size 1932735283) "1.8 GiB"))
   ;; Directories carry no size.
   (should (equal (s3-manager--format-size nil) "-")))
+
+(ert-deftest s3-manager-test-name-is-the-last-column ()
+  "The variable-width column must come last in both layouts.
+
+`tabulated-list' does not truncate, so a value wider than its column
+pushes every column after it out of alignment.  Names are the only
+unbounded field -- S3 keys are long and bucket names run to 63
+characters -- so with them last an overlong one can only run off the
+right-hand end."
+  (dolist (format (list s3-manager--object-list-format
+                        s3-manager--bucket-list-format))
+    (let ((titles (mapcar #'car (append format nil))))
+      (should (equal (car (last titles)) "Name"))
+      ;; Every column before it is a fixed-width field.
+      (should-not (member "Name" (butlast titles)))))
+  ;; And the rows agree with the headers.
+  (let ((row (s3-manager--entry-row
+              (s3-manager-entry--create :type 'object :key "a/long-name.bin"
+                                        :display-name "long-name.bin"
+                                        :size 2048
+                                        :last-modified "2026-09-01T00:00:00+00:00"))))
+    (should (equal (aref (cadr row) 0) "2 KiB"))
+    (should (equal (aref (cadr row) 1) "2026-09-01"))
+    (should (equal (aref (cadr row) 2) "long-name.bin"))))
+
+(ert-deftest s3-manager-test-a-long-name-cannot-misalign-a-row ()
+  "A name far wider than its column leaves the other fields in place."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media" s3-manager--prefix "")
+    (setq tabulated-list-format s3-manager--object-list-format)
+    (tabulated-list-init-header)
+    (setq tabulated-list-entries
+          (mapcar #'s3-manager--entry-row
+                  (list (s3-manager-entry--create
+                         :type 'object :key "short.txt" :display-name "short.txt"
+                         :size 10 :last-modified "2026-09-01T00:00:00+00:00")
+                        (s3-manager-entry--create
+                         :type 'object
+                         :key (concat (make-string 120 ?x) ".bin")
+                         :display-name (concat (make-string 120 ?x) ".bin")
+                         :size 20 :last-modified "2026-09-02T00:00:00+00:00"))))
+    (tabulated-list-print)
+    ;; Both dates start at the same column, whatever the name lengths.
+    (goto-char (point-min))
+    (let (date-columns)
+      (while (not (eobp))
+        (when (tabulated-list-get-id)
+          (let ((line (buffer-substring (line-beginning-position)
+                                        (line-end-position))))
+            (push (string-match "2026-09-0" line) date-columns)))
+        (forward-line 1))
+      (should (= 2 (length date-columns)))
+      (should (apply #'= date-columns)))))
 
 (ert-deftest s3-manager-test-sorters-put-directories-first ()
   "Directories lead under every column, as in Dired."

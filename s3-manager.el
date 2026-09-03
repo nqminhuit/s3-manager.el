@@ -1173,9 +1173,13 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
 ;;;; Bucket listing
 
 (defconst s3-manager--bucket-list-format
-  [("Name" 44 t) ("Created" 12 t)]
+  [("Created" 12 t) ("Name" 63 t)]
   "Column layout for the bucket list.
-`Created' is an ISO-8601 date, so it sorts correctly as a string.")
+
+Ordered like `s3-manager--object-list-format', and for the same reason:
+a bucket name may be up to 63 characters, so putting it first would
+misalign the date.  `Created' is an ISO-8601 date and therefore sorts
+correctly as a string.")
 
 (defun s3-manager--print-list ()
   "Print the list, restoring point to `s3-manager--restore-target' if set.
@@ -1198,9 +1202,9 @@ a level supplies the row to land on explicitly."
                     ;; command on this buffer needs, and it is stable across
                     ;; a re-sort so point survives one.
                     (list name
-                          (vector name
-                                  (s3-manager--format-date
-                                   (alist-get 'CreationDate bucket))))))
+                          (vector (s3-manager--format-date
+                                   (alist-get 'CreationDate bucket))
+                                  name))))
                 (alist-get 'Buckets response)))
   (s3-manager--cache-put (s3-manager--cache-key)
                          tabulated-list-entries nil nil)
@@ -1332,10 +1336,17 @@ TARGET, when given, is the bucket name to put point on once it lands."
   "Face for prefixes, which stand in for directories, in an S3 listing.")
 
 (defconst s3-manager--object-list-format
-  [("Name" 44 s3-manager--sort-by-name)
-   ("Size" 10 s3-manager--sort-by-size :right-align t)
-   ("Modified" 12 s3-manager--sort-by-time)]
-  "Column layout for the object browser.")
+  [("Size" 10 s3-manager--sort-by-size :right-align t)
+   ("Modified" 12 s3-manager--sort-by-time)
+   ("Name" 44 s3-manager--sort-by-name)]
+  "Column layout for the object browser.
+
+Name comes last because `tabulated-list' does not truncate: a name
+wider than its column pushes everything after it out of alignment, and
+S3 keys are frequently long.  With the two fixed-width columns first,
+an overlong name can only run off the right-hand end, which costs
+nothing.  Truncating instead would hide the part of a file name that
+distinguishes it.")
 
 (defun s3-manager--format-size (size)
   "Return SIZE in bytes as a readable string, or \"-\" when absent."
@@ -1384,14 +1395,14 @@ The timestamps are ISO-8601, so they order correctly as strings."
   "Return the `tabulated-list-entries' element for ENTRY."
   (let ((directory (eq (s3-manager-entry-type entry) 'directory)))
     (list entry
-          (vector (if directory
-                      (propertize (s3-manager-entry-display-name entry)
-                                  'face 's3-manager-directory)
-                    (s3-manager-entry-display-name entry))
-                  (if directory "-" (s3-manager--format-size
+          (vector (if directory "-" (s3-manager--format-size
                                      (s3-manager-entry-size entry)))
                   (if directory "-" (s3-manager--format-date
-                                     (s3-manager-entry-last-modified entry)))))))
+                                     (s3-manager-entry-last-modified entry)))
+                  (if directory
+                      (propertize (s3-manager-entry-display-name entry)
+                                  'face 's3-manager-directory)
+                    (s3-manager-entry-display-name entry))))))
 
 (defun s3-manager--goto-entry (id)
   "Put point on the row whose id is `equal' to ID."

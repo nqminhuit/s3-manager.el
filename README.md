@@ -8,11 +8,11 @@ through the `aws` command line client.
 ```
  prud  s3://media/videos/2026/   4 entries
 
- Name                                          Size    Modified
-  raw/                                            -           -
-  clip-01.mp4                                1.8 GiB  2026-09-02
-  clip-02.mp4                                1.2 GiB  2026-09-02
-  notes.md                                   1.2 KiB  2026-09-01
+       Size Modified   Name
+          -        -   raw/
+    1.8 GiB 2026-09-02 clip-01.mp4
+    1.2 GiB 2026-09-02 clip-02.mp4
+    1.2 KiB 2026-09-01 notes.md
 ```
 
 Two properties shape the whole design:
@@ -77,7 +77,10 @@ bucket opens it; `RET` on a prefix descends into it.
 | `n` / `p` | next / previous line |
 | `q` | bury the buffer |
 
-Columns are click-to-sort. Directories always sort first.
+Columns are click-to-sort. Directories always sort first. Name is the last
+column deliberately: `tabulated-list` does not truncate, so putting the one
+unbounded field first would let a long key push the other columns out of
+alignment.
 
 Other commands, not bound to keys:
 
