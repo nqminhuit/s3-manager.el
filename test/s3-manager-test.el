@@ -2672,6 +2672,96 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
 
 
+;;;; Point restoration by key
+
+(defun s3-manager-test--row-key-at-point ()
+  "Return the S3 key of the row point is on, or nil."
+  (let ((id (tabulated-list-get-id)))
+    (and (s3-manager-entry-p id) (s3-manager-entry-key id))))
+
+(ert-deftest s3-manager-test-goto-key-finds-the-row ()
+  "A key is enough to place point, without the whole entry.
+An uploaded object's Size and LastModified belong to the server, so the
+struct-identity match `s3-manager--goto-entry' uses cannot be built in
+advance."
+  (s3-manager-test--in-object-buffer
+    (goto-char (point-min))
+    (s3-manager--goto-key "README.md")
+    (should (equal (s3-manager-test--row-key-at-point) "README.md"))
+    ;; Directory rows are reachable the same way; a recursive upload
+    ;; restores onto one.
+    (s3-manager--goto-key "images/")
+    (should (equal (s3-manager-test--row-key-at-point) "images/"))))
+
+(ert-deftest s3-manager-test-goto-key-leaves-point-alone-when-absent ()
+  "A key that is not in the listing must not move point to the top.
+An object can legitimately sort past the end of a truncated page, and
+jerking point to `point-min' then is worse than leaving it where the
+reprint put it -- which is what `s3-manager--goto-entry' would do."
+  (s3-manager-test--in-object-buffer
+    (s3-manager--goto-key "images/")
+    (let ((before (point)))
+      (s3-manager--goto-key "not-in-this-listing.txt")
+      (should (= before (point)))
+      (should (equal (s3-manager-test--row-key-at-point) "images/")))))
+
+(ert-deftest s3-manager-test-goto-key-tolerates-a-bucket-list ()
+  "Bucket-list ids are bare strings; the search must not assume entries."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--bucket-list-format)
+    (tabulated-list-init-header)
+    (let ((s3-manager--cache (make-hash-table :test #'equal)))
+      (s3-manager--render-buckets (s3-manager-test--json "list-buckets.json")))
+    (goto-char (point-min))
+    (forward-line 1)                    ; row one is the column-title line
+    (should (equal (tabulated-list-get-id) "media"))
+    ;; No entry carries this key, so the search must walk the string ids
+    ;; without signalling and must leave point exactly where it was.
+    (let ((before (point)))
+      (s3-manager--goto-key "media")
+      (should (= before (point))))))
+
+(ert-deftest s3-manager-test-reload-restores-point-by-key ()
+  "`s3-manager--reload' accepts a key, and consumes it exactly once."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal)))
+      ;; Serve from the cache, so the reload needs no process.
+      (s3-manager--cache-put (s3-manager--cache-key)
+                             tabulated-list-entries s3-manager--entries nil)
+      (goto-char (point-min))
+      (s3-manager--reload nil "README.md")
+      (should (equal (s3-manager-test--row-key-at-point) "README.md"))
+      ;; Consumed: a later reload must not resurrect it.
+      (should (null s3-manager--restore-key))
+      (s3-manager--goto-key "images/")
+      (s3-manager--reload)
+      (should-not (equal (s3-manager-test--row-key-at-point) "README.md")))))
+
+(ert-deftest s3-manager-test-reload-clears-a-stale-key-request ()
+  "A reload with no key must cancel a key left over from an earlier one.
+Both slots are set unconditionally so the newest reload owns them;
+otherwise a request from a transfer that finished late would fire on an
+unrelated listing."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal)))
+      (s3-manager--cache-put (s3-manager--cache-key)
+                             tabulated-list-entries s3-manager--entries nil)
+      (setq s3-manager--restore-key "README.md")
+      (s3-manager--reload)
+      (should (null s3-manager--restore-key)))))
+
+(ert-deftest s3-manager-test-restore-target-wins-over-key ()
+  "The exact entry is the stronger request when both are given."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal))
+          (target (s3-manager--directory-entry "images/" "")))
+      (s3-manager--cache-put (s3-manager--cache-key)
+                             tabulated-list-entries s3-manager--entries nil)
+      (s3-manager--reload target "README.md")
+      (should (equal (s3-manager-test--row-key-at-point) "images/")))))
+
+
 ;;;; Dry runs
 ;;
 ;; Characterisation tests, written against the behaviour as it stood before

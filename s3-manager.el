@@ -919,6 +919,21 @@ PREFIX is the prefix being left and ENTRY is the row point was on, so
 (defvar-local s3-manager--restore-target nil
   "Entry to put point on once the pending listing arrives.")
 
+(defvar-local s3-manager--restore-key nil
+  "S3 key to put point on once the pending listing arrives.
+
+`s3-manager--restore-target\=' cannot serve here.  It holds an
+`s3-manager-entry\=', which is compared with `equal\=', and only a
+*directory* entry can be synthesized in advance -- see the struct\='s own
+docstring.  An object that has just been uploaded cannot: its Size and
+LastModified belong to the server, not to the local file, so an entry
+built from what is known locally would match nothing and point would
+silently fall back to the top of the buffer.
+
+A key is the one part of the row that is known before the listing comes
+back, so this is the weaker request: match on the key alone.  It sits
+beside the struct-identity rule rather than weakening it.")
+
 (defvar-local s3-manager--transfers 0
   "Number of transfers started from this buffer that are still running.
 Counted rather than flagged so that finishing one does not hide the
@@ -1277,15 +1292,21 @@ misalign the date.  `Created' is an ISO-8601 date and therefore sorts
 correctly as a string.")
 
 (defun s3-manager--print-list ()
-  "Print the list, restoring point to `s3-manager--restore-target' if set.
+  "Print the list, restoring point to the row that was asked for.
 `tabulated-list-print' REMEMBER-POS matches the id already at point,
 which is useless when the whole listing is being replaced, so moving up
-a level supplies the row to land on explicitly."
-  (let ((target s3-manager--restore-target))
-    (setq s3-manager--restore-target nil)
+a level supplies the row to land on explicitly.
+
+REMEMBER-POS stays on for the by-key request: if that key is not in the
+listing, keeping point where it was beats moving it anywhere."
+  (let ((target s3-manager--restore-target)
+        (key s3-manager--restore-key))
+    (setq s3-manager--restore-target nil
+          s3-manager--restore-key nil)
     (tabulated-list-print (null target))
     (s3-manager--apply-marks)
-    (when target (s3-manager--goto-entry target))))
+    (cond (target (s3-manager--goto-entry target))
+          (key (s3-manager--goto-key key)))))
 
 (defun s3-manager--render-buckets (response)
   "Render the `s3api list-buckets' RESPONSE into the current buffer."
@@ -1307,16 +1328,21 @@ a level supplies the row to land on explicitly."
   (s3-manager--print-list)
   (s3-manager--update-header-line))
 
-(defun s3-manager--reload (&optional target)
+(defun s3-manager--reload (&optional target key)
   "Re-fetch whatever the current buffer is showing.
-TARGET, when given, is the entry to put point on once it arrives."
+TARGET, when given, is the entry to put point on once it arrives.  KEY
+is the same request for a row whose entry cannot be synthesized in
+advance; TARGET wins when both are given."
   (unless (derived-mode-p 's3-manager-mode)
     (user-error "Not an S3 Manager buffer"))
   ;; Abandon any request still in flight; this also advances the generation,
   ;; so a response already on its way is dropped rather than rendered over
   ;; the newer one.
   (s3-manager--cancel)
-  (setq s3-manager--restore-target target)
+  ;; Both are set unconditionally, so the newest reload owns the slots and a
+  ;; request left over from an earlier one cannot fire on this listing.
+  (setq s3-manager--restore-target target
+        s3-manager--restore-key key)
   (let ((page (s3-manager--cache-get (s3-manager--cache-key))))
     (if page
         (s3-manager--install-page page)
@@ -1508,6 +1534,26 @@ The timestamps are ISO-8601, so they order correctly as strings."
           (setq found t)
         (forward-line 1)))
     (unless found (goto-char (point-min)))))
+
+(defun s3-manager--goto-key (key)
+  "Put point on the row whose entry has KEY, or leave point alone.
+
+Unlike `s3-manager--goto-entry\=' there is no fallback to `point-min\='.
+A key that is not on screen is an ordinary outcome here -- an object
+just uploaded can sort past the end of a truncated listing -- and
+jerking point to the top of the buffer then is worse than leaving it
+where the reprint put it."
+  (let ((found nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (and (not found) (not (eobp)))
+        (let ((id (tabulated-list-get-id)))
+          ;; Bucket-list ids are bare strings, not entries.
+          (if (and (s3-manager-entry-p id)
+                   (equal key (s3-manager-entry-key id)))
+              (setq found (point))
+            (forward-line 1)))))
+    (when found (goto-char found))))
 
 (defun s3-manager--render-objects (response &optional append)
   "Render a `list-objects-v2' RESPONSE into the current buffer.
