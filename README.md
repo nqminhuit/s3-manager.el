@@ -68,7 +68,7 @@ bucket opens it; `RET` on a prefix descends into it.
 | `+` | fetch the next page of a truncated listing |
 | `g` | refresh, bypassing the cache |
 | `C-u g` | refresh, dropping every cached listing for this bucket |
-| `P` | upload a local file into the current prefix |
+| `P` | upload a local file, or a directory recursively |
 | `G` | download the object at point |
 | `R` | download everything under the prefix at point |
 | `d` | mark the object at point for deletion |
@@ -122,7 +122,17 @@ anything is sent. If the check itself fails — real AWS answers 403 rather than
 you are asked whether to upload anyway, because neither assuming nor refusing
 would be honest.
 
-Directory upload is not in this release yet; `P` refuses one and says so.
+Choosing a directory uploads it recursively, under its own name, after a typed
+`yes` — the same bar as a recursive delete, because the volume is unbounded and
+no per-key overwrite check is made (one probe per file would be unbounded too).
+The directory's own name is written into the destination deliberately: `aws s3
+cp DIR s3://bucket/prefix --recursive` drops it and scatters the contents flat
+across the prefix you were looking at.
+
+Symbolic links are followed, which is the CLI's own default — silently skipping
+files you asked to upload is the worse failure — so a link to a large tree
+uploads that tree. Set `s3-manager-upload-follow-symlinks` to nil for
+`--no-follow-symlinks`.
 
 ### When something fails
 
@@ -178,6 +188,7 @@ If editing the AWS config is not an option, override from Emacs instead:
 | `s3-manager-endpoint-alist` | `nil` | per-profile endpoint override |
 | `s3-manager-endpoint-url` | `nil` | endpoint override for all profiles |
 | `s3-manager-display-errors` | `t` | show the error report as well as recording it |
+| `s3-manager-upload-follow-symlinks` | `t` | follow symlinks during a recursive upload |
 
 The two timeouts are separate because they measure different things. A listing
 that has not answered in two minutes is stuck; a transfer that has been running

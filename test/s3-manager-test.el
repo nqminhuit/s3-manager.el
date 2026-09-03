@@ -2935,6 +2935,118 @@ destination rather than whatever is on screen when it lands."
       (should (null (s3-manager--cache-get (s3-manager--cache-key "docs/"))))
       (should (null reloaded)))))
 
+(defmacro s3-manager-test--with-upload-tree (var &rest body)
+  "Bind VAR to a temporary directory holding a small tree, and run BODY."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "s3-upload-tree" t)))
+     (unwind-protect
+         (progn
+           (write-region "a\n" nil (expand-file-name "a.txt" ,var) nil 'silent)
+           (make-directory (expand-file-name "sub" ,var))
+           (write-region "b\n" nil (expand-file-name "sub/b.txt" ,var)
+                         nil 'silent)
+           ,@body)
+       (delete-directory ,var t))))
+
+(ert-deftest s3-manager-test-upload-directory-key-keeps-the-leaf ()
+  "A directory key must end in \"/\", or the tree is scattered flat.
+
+`s3 cp DIR s3://B/PREFIX --recursive' maps DIR/a.txt onto PREFIX/a.txt
+and drops the directory's own name -- measured against the CLI -- so
+without the trailing leaf the contents land in the listing the user was
+looking at rather than under a prefix of their own."
+  (s3-manager-test--with-upload-tree tree
+    (should (equal (s3-manager--upload-key tree "docs/")
+                   (concat "docs/" (file-name-nondirectory tree) "/")))))
+
+(ert-deftest s3-manager-test-upload-directory-argv ()
+  "The recursive form: both paths end in a slash, and `--recursive'."
+  (let ((argv-file (make-temp-file "s3-upload-argv")))
+    (unwind-protect
+        (s3-manager-test--with-upload-tree tree
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) tree))
+                      ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (&rest _)
+                         (error "A directory upload must not use y-or-n-p")))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-upload)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (s3-manager-test--argv-records argv-file))))))
+            (let* ((records (s3-manager-test--argv-records argv-file))
+                   (leaf (file-name-nondirectory tree)))
+              ;; No probe: one call, straight to the transfer.
+              (should-not (member "head-object" (nth 0 records)))
+              (should (equal (nth 0 records)
+                             (list "--profile" "production"
+                                   "--no-cli-pager" "--no-cli-auto-prompt"
+                                   "s3" "cp"
+                                   (file-name-as-directory tree)
+                                   (concat "s3://media/" leaf "/")
+                                   "--recursive"
+                                   "--progress-frequency" "1"))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-upload-directory-demands-a-typed-yes ()
+  "An unbounded write must not ride on a single keystroke.
+The same reasoning as a recursive delete: no per-key overwrite check is
+made, because one probe per file is unbounded too."
+  (let ((prompt nil))
+    (s3-manager-test--with-upload-tree tree
+      (s3-manager-test--in-object-buffer
+        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) tree))
+                  ((symbol-function 'yes-or-no-p)
+                   (lambda (p) (setq prompt p) nil))
+                  ((symbol-function 'message) #'ignore))
+          (should-error (s3-manager-upload) :type 'user-error)
+          (should (zerop s3-manager--transfers)))))
+    (should (string-match-p "Recursively upload everything under" prompt))))
+
+(ert-deftest s3-manager-test-upload-directory-refuses-an-empty-one ()
+  "S3 has no directories, so an empty one would report success and do
+nothing -- which reads as the feature being broken."
+  (let ((empty (make-temp-file "s3-upload-empty" t)))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) empty))
+                    ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (should-error (s3-manager-upload) :type 'user-error)
+            (should (zerop s3-manager--transfers))))
+      (delete-directory empty t))))
+
+(ert-deftest s3-manager-test-upload-symlink-flag-is-configurable ()
+  "The CLI follows symlinks by default; nil must pass the opposite flag."
+  (let ((s3-manager-upload-follow-symlinks t))
+    (should-not (member "--no-follow-symlinks"
+                        (s3-manager--upload-args "/tmp/d" "s3://b/d/" t))))
+  (let ((s3-manager-upload-follow-symlinks nil))
+    (should (member "--no-follow-symlinks"
+                    (s3-manager--upload-args "/tmp/d" "s3://b/d/" t)))
+    ;; Only meaningful for a recursive upload.
+    (should-not (member "--no-follow-symlinks"
+                        (s3-manager--upload-args "/tmp/f" "s3://b/f" nil)))))
+
+(ert-deftest s3-manager-test-after-upload-recursive-purges-beneath ()
+  "A recursive upload creates keys under the new prefix, so a listing
+cached from before describes a tree that no longer exists."
+  (s3-manager-test--in-object-buffer
+    (let ((s3-manager--cache (make-hash-table :test #'equal)))
+      (s3-manager--cache-put (s3-manager--cache-key "") nil nil nil)
+      (s3-manager--cache-put (s3-manager--cache-key "site/") nil nil nil)
+      (s3-manager--cache-put (s3-manager--cache-key "site/img/") nil nil nil)
+      (s3-manager--cache-put (s3-manager--cache-key "other/") nil nil nil)
+      (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
+        (s3-manager--after-upload "" "site/" t))
+      (should (null (s3-manager--cache-get (s3-manager--cache-key ""))))
+      (should (null (s3-manager--cache-get (s3-manager--cache-key "site/"))))
+      (should (null (s3-manager--cache-get (s3-manager--cache-key "site/img/"))))
+      ;; An unrelated sibling survives.
+      (should (s3-manager--cache-get (s3-manager--cache-key "other/"))))))
+
 (ert-deftest s3-manager-test-overwrite-prompt-is-deferred-off-the-sentinel ()
   "The prompt must not run inside the process sentinel.
 

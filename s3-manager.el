@@ -152,6 +152,18 @@ read timeouts still apply, so a transfer to a black hole does not hang
 forever."
   :type '(choice (const :tag "No timeout" nil) integer))
 
+(defcustom s3-manager-upload-follow-symlinks t
+  "Whether a recursive upload follows symbolic links.
+
+The AWS CLI follows them by default and does not detect cycles, so a
+link pointing at a large tree uploads that tree, and one pointing into
+its own parent does not terminate.  The default follows anyway, because
+silently *skipping* files the user asked to upload is the worse failure
+of the two, and `s3-manager-upload-dry-run' enumerates exactly what
+would be sent before a byte moves.  Set this to nil to pass
+`--no-follow-symlinks'."
+  :type 'boolean)
+
 (defcustom s3-manager-display-errors t
   "Whether a failure shows `s3-manager--error-buffer' as well as recording it.
 
@@ -2238,13 +2250,21 @@ writes the user's bytes to a key they never named."
     name))
 
 (defun s3-manager--upload-key (source prefix)
-  "Return the destination key for uploading SOURCE into PREFIX."
-  (concat prefix (s3-manager--upload-key-name source)))
+  "Return the destination key for uploading SOURCE into PREFIX.
+
+A directory yields a key ending in \"/\", and that slash is
+load-bearing rather than cosmetic: `s3 cp DIR s3://B/PREFIX --recursive'
+maps DIR/a.txt onto PREFIX/a.txt and drops the directory\='s own name, so
+the tree is scattered flat across the listing the user was looking at.
+Writing the leaf into the destination is what keeps it."
+  (concat prefix
+          (s3-manager--upload-key-name source)
+          (if (file-directory-p source) "/" "")))
 
 (defun s3-manager--upload-source ()
-  "Read a local file to upload, and return its absolute path."
+  "Read a local file or directory to upload, and return its absolute path."
   (let ((source (expand-file-name
-                 (read-file-name "Upload file: "
+                 (read-file-name "Upload file or directory: "
                                  (s3-manager--dwim-directory) nil t))))
     ;; MUSTMATCH is advisory -- a default, a history entry, or completion
     ;; ignoring it all reach here -- and these checks also narrow the window
@@ -2252,20 +2272,28 @@ writes the user's bytes to a key they never named."
     ;; round trip and an unbounded confirmation.
     (unless (file-exists-p source)
       (user-error "%s does not exist" source))
-    (when (file-directory-p source)
-      ;; Recursive upload is a separate operation with its own confirmation.
-      (user-error "%s is a directory; uploading one is not supported yet"
-                  source))
-    (unless (file-regular-p source)
-      ;; A fifo or a character device would make `aws s3 cp' read forever,
-      ;; and `s3-manager-transfer-timeout' is nil, so nothing would stop it.
-      (user-error "%s is not a regular file" source))
     (unless (file-readable-p source)
       (user-error "%s is not readable" source))
+    (if (file-directory-p source)
+        (when (null (directory-files
+                     source nil directory-files-no-dot-files-regexp t))
+          ;; S3 has no directories, so uploading an empty one transfers
+          ;; nothing, exits 0, and is reported as a success that leaves the
+          ;; listing unchanged -- which reads as the feature being broken.
+          (user-error "%s is empty, and S3 has no directories to create"
+                      source))
+      (unless (file-regular-p source)
+        ;; A fifo or a character device would make `aws s3 cp' read forever,
+        ;; and `s3-manager-transfer-timeout' is nil, so nothing would stop it.
+        (user-error "%s is not a regular file" source)))
     source))
 
-(defun s3-manager--after-upload (prefix key)
+(defun s3-manager--after-upload (prefix key &optional recursive)
   "Refresh after an upload of KEY into PREFIX.
+
+With RECURSIVE, KEY is itself a prefix and every cached listing at or
+beneath it goes too: the upload created keys under it, so a listing
+cached from before describes a tree that no longer exists.
 
 PREFIX is the destination recorded when the upload started rather than
 this buffer's prefix now: a transfer is deliberately outside the
@@ -2275,20 +2303,40 @@ reload a listing nobody asked about.  The listing is re-read only when
 the destination is still the one on screen; otherwise dropping it from
 the cache is enough, and it is re-read when the user returns."
   (s3-manager--cache-invalidate (s3-manager--cache-key prefix))
+  (when recursive
+    (s3-manager--cache-purge s3-manager--profile
+                             (s3-manager--endpoint-for s3-manager--profile)
+                             s3-manager--bucket
+                             key))
   (when (equal prefix s3-manager--prefix)
     (s3-manager--reload nil key)))
 
-(defun s3-manager--upload-start (source uri key prefix)
-  "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards."
+(defun s3-manager--upload-args (source uri recursive)
+  "Return the `s3 cp' arguments uploading SOURCE to URI.
+With RECURSIVE, both paths carry a trailing slash and `--recursive' is
+passed.  SOURCE is absolute, so it can never be read as an option."
+  (append (list "s3" "cp"
+                (if recursive (file-name-as-directory source) source)
+                uri)
+          (when recursive '("--recursive"))
+          (when (and recursive (not s3-manager-upload-follow-symlinks))
+            '("--no-follow-symlinks"))
+          ;; No --quiet and no --only-show-errors: both suppress the progress
+          ;; the mode line depends on.
+          '("--progress-frequency" "1")))
+
+(defun s3-manager--upload-start (source uri key prefix &optional recursive)
+  "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards.
+With RECURSIVE, SOURCE is a directory and its whole tree is sent."
   ;; Re-checked here rather than only at the prompt: a head-object round trip
   ;; and an unbounded `y-or-n-p' sit between the two, and a file removed in
   ;; that window would otherwise be reported as a partial transfer failure
   ;; for a file that was never opened.
   (unless (file-readable-p source)
     (user-error "%s is no longer readable" source))
-  (let ((done (lambda () (s3-manager--after-upload prefix key))))
+  (let ((done (lambda () (s3-manager--after-upload prefix key recursive))))
     (s3-manager--transfer
-     (list "s3" "cp" source uri "--progress-frequency" "1")
+     (s3-manager--upload-args source uri recursive)
      (format "uploading %s to %s" (abbreviate-file-name source) uri)
      done
      ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
@@ -2398,11 +2446,12 @@ it, so `s3api head-object' is the only way to ask first."
             (s3-manager--upload-start source uri key prefix))))))))
 
 (defun s3-manager-upload ()
-  "Upload a local file into the prefix being shown.
+  "Upload a local file or directory into the prefix being shown.
 
-The destination is this listing's own prefix, under the file's own
+The destination is this listing's own prefix, under the source's own
 name, regardless of where point is; the prompts name the full target
-URI, so there is nothing to infer."
+URI, so there is nothing to infer.  A directory is uploaded
+recursively, after a typed confirmation."
   (interactive)
   (unless s3-manager--bucket
     (user-error "%s" (substitute-command-keys
@@ -2411,7 +2460,20 @@ URI, so there is nothing to infer."
          (prefix s3-manager--prefix)
          (key (s3-manager--upload-key source prefix))
          (uri (s3-manager--s3-uri key)))
-    (s3-manager--upload-probe source uri key prefix)))
+    (if (file-directory-p source)
+        (progn
+          ;; `yes-or-no-p', as for a recursive delete: an unbounded number of
+          ;; objects is about to be written, no per-key overwrite check is
+          ;; made -- one probe per file is unbounded too -- and this must not
+          ;; ride on a single keystroke.
+          (unless (yes-or-no-p
+                   (format "Recursively upload everything under %s to %s%s? "
+                           (abbreviate-file-name source) uri
+                           (if s3-manager-upload-follow-symlinks
+                               " (following symlinks)" "")))
+            (user-error "Upload aborted"))
+          (s3-manager--upload-start source uri key prefix t))
+      (s3-manager--upload-probe source uri key prefix))))
 
 (defun s3-manager--entry-at-point ()
   "Return the entry on the current line, or signal a `user-error'.
