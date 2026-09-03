@@ -2698,6 +2698,82 @@ regression it exists to catch."
         (s3-manager-switch-profile t))
       (should (null s3-manager--profiles)))))
 
+;;;; Evil interoperability
+
+;; Evil is not a dependency of the package -- these tests skip themselves when
+;; it is absent, and are tagged so a hermetic run can exclude them.  The Eask
+;; manifest lists it as a development dependency so CI does exercise them.
+
+(defmacro s3-manager-test--with-evil-buffer (state &rest body)
+  "Run BODY in an `s3-manager-mode' buffer under Evil in STATE.
+Enables `evil-local-mode' rather than the global `evil-mode', so the rest
+of the suite is unaffected by having run this one."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (s3-manager-mode)
+     (evil-local-mode 1)
+     (evil-change-state ,state)
+     (evil-normalize-keymaps)
+     ,@body))
+
+(defun s3-manager-test--evil-shadowed-keys (state)
+  "Return the keys of `s3-manager-mode-map' Evil steals in STATE."
+  (s3-manager-test--with-evil-buffer state
+    (seq-remove
+     (lambda (key)
+       (let ((command (key-binding (kbd key))))
+         (and command
+              (symbolp command)
+              (string-prefix-p "s3-manager-" (symbol-name command)))))
+     '("RET" "^" "g" "+" "G" "R" "d" "u" "U" "x" "D"))))
+
+(ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
+  "Every key this mode binds must survive Evil, in every state.
+
+Evil installs its state keymaps through `emulation-mode-map-alists', which
+outranks a major-mode map, and this mode appears in none of Evil's state
+lists -- so it gets normal state, where `RET' is `evil-ret', `d' is
+`evil-delete' and `g' is a prefix keymap.  Without the overriding-map
+registration in the package, this test reports nine of the eleven keys as
+shadowed and the browser is unusable under Evil."
+  :tags '(evil)
+  (skip-unless (ignore-errors (require 'evil nil t)))
+  (dolist (state '(normal motion visual))
+    (should (equal nil (s3-manager-test--evil-shadowed-keys state)))))
+
+(ert-deftest s3-manager-test-evil-keeps-its-own-unbound-keys ()
+  "Registering the map as overriding must not disable Evil wholesale.
+Only the keys this mode actually binds may be taken; motion and `:' are
+Evil's and must still reach it, or the fix trades one broken keymap for
+another."
+  :tags '(evil)
+  (skip-unless (ignore-errors (require 'evil nil t)))
+  (s3-manager-test--with-evil-buffer 'normal
+    (should (eq (key-binding (kbd "j")) #'evil-next-line))
+    (should (eq (key-binding (kbd "k")) #'evil-previous-line))
+    (should (eq (key-binding (kbd ":")) #'evil-ex))
+    ;; Inherited from the parent maps, and equally required by the manual.
+    (should (eq (key-binding (kbd "n")) #'next-line))
+    (should (eq (key-binding (kbd "p")) #'previous-line))
+    (should (eq (key-binding (kbd "q")) #'quit-window))))
+
+(ert-deftest s3-manager-test-evil-user-bindings-still-win ()
+  "A user's own Evil binding must outrank the package's override.
+`evil-make-overriding-map' ranks below custom state bindings; if that ever
+changed, personal configuration would silently stop taking effect."
+  :tags '(evil)
+  (skip-unless (ignore-errors (require 'evil nil t)))
+  (let ((map (copy-keymap s3-manager-mode-map)))
+    (unwind-protect
+        (progn
+          (evil-define-key 'normal s3-manager-mode-map (kbd "RET") #'ignore)
+          (s3-manager-test--with-evil-buffer 'normal
+            (should (eq (key-binding (kbd "RET")) #'ignore))))
+      (setq s3-manager-mode-map map)
+      ;; `evil-define-key' caches an auxiliary keymap inside the map it was
+      ;; given; drop Evil's copy of it too so later tests see a clean map.
+      (evil-normalize-keymaps))))
+
 (provide 's3-manager-test)
 
 ;;; s3-manager-test.el ends here

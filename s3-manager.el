@@ -1144,6 +1144,20 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
   "x" #'s3-manager-execute
   "D" #'s3-manager-delete)
 
+;; Evil's state keymaps take precedence over a major-mode map, and its normal
+;; state -- the state this mode gets, since it is in none of Evil's state
+;; lists -- binds nearly every key above: `RET' to `evil-ret', `^' to
+;; `evil-first-non-blank', `d' to `evil-delete', `g' to a prefix keymap.  So
+;; under Evil this keymap is almost entirely dead unless it is registered as
+;; overriding.  Passing nil for the state covers all of them, including
+;; motion and visual.  Keys this map does *not* bind still reach Evil, so
+;; `j', `k', `:' and `/' keep working; and because an overriding map ranks
+;; below custom state bindings, a user's own `evil-define-key' still wins.
+(declare-function evil-make-overriding-map "evil-core"
+                  (keymap &optional state copy))
+(with-eval-after-load 'evil
+  (evil-make-overriding-map s3-manager-mode-map nil))
+
 (define-derived-mode s3-manager-mode tabulated-list-mode "S3"
   "Major mode for browsing S3 buckets and objects.
 

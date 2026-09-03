@@ -82,6 +82,15 @@ column deliberately: `tabulated-list` does not truncate, so putting the one
 unbounded field first would let a long key push the other columns out of
 alignment.
 
+### Evil users
+
+Nothing to configure. Evil's state keymaps outrank a major-mode map, and its
+normal state binds most of the keys above (`RET`, `^`, `g`, `d`, `x`, `D`, `G`,
+`R`, `u`, `+`), so the package registers its keymap as overriding in every
+Evil state. Keys it does not bind are left alone, so `j`, `k`, `:` and `/`
+still behave as usual, and your own `evil-define-key` for
+`s3-manager-mode-map` still takes precedence over the package's.
+
 Other commands, not bound to keys:
 
 - `M-x s3-manager-switch-profile` — pick a different profile (`C-u` re-reads the
@@ -159,7 +168,9 @@ eask compile && eask test ert ./test/s3-manager-test.el
 Tests need no network and no `~/.aws`: `test/fake-aws` stands in for the CLI,
 with its stdout, stderr, exit code and timing driven by the environment. The
 few tests that shell out to a real `aws` to validate argument vectors offline
-are tagged `cli` and skip themselves when it is absent.
+are tagged `cli` and skip themselves when it is absent; the Evil keymap tests
+are tagged `evil` and skip themselves unless Evil is on the `load-path`
+(`eask test` installs it, the bare `emacs --batch` invocation above does not).
 
 `doc/SPEC-v0.1.0.md` is the design document, including a reference appendix of
 AWS CLI and Emacs subprocess behaviour that was measured rather than assumed.
