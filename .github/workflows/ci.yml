@@ -116,13 +116,29 @@ jobs:
 
       - run: eask info
 
+      - name: Install dependencies
+        # Nothing else does: `eask info' only prints the manifest, and neither
+        # `eask compile' nor `eask test' fetches anything. Without this the
+        # Evil dev dependency is absent and its tests skip.
+        run: eask install-deps --dev
+
       - name: Compile through Eask
         # Proves the manifest still describes the package correctly; without
         # this the Eask file rots unnoticed.
         run: eask compile
 
       - name: Test through Eask
-        run: eask test ert ./test/s3-manager-test.el
+        # The Evil tests use `skip-unless', so a missing dev dependency makes
+        # them look like success -- which is exactly what happened before the
+        # install step above existed. This job is the only place they run at
+        # all, so require that they did.
+        run: |
+          set -o pipefail
+          eask test ert ./test/s3-manager-test.el 2>&1 | tee test.log
+          if grep -q 'SKIPPED  s3-manager-test-evil' test.log; then
+            echo "::error::Evil tests skipped -- the dev dependency did not load"
+            exit 1
+          fi
 
       - name: checkdoc
         # Informational: v0.1.0 targets clean personal-use quality, not MELPA
