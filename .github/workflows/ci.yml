@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Emacs ${{ matrix.emacs-version }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs-version: ['29.1', '30.1']
+        experimental: [false]
+        include:
+          # A break here is upstream's, not ours, so it must not gate a merge.
+          - emacs-version: snapshot
+            experimental: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      - name: Report environment
+        run: |
+          emacs --version
+          # One test shells out to the real CLI to validate argument vectors
+          # offline, and skips itself when the CLI is absent. Announce that
+          # rather than losing the coverage quietly if the image changes.
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+          else
+            echo "::warning::AWS CLI not found; argv-validation tests will skip"
+          fi
+
+      - name: Require native JSON support
+        # Optional in the Emacs 29 build, mandatory from 30. The package
+        # refuses to load without it, so fail here with a clear message
+        # instead of inside a load-time error.
+        run: |
+          emacs -Q --batch --eval '(unless (and (fboundp (quote json-parse-buffer)) (json-available-p)) (message "no native JSON in this build") (kill-emacs 1))'
+
+      - name: Byte-compile, warnings fatal
+        run: |
+          emacs -Q --batch -L . \
+                --eval '(setq byte-compile-error-on-warn t)' \
+                -f batch-byte-compile s3-manager.el
+
+      - name: Test the byte-compiled package
+        # This is what users actually load, and `-L .` prefers the .elc.
+        run: |
+          test -f s3-manager.elc
+          emacs -Q --batch -L . -L test \
+                -l test/s3-manager-test.el \
+                -f ert-run-tests-batch-and-exit
+
+      - name: Test the uncompiled source
+        # Macro expansion differs between the compiled and interpreted forms,
+        # so a missing top-level `require' can pass one and fail the other.
+        run: |
+          rm -f s3-manager.elc
+          emacs -Q --batch -L . -L test \
+                -l test/s3-manager-test.el \
+                -f ert-run-tests-batch-and-exit
+
+      - name: Hermetic run, excluding tests that need the real CLI
+        # The suite must stay green on a machine with no AWS CLI at all.
+        run: |
+          emacs -Q --batch -L . -L test \
+                -l test/s3-manager-test.el \
+                --eval '(ert-run-tests-batch-and-exit (quote (not (tag cli))))'
+
+      - name: Test with no AWS configuration present
+        # A runner has no ~/.aws. Nothing in the suite may depend on one.
+        env:
+          AWS_CONFIG_FILE: /nonexistent/config
+          AWS_SHARED_CREDENTIALS_FILE: /nonexistent/credentials
+        run: |
+          emacs -Q --batch -L . -L test \
+                -l test/s3-manager-test.el \
+                -f ert-run-tests-batch-and-exit
+
+  eask:
+    name: Eask
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '30.1'
+
+      - uses: emacs-eask/setup-eask@master
+        with:
+          version: 'snapshot'
+
+      - run: eask info
+
+      - name: Compile through Eask
+        # Proves the manifest still describes the package correctly; without
+        # this the Eask file rots unnoticed.
+        run: eask compile
+
+      - name: Test through Eask
+        run: eask test ert ./test/s3-manager-test.el
+
+      - name: checkdoc
+        # Informational: v0.1.0 targets clean personal-use quality, not MELPA
+        # submission, so documentation style does not gate a merge.
+        continue-on-error: true
+        run: eask lint checkdoc

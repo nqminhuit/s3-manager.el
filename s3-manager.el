@@ -64,7 +64,7 @@
 ;; package never calls.
 
 (unless (and (fboundp 'json-parse-buffer) (json-available-p))
-  (error "s3-manager requires an Emacs built with native JSON support"))
+  (error "Package s3-manager requires an Emacs built with native JSON support"))
 
 
 ;;;; Customization
@@ -408,6 +408,9 @@ A nil GENERATION means the caller opted out of staleness checking."
 
 (defun s3-manager--make-progress-filter (callback buffer generation)
   "Return a process filter delivering progress segments to CALLBACK.
+
+CALLBACK runs in BUFFER, and only while BUFFER is still at GENERATION,
+so a transfer whose origin has moved on stops repainting it.
 
 The AWS CLI overwrites a single progress line using carriage returns, so
 input is split on both delimiters and only the final segment is
