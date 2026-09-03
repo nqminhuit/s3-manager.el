@@ -28,12 +28,14 @@
 ;; Browse and manage objects on AWS S3 and S3-compatible services through the
 ;; `aws' command line client.
 ;;
-;; This file currently contains only the transport layer: the asynchronous
-;; primitive every other part of the package is built on.  See
-;; doc/SPEC-v0.1.0.md for the full design; section references in the code below
-;; point into it.
+;; Usage:
 ;;
-;; The two properties the transport exists to guarantee:
+;;   M-x s3-manager        choose a profile, list its buckets
+;;   C-u M-x s3-manager    re-read the profile list first
+;;
+;; In an S3 buffer, `g' refreshes and `q' buries it.
+;;
+;; Two properties are treated as non-negotiable throughout:
 ;;
 ;;   * Emacs never blocks.  Every invocation is asynchronous.
 ;;   * The CLI's stderr survives intact, separated from stdout, so failures can
@@ -41,11 +43,25 @@
 ;;
 ;; Credentials are never read, parsed, stored or logged.  The package selects a
 ;; profile by name and lets the AWS CLI do everything else.
+;;
+;; Requires AWS CLI 2.13.0 or newer: earlier releases ignore the `endpoint_url'
+;; key in ~/.aws/config, which silently sends every request to AWS instead of
+;; the configured S3-compatible endpoint.
+;;
+;; Object browsing, transfers and deletion are not implemented yet.  See
+;; doc/SPEC-v0.1.0.md for the full design; section references in the code
+;; below point into it.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
+(require 'tabulated-list)
+
+;; `json.el' is deliberately absent: `json-parse-buffer' is a native C
+;; function, and requiring `json' would pull in a slow Lisp parser this
+;; package never calls.
 
 (unless (and (fboundp 'json-parse-buffer) (json-available-p))
   (error "s3-manager requires an Emacs built with native JSON support"))
@@ -707,6 +723,194 @@ the most recently chosen profile, so repeat use is a single RET."
          (message "S3 profiles: %s" (string-join profiles ", "))
        (message
         "S3: no AWS profiles found.  Run `aws configure' to create one")))))
+
+;;;; Buffer-local state
+
+(defvar-local s3-manager--profile nil
+  "AWS CLI profile this buffer is showing, or nil for the CLI default.")
+
+(defvar-local s3-manager--bucket nil
+  "Bucket this buffer is showing.  Nil means it shows the bucket list.")
+
+(defvar-local s3-manager--prefix ""
+  "Current prefix.  Either the empty string or a string ending in \"/\".")
+
+(defvar-local s3-manager--status nil
+  "Request state of this buffer: nil, `loading' or `error'.")
+
+
+;;;; Rendering helpers
+
+(defun s3-manager--format-date (timestamp)
+  "Return the calendar date of ISO-8601 TIMESTAMP, or \"-\" if absent.
+
+S3 renders timestamps with a numeric offset rather than a Z suffix, for
+example \"2026-08-01T10:22:31+00:00\".  Only the date is displayed, so
+the leading ten characters are taken directly instead of parsing."
+  (if (and (stringp timestamp) (>= (length timestamp) 10))
+      (substring timestamp 0 10)
+    "-"))
+
+(defun s3-manager--buffer-name (profile &optional bucket)
+  "Return the buffer name for PROFILE, and BUCKET when given.
+
+One buffer per profile for the bucket list, and one per bucket for
+browsing it -- reused across prefixes, which is why the prefix appears
+in the header line rather than here."
+  (if bucket
+      (format "*s3: %s/%s*" (or profile "default") bucket)
+    (format "*s3: %s*" (or profile "default"))))
+
+(defun s3-manager--mode-line-status ()
+  "Return the `mode-line-process' fragment for this buffer."
+  (pcase s3-manager--status
+    ('loading " [loading]")
+    ('error (propertize " [error]" 'face 'error))
+    (_ "")))
+
+(defun s3-manager--update-header-line ()
+  "Refresh the header line from this buffer's state."
+  (setq-local
+   header-line-format
+   (concat " " (or s3-manager--profile "default")
+           (if s3-manager--bucket
+               (format "  s3://%s/%s" s3-manager--bucket s3-manager--prefix)
+             "  buckets")
+           "   "
+           (pcase s3-manager--status
+             ('loading "loading…")
+             ('error "failed — see *S3 Manager Error*")
+             (_ (let ((n (length tabulated-list-entries)))
+                  (if (zerop n)
+                      "empty"
+                    (format "%d %s" n
+                            (if s3-manager--bucket
+                                (if (= n 1) "entry" "entries")
+                              (if (= n 1) "bucket" "buckets"))))))))))
+
+(defun s3-manager--set-status (status)
+  "Set this buffer's request STATUS and repaint the indicators."
+  (setq s3-manager--status status)
+  (s3-manager--update-header-line)
+  (force-mode-line-update))
+
+
+;;;; Major mode
+
+(defvar-keymap s3-manager-mode-map
+  :doc "Keymap for `s3-manager-mode'."
+  :parent tabulated-list-mode-map)
+
+(define-derived-mode s3-manager-mode tabulated-list-mode "S3"
+  "Major mode for browsing S3 buckets and objects.
+
+\\{s3-manager-mode-map}"
+  ;; `tabulated-list-format' is deliberately NOT set here.  This one mode
+  ;; serves both the bucket list and the object browser, whose columns
+  ;; differ; each setup function installs its own layout and calls
+  ;; `tabulated-list-init-header'.  The variable is buffer-local, so the two
+  ;; cannot interfere.
+  (setq tabulated-list-padding 2)  ; reserved for Dired-style marks
+  ;; Render the column titles as the first line of the buffer instead of in
+  ;; the header line.  `tabulated-list-init-header' would otherwise claim
+  ;; `header-line-format', which this mode uses for the profile, the current
+  ;; s3:// path and the request status -- and the columns would vanish.
+  (setq-local tabulated-list-use-header-line nil)
+  ;; `tabulated-list-mode' installs the synchronous `tabulated-list-revert',
+  ;; which would repaint stale rows and never re-fetch.  This must therefore
+  ;; be replaced after the parent's setup has run, i.e. here.
+  (setq-local revert-buffer-function #'s3-manager--revert)
+  (setq-local mode-line-process '(:eval (s3-manager--mode-line-status)))
+  ;; Without this, killing the buffer mid-request orphans an `aws' process
+  ;; that :noquery t stops Emacs from even asking about at exit.
+  (add-hook 'kill-buffer-hook #'s3-manager--cancel nil t))
+
+
+;;;; Bucket listing
+
+(defconst s3-manager--bucket-list-format
+  [("Name" 44 t) ("Created" 12 t)]
+  "Column layout for the bucket list.
+`Created' is an ISO-8601 date, so it sorts correctly as a string.")
+
+(defun s3-manager--render-buckets (response)
+  "Render the `s3api list-buckets' RESPONSE into the current buffer."
+  (setq tabulated-list-entries
+        (mapcar (lambda (bucket)
+                  (let ((name (alist-get 'Name bucket)))
+                    ;; The bucket name is the entry id: it is what every
+                    ;; command on this buffer needs, and it is stable across
+                    ;; a re-sort so point survives one.
+                    (list name
+                          (vector name
+                                  (s3-manager--format-date
+                                   (alist-get 'CreationDate bucket))))))
+                (alist-get 'Buckets response)))
+  (s3-manager--set-status nil)
+  (tabulated-list-print t)
+  (s3-manager--update-header-line))
+
+(defun s3-manager--reload ()
+  "Re-fetch whatever the current buffer is showing."
+  (unless (derived-mode-p 's3-manager-mode)
+    (user-error "Not an S3 Manager buffer"))
+  ;; Abandon any request still in flight; this also advances the generation,
+  ;; so a response already on its way is dropped rather than rendered over
+  ;; the newer one.
+  (s3-manager--cancel)
+  (s3-manager--set-status 'loading)
+  (let ((origin (current-buffer))
+        (generation s3-manager--generation))
+    (s3-manager--aws-async
+     '("s3api" "list-buckets" "--output" "json")
+     :profile s3-manager--profile
+     :buffer origin
+     :generation generation
+     :register t
+     :name "s3-buckets"
+     :on-success #'s3-manager--render-buckets
+     :on-error (lambda (err)
+                 (s3-manager--set-status 'error)
+                 (s3-manager--report-error err "list-buckets")))))
+
+(defun s3-manager--revert (&optional _ignore-auto _noconfirm _preserve-modes)
+  "Re-fetch the listing.  The `revert-buffer-function' for this mode.
+Accepts and ignores the three arguments `revert-buffer' supplies."
+  (s3-manager--reload))
+
+(defun s3-manager-refresh ()
+  "Re-read the current listing from S3."
+  (interactive)
+  (s3-manager--reload))
+
+(defun s3-manager--bucket-buffer (profile)
+  "Return a bucket-list buffer for PROFILE, with a fetch under way."
+  (let ((buffer (get-buffer-create (s3-manager--buffer-name profile))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 's3-manager-mode)
+        (s3-manager-mode))
+      (setq s3-manager--profile profile
+            s3-manager--bucket nil
+            s3-manager--prefix "")
+      (setq tabulated-list-format s3-manager--bucket-list-format
+            tabulated-list-sort-key '("Name" . nil))
+      (tabulated-list-init-header)
+      (s3-manager--reload))
+    buffer))
+
+;;;###autoload
+(defun s3-manager (&optional reread-profiles)
+  "Browse S3 buckets for a profile chosen in the minibuffer.
+
+With a prefix argument REREAD-PROFILES, discard the cached profile list
+and ask the AWS CLI for it again."
+  (interactive "P")
+  (s3-manager--check-cli)
+  (when reread-profiles
+    (setq s3-manager--profiles nil))
+  (s3-manager-read-profile
+   (lambda (profile)
+     (pop-to-buffer (s3-manager--bucket-buffer profile)))))
 
 (provide 's3-manager)
 

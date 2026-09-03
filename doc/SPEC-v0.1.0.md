@@ -867,6 +867,30 @@ Marks live in the hash rather than in a struct slot because entry structs are
 (§6): a mutable `marked` slot would change an entry's identity and break point
 restoration.
 
+### 9.3.1 The header line is contested — columns move into the buffer
+
+`tabulated-list-init-header` installs the column titles into
+`header-line-format`, which is also where §8.4 puts the profile, the current
+`s3://` path and the request status. Whichever is written second wins, and the
+loss is silent: a test asserting that `header-line-format` contains "2 buckets"
+passes happily while the column titles have vanished.
+
+Resolution: `(setq-local tabulated-list-use-header-line nil)` in the mode body.
+The column titles are then rendered as the first line of the buffer — retaining
+their `(space :align-to …)` alignment and their click-to-sort keymap — and the
+header line is free for the S3 context.
+
+A test must assert on the **first buffer line**, not only on
+`header-line-format`, or this regresses unnoticed.
+
+### 9.3.2 One mode, two column layouts
+
+§9's format is the object browser's. The same mode also serves the bucket list
+(§8.1), whose columns differ. `tabulated-list-format` is buffer-local, so each
+setup function installs its own layout and calls `tabulated-list-init-header`
+itself; the mode body must **not** set the format. Doing it this way from the
+start means the object browser adds its layout without touching the mode body.
+
 ### 9.4 Loading state
 
 Starting a listing sets `s3-manager--status` to `loading` and updates the header

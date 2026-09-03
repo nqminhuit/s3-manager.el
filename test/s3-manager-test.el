@@ -40,6 +40,12 @@
      (expand-file-name (concat "fixtures/" name) s3-manager-test--dir))
     (buffer-string)))
 
+(defun s3-manager-test--json (name)
+  "Return fixture NAME parsed exactly as the transport would parse it."
+  (with-temp-buffer
+    (insert (s3-manager-test--fixture name))
+    (s3-manager--parse-json (current-buffer))))
+
 (defun s3-manager-test--scratch-buffers ()
   "Return the transport's scratch buffers that are currently alive."
   (seq-filter (lambda (b)
@@ -964,6 +970,208 @@ timers as well as sentinels."
       (with-current-buffer "*S3 Manager Error*"
         (should (string-match-p "list-profiles" (buffer-string))))
       (kill-buffer "*S3 Manager Error*"))))
+
+
+;;;; Bucket listing and the major mode
+
+;; Built rather than written out, so the tests carry no escaped JSON.
+(defconst s3-manager-test--one-bucket-json
+  (json-serialize
+   '((Buckets . [((Name . "media")
+                  (CreationDate . "2026-08-01T00:00:00+00:00"))])))
+  "A `list-buckets' response holding a single bucket.")
+
+(defconst s3-manager-test--no-buckets-json
+  (json-serialize '((Buckets . [])))
+  "A `list-buckets' response for an account with no buckets.")
+
+(defmacro s3-manager-test--in-bucket-buffer (profile &rest body)
+  "Run BODY in a fresh bucket-list buffer for PROFILE, then kill it."
+  (declare (indent 1))
+  `(let ((buffer (s3-manager--bucket-buffer ,profile)))
+     (unwind-protect
+         (with-current-buffer buffer ,@body)
+       (kill-buffer buffer))))
+
+(ert-deftest s3-manager-test-format-date ()
+  (should (equal (s3-manager--format-date "2026-08-01T10:22:31+00:00")
+                 "2026-08-01"))
+  ;; Absent or malformed values must render, not signal.
+  (should (equal (s3-manager--format-date nil) "-"))
+  (should (equal (s3-manager--format-date "") "-"))
+  (should (equal (s3-manager--format-date "2026-08") "-")))
+
+(ert-deftest s3-manager-test-buffer-name ()
+  (should (equal (s3-manager--buffer-name "production") "*s3: production*"))
+  (should (equal (s3-manager--buffer-name "production" "media")
+                 "*s3: production/media*"))
+  (should (equal (s3-manager--buffer-name nil) "*s3: default*")))
+
+(ert-deftest s3-manager-test-render-buckets-from-fixture ()
+  "The recorded response renders in order, with names as entry ids."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--bucket-list-format)
+    (tabulated-list-init-header)
+    (s3-manager--render-buckets (s3-manager-test--json "list-buckets.json"))
+    (should (equal (mapcar #'car tabulated-list-entries) '("media" "backups")))
+    (should (equal (aref (cadr (assoc "media" tabulated-list-entries)) 0)
+                   "media"))
+    (should (equal (aref (cadr (assoc "media" tabulated-list-entries)) 1)
+                   "2026-08-01"))
+    ;; and it actually painted
+    (should (string-match-p "media" (buffer-string)))
+    (should (string-match-p "backups" (buffer-string)))))
+
+(ert-deftest s3-manager-test-render-buckets-empty ()
+  "An account with no buckets renders empty rather than signalling."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--bucket-list-format)
+    (tabulated-list-init-header)
+    (s3-manager--render-buckets nil)
+    (should (null tabulated-list-entries))
+    (should (string-match-p "empty" header-line-format))))
+
+(ert-deftest s3-manager-test-bucket-buffer-end-to-end ()
+  "A live-shaped round trip: request, render, header line, status."
+  (s3-manager-test--with-fake-aws
+      (:stdout s3-manager-test--one-bucket-json)
+    (s3-manager-test--in-bucket-buffer "production"
+      (should (derived-mode-p 's3-manager-mode))
+      (should (equal s3-manager--profile "production"))
+      (should (null s3-manager--bucket))
+      (should (equal s3-manager--prefix ""))
+      ;; The fetch is asynchronous, so it is still loading right now.
+      (should (eq s3-manager--status 'loading))
+      (should (string-match-p "loading" header-line-format))
+      (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+      (should (equal (mapcar #'car tabulated-list-entries) '("media")))
+      (should (string-match-p "1 bucket" header-line-format))
+      (should (string-match-p "production" header-line-format)))))
+
+(ert-deftest s3-manager-test-bucket-buffer-is-named-per-profile ()
+  (s3-manager-test--with-fake-aws (:stdout s3-manager-test--no-buckets-json)
+    (s3-manager-test--in-bucket-buffer "staging"
+      (should (equal (buffer-name) "*s3: staging*"))
+      (should (s3-manager-test--wait (lambda () (null s3-manager--status)))))))
+
+(ert-deftest s3-manager-test-bucket-listing-argv ()
+  "The listing must ask for JSON and carry the chosen profile."
+  (let ((argv-file (make-temp-file "s3-buckets-argv")))
+    (unwind-protect
+        (s3-manager-test--with-fake-aws
+            (:stdout s3-manager-test--no-buckets-json :argv-file argv-file)
+          (s3-manager-test--in-bucket-buffer "production"
+            (should (s3-manager-test--wait
+                     (lambda () (null s3-manager--status)))))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents argv-file)
+                           (split-string (buffer-string) "\n" t))
+                         '("--profile" "production"
+                           "--no-cli-pager" "--no-cli-auto-prompt"
+                           "s3api" "list-buckets" "--output" "json"))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-bucket-listing-error-sets-status ()
+  "A failure must leave the buffer usable and say so, not throw."
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*"))
+  (s3-manager-test--with-fake-aws
+      (:stderr "\\nAn error occurred (AccessDenied) when calling the ListBuckets operation: nope\\n"
+       :exit 254)
+    (s3-manager-test--in-bucket-buffer "production"
+      (should (s3-manager-test--wait (lambda () (eq s3-manager--status 'error))))
+      (should (string-match-p "failed" header-line-format))
+      (should (get-buffer "*S3 Manager Error*"))
+      (with-current-buffer "*S3 Manager Error*"
+        (should (string-match-p "AccessDenied" (buffer-string))))))
+  (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*")))
+
+(ert-deftest s3-manager-test-refresh-refetches ()
+  "`g' goes through `revert-buffer' and must issue a new request."
+  (let ((calls 0))
+    (s3-manager-test--with-fake-aws (:stdout s3-manager-test--no-buckets-json)
+      (cl-letf* ((original (symbol-function 's3-manager--aws-async))
+                 ((symbol-function 's3-manager--aws-async)
+                  (lambda (&rest args) (cl-incf calls) (apply original args))))
+        (s3-manager-test--in-bucket-buffer "production"
+          (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+          (should (= calls 1))
+          ;; `g' is bound by `special-mode' to `revert-buffer', which this
+          ;; mode redirects; exercise that path rather than calling reload.
+          (revert-buffer)
+          (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+          (should (= calls 2)))))))
+
+(ert-deftest s3-manager-test-revert-function-is-replaced ()
+  "The parent mode's synchronous revert would never re-fetch."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (should (eq revert-buffer-function #'s3-manager--revert))
+    ;; `revert-buffer' supplies three arguments; accepting fewer breaks `g'.
+    (should (equal (func-arity #'s3-manager--revert) '(0 . 3)))))
+
+(ert-deftest s3-manager-test-column-titles-are-visible ()
+  "The column titles must survive this mode using the header line.
+
+`tabulated-list-init-header' installs them into `header-line-format',
+which is where the profile and s3:// path go, so the titles are rendered
+into the buffer instead.  Asserting only on `header-line-format' hid
+their loss entirely."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--bucket-list-format)
+    (tabulated-list-init-header)
+    (s3-manager--render-buckets (s3-manager-test--json "list-buckets.json"))
+    (should (null tabulated-list-use-header-line))
+    (let ((first-line (car (split-string (buffer-string) "\n"))))
+      (should (string-match-p "Name" first-line))
+      (should (string-match-p "Created" first-line)))
+    ;; and the S3 context still owns the header line
+    (should (string-match-p "buckets" header-line-format))))
+
+(ert-deftest s3-manager-test-mode-reserves-a-mark-column ()
+  "`tabulated-list-put-tag' silently does nothing when padding is 0."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (should (= tabulated-list-padding 2))))
+
+(ert-deftest s3-manager-test-mode-cancels-on-kill ()
+  "Killing a buffer mid-request must not orphan the process.
+With :noquery t, Emacs would not even prompt about it at exit."
+  (let ((buffer nil) (proc nil))
+    (s3-manager-test--with-fake-aws (:stdout s3-manager-test--no-buckets-json :delay "5")
+      (setq buffer (s3-manager--bucket-buffer "production"))
+      (with-current-buffer buffer (setq proc s3-manager--process))
+      (should (process-live-p proc))
+      (kill-buffer buffer)
+      (should-not (process-live-p proc)))))
+
+(ert-deftest s3-manager-test-stale-listing-is-not-rendered ()
+  "A response for a superseded request must not paint over a newer one."
+  (s3-manager-test--with-fake-aws (:stdout s3-manager-test--no-buckets-json :delay "0.3")
+    (let ((buffer (s3-manager--bucket-buffer "production")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (let ((first-process s3-manager--process))
+              ;; Refresh before the first response lands.
+              (s3-manager--reload)
+              (should-not (eq s3-manager--process first-process))
+              (should (s3-manager-test--wait
+                       (lambda () (null s3-manager--status))))
+              ;; One render, from the surviving request.
+              (should (null tabulated-list-entries))))
+        (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-refresh-outside-an-s3-buffer ()
+  (with-temp-buffer
+    (should-error (s3-manager-refresh) :type 'user-error)))
+
+(ert-deftest s3-manager-test-entry-point-checks-the-cli ()
+  "`s3-manager' must fail cleanly when the CLI is unusable."
+  (let ((s3-manager--cli-version nil)
+        (s3-manager-aws-program "s3-manager-no-such-program"))
+    (should-error (s3-manager) :type 'user-error)))
 
 (provide 's3-manager-test)
 
