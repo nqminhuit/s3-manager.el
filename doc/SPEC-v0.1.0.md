@@ -112,9 +112,17 @@ On the first invocation of `s3-manager` in a session, and never again:
    Install AWS CLI v2, or set `s3-manager-aws-program'.
    ```
 
-2. Run `aws --version` **synchronously** (this is the one permitted synchronous
-   call; it is local, sub-100ms, and everything depends on its result). Output
-   format is a single line:
+2. **[CORRECTED]** Confirm the version **asynchronously**. An earlier version
+   of this section called `aws --version` synchronously, on the grounds that it
+   is "local, sub-100ms, and everything depends on its result". Two of those
+   three are false: it was measured at **0.554s** — it is Python interpreter
+   startup, not a local file read — and it runs on the very first keystroke of
+   a session, so paying it synchronously breaks the one promise the package
+   makes. `executable-find` (0.00007s) covers the common failure of the CLI not
+   being installed; the version becomes a background `display-warning` rather
+   than a refusal, which is proportionate given the only consequence of an
+   older CLI is that config-file endpoints are ignored. Output format is a
+   single line:
 
    ```
    aws-cli/2.33.30 Python/3.13.11 Linux/7.0.0-30-generic exe/x86_64.ubuntu.24
@@ -494,42 +502,51 @@ Note the key is `NextToken` — the CLI's own synthesized cursor. It is **not**
   :type 'integer :group 's3-manager)
 ```
 
-Every `list-objects-v2` call passes **both** `--max-items` and `--page-size`,
-**set to the same value**. This is not redundancy, and the two flags are not
-interchangeable:
+**[CORRECTED — supersedes the `--max-items` design below]** Listings use the
+raw S3 API, not the CLI's own paging:
 
-- `--page-size` is **server-side** — it becomes the `MaxKeys` wire parameter and
-  controls how many keys each HTTP request returns.
-- `--max-items` is **purely client-side** — the CLI keeps requesting pages and
-  slices the result in memory.
+```
+--no-paginate --max-keys N [--continuation-token TOKEN]
+```
 
-#### 5.3.1 Why they must be equal — the quadratic trap
+`--max-keys` is S3's own `MaxKeys`, which counts **objects and prefixes
+together**, and `NextContinuationToken` resumes losslessly.
 
-The `NextToken` the CLI hands back is not a server cursor. It is a base64 JSON
-envelope, and its contents depend on where the cut landed:
+#### 5.3.1 Why the documented flags cannot be used: they drop directories
 
-| Invocation | Decoded `NextToken` |
-|---|---|
-| `--max-items 10`, no `--page-size` | `{"ContinuationToken": null, "boto_truncate_amount": 10}` |
-| `--max-items 10 --page-size 5` | `{"ContinuationToken": "bWRlbWFpbC…"}` |
-| `--max-items 12 --page-size 5` | `{"ContinuationToken": "bWRlbWFpbC…", "boto_truncate_amount": 2}` |
+`--max-items` truncates on the *primary* result key only (`Contents`). A
+listing cut by it reports **zero `CommonPrefixes`**, and resuming never
+recovers them — so every directory silently vanishes from a paginated
+listing. Measured against a prefix holding three objects and one sub-prefix:
 
-`boto_truncate_amount: N` means **"restart from `ContinuationToken` and discard
-the first N items client-side."** In the first row `ContinuationToken` is
-`null` — so resuming re-lists the prefix **from the very beginning** and throws
-away everything already seen. A "load more" built that way is **O(n²) in both
-requests and bytes**: page 5 of a listing re-fetches pages 1–4 to discard them.
+| Invocation | objects | prefixes | more? |
+|---|---|---|---|
+| no paging flags | 3 | `videos/` | no |
+| `--max-items 2 --page-size 2` | 2 | **none** | yes |
+| `--max-items 3 --page-size 3` | 3 | **none** | yes |
+| `--max-items 4 --page-size 4` | 3 | `videos/` | no |
+| `--no-paginate --max-keys 2` | 2 | none | yes |
+| … `--continuation-token` | 1 | **`videos/`** | no |
 
-When `--max-items` lands exactly on a page boundary, `boto_truncate_amount` is
-absent and the token degrades to a pure server-side S3 continuation token —
-O(1) resumption. Setting `--page-size` equal to `--max-items` guarantees that
-boundary on every request.
+Following the `--max-items 3` token returned nothing further: `videos/` was
+lost permanently. The raw form returned all four entries across two pages.
 
-**This is the single highest-leverage line in the spec. An implementer who
-"simplifies" by dropping `--page-size`, or a user who customizes only one of the
-two, silently converts the listing UI into a quadratic one.** Enforce it in
-code — derive both flags from `s3-manager-page-size`, and do not expose them
-separately.
+This reverses an earlier version of this section, which had the two flags kept
+equal to avoid a *quadratic* resume. That reasoning was correct as far as it
+went — a page-boundary cut does yield a clean server-side cursor — but it
+addressed cost, not correctness, and missed that the aggregation discards
+prefixes outright. Losing directories is far worse than re-fetching.
+
+**`--max-keys` and `--continuation-token` are undocumented** — absent from both
+the synopsis and the options list — and work through the CLI's "a manual
+pagination argument forces `--no-paginate`" path. That is a real maintenance
+risk, accepted deliberately: they map one-to-one onto the stable `MaxKeys` and
+`ContinuationToken` REST parameters, and the documented alternative is wrong.
+They are mutually exclusive with `--max-items` (hard error, exit 252).
+
+Because `--no-paginate` returns the raw response, `IsTruncated`, `KeyCount`,
+`Name` and `MaxKeys` **are** present — unlike in the aggregated mode described
+in §11.3.1.
 
 The first page renders immediately. If the response contains
 `NextToken`, the buffer stores it and the footer shows:

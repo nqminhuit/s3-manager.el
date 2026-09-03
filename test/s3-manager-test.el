@@ -764,6 +764,54 @@ Emacs restarted."
     (should (eq (s3-manager--cli-version) 'missing))
     (should-error (s3-manager--check-cli) :type 'user-error)))
 
+(ert-deftest s3-manager-test-check-executable-is-instant ()
+  "The interactive path must not pay for `aws --version'.
+
+Measured at 0.55s of Python interpreter startup, spent on the very first
+keystroke, which would break the package's one promise about never
+blocking Emacs.  Presence is checked here; the version is confirmed in
+the background."
+  (let ((s3-manager--cli-version nil)
+        (start (float-time)))
+    (s3-manager--check-executable)
+    (should (< (- (float-time) start) 0.05)))
+  (let ((s3-manager-aws-program "s3-manager-no-such-program"))
+    (should-error (s3-manager--check-executable) :type 'user-error)))
+
+(ert-deftest s3-manager-test-check-version-warns-when-too-old ()
+  "An old CLI ignores endpoint_url silently, so say so -- in the background."
+  (let ((s3-manager--cli-version nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &rest _)
+                 (push message warnings))))
+      (s3-manager-test--with-fake-aws (:stdout "aws-cli/2.9.1 Python/3.13\\n")
+        (s3-manager--check-version)
+        (should (s3-manager-test--wait (lambda () warnings)))))
+    (should (seq-find (lambda (w) (string-match-p "2\\.13\\.0" w)) warnings))
+    (should (seq-find (lambda (w) (string-match-p "endpoint_url" w)) warnings))))
+
+(ert-deftest s3-manager-test-check-version-is-quiet-when-current ()
+  (let ((s3-manager--cli-version nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest args) (push args warnings))))
+      (s3-manager-test--with-fake-aws (:stdout "aws-cli/2.33.30 Python/3.13\\n")
+        (s3-manager--check-version)
+        (should (s3-manager-test--wait
+                 (lambda () (consp s3-manager--cli-version))))))
+    (should (null warnings))
+    (should (equal (cdr s3-manager--cli-version) "2.33.30"))))
+
+(ert-deftest s3-manager-test-check-version-probes-once ()
+  (let ((s3-manager--cli-version (cons s3-manager-aws-program "2.33.30"))
+        (calls 0))
+    (cl-letf* ((original (symbol-function 's3-manager--aws-async))
+               ((symbol-function 's3-manager--aws-async)
+                (lambda (&rest args) (cl-incf calls) (apply original args))))
+      (s3-manager--check-version))
+    (should (zerop calls))))
+
 (ert-deftest s3-manager-test-cli-too-old-is-rejected ()
   "Below 2.13.0 the CLI ignores endpoint_url in ~/.aws/config silently."
   (let ((s3-manager--cli-version (cons s3-manager-aws-program "2.9.1")))
@@ -1319,29 +1367,35 @@ this silently."
     (should (equal (s3-manager--list-objects-args)
                    '("s3api" "list-objects-v2" "--bucket" "media"
                      "--delimiter" "/"
-                     "--max-items" "1000" "--page-size" "1000"
+                     "--no-paginate" "--max-keys" "1000"
                      "--output" "json")))
     (setq s3-manager--prefix "videos/2026/")
     (should (equal (s3-manager--list-objects-args)
                    '("s3api" "list-objects-v2" "--bucket" "media"
                      "--prefix" "videos/2026/"
                      "--delimiter" "/"
-                     "--max-items" "1000" "--page-size" "1000"
+                     "--no-paginate" "--max-keys" "1000"
                      "--output" "json")))))
 
-(ert-deftest s3-manager-test-page-size-flags-stay-equal ()
-  "--max-items alone yields a resume token with a client-side offset,
-making continuation quadratic.  The two flags must always match."
+(ert-deftest s3-manager-test-listing-never-uses-max-items ()
+  "`--max-items' drops CommonPrefixes from a truncated listing.
+
+It counts only the primary result key, so a listing cut by it reports
+zero prefixes and resuming never recovers them: every directory
+disappears.  The raw API is used instead, where MaxKeys covers objects
+and prefixes together."
   (with-temp-buffer
     (s3-manager-mode)
     (setq s3-manager--bucket "media"
           s3-manager--prefix ""
           s3-manager-page-size 250)
-    (let* ((args (s3-manager--list-objects-args))
-           (max-items (cadr (member "--max-items" args)))
-           (page-size (cadr (member "--page-size" args))))
-      (should (equal max-items "250"))
-      (should (equal max-items page-size)))))
+    (let ((args (s3-manager--list-objects-args "TOK")))
+      (should-not (member "--max-items" args))
+      (should-not (member "--page-size" args))
+      (should-not (member "--starting-token" args))
+      (should (member "--no-paginate" args))
+      (should (equal (cadr (member "--max-keys" args)) "250"))
+      (should (equal (cadr (member "--continuation-token" args)) "TOK")))))
 
 (ert-deftest s3-manager-test-truncated-listing-is-flagged ()
   (with-temp-buffer
@@ -1636,18 +1690,17 @@ equality is structural."
 
 ;;;; Pagination
 
-(ert-deftest s3-manager-test-starting-token-argv ()
+(ert-deftest s3-manager-test-continuation-token-argv ()
   (with-temp-buffer
     (s3-manager-mode)
     (setq s3-manager--bucket "media" s3-manager--prefix ""
           s3-manager-page-size 1000)
     (let ((args (s3-manager--list-objects-args "TOKEN123")))
-      (should (equal (cadr (member "--starting-token" args)) "TOKEN123"))
-      ;; Still one page's worth, and the flags still match each other.
-      (should (equal (cadr (member "--max-items" args)) "1000"))
-      (should (equal (cadr (member "--page-size" args)) "1000")))
+      (should (equal (cadr (member "--continuation-token" args)) "TOKEN123"))
+      (should (equal (cadr (member "--max-keys" args)) "1000")))
     ;; Absent when there is nothing to resume from.
-    (should-not (member "--starting-token" (s3-manager--list-objects-args)))))
+    (should-not (member "--continuation-token"
+                        (s3-manager--list-objects-args)))))
 
 (ert-deftest s3-manager-test-render-truncated-caches-the-token ()
   "A partly-loaded prefix resumes rather than restarting."
@@ -1716,10 +1769,9 @@ equality is structural."
                 (s3-manager-load-more)
                 (should (s3-manager-test--wait
                          (lambda () (null s3-manager--status)))))
-              (let ((argv (with-temp-buffer
-                            (insert-file-contents argv-file)
-                            (split-string (buffer-string) "\n" t))))
-                (should (equal (cadr (member "--starting-token" argv)) token))))
+              (let ((argv (car (s3-manager-test--argv-records argv-file))))
+                (should (equal (cadr (member "--continuation-token" argv))
+                               token))))
             ;; And it appended.
             (should (= 4 (length s3-manager--entries))))
         (delete-file argv-file)))))
@@ -2303,7 +2355,15 @@ directory it is meant to live in: `(expand-file-name \"../../etc/passwd\"
                   ("a.tar.gz" . "a.tar.gz")
                   (".." . "s3-object")
                   ("." . "s3-object")
-                  ("" . "s3-object")))
+                  ("" . "s3-object")
+                  ;; `expand-file-name' expands a leading tilde, so these
+                  ;; would resolve to the user's home directory and to
+                  ;; root's.  An object keyed "backups/~" is legal in S3.
+                  ("~" . "s3-object")
+                  ("~root" . "s3-object")
+                  ;; Only the leaf is taken, so this reduces to "x", which
+                  ;; is a plain name inside the view directory.
+                  ("~/x" . "x")))
     (let ((entry (s3-manager-entry--create
                   :type 'object :key "k" :display-name (car case))))
       (should (equal (s3-manager--view-file-name entry) (cdr case)))))
@@ -2316,7 +2376,8 @@ directory it is meant to live in: `(expand-file-name \"../../etc/passwd\"
     (should (equal (expand-file-name name "/tmp/root/") "/tmp/root/b"))))
 
 (ert-deftest s3-manager-test-view-destination-is-inside-its-own-directory ()
-  (let* ((entry (s3-manager-entry--create
+  (let* ((s3-manager--view-pending nil)
+         (entry (s3-manager-entry--create
                  :type 'object :key "x/README.md" :display-name "README.md"))
          (path (s3-manager--view-destination entry))
          (directory (file-name-directory path)))
@@ -2324,9 +2385,62 @@ directory it is meant to live in: `(expand-file-name \"../../etc/passwd\"
         (progn
           (should (equal (file-name-nondirectory path) "README.md"))
           (should (file-directory-p directory))
-          ;; Nothing above the per-view directory is named.
-          (should (equal path (expand-file-name "README.md" directory))))
+          (should (equal path (expand-file-name "README.md" directory)))
+          ;; Registered for cleanup until a buffer takes it over.
+          (should (member directory s3-manager--view-pending)))
       (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest s3-manager-test-view-destination-stays-inside-for-tilde-names ()
+  "Even if the name guard were weakened, the path must not escape."
+  (let* ((s3-manager--view-pending nil)
+         (entry (s3-manager-entry--create
+                 :type 'object :key "backups/~" :display-name "~"))
+         (path (s3-manager--view-destination entry))
+         (directory (file-name-directory path)))
+    (unwind-protect
+        (progn
+          (should (string-prefix-p directory path))
+          (should-not (equal path (expand-file-name "~"))))
+      (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest s3-manager-test-percent-in-a-key-is-not-a-mode-line-spec ()
+  "Header lines are format constructs, so a `%' in a key is interpreted."
+  (should (equal (s3-manager--quote-percent "sale-50%-off.png")
+                 "sale-50%%-off.png"))
+  (should (equal (s3-manager--quote-percent "a%b.txt") "a%%b.txt"))
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "p" s3-manager--bucket "b"
+          s3-manager--prefix "50%-off/")
+    (s3-manager--update-header-line)
+    (should (string-match-p "50%%-off/" header-line-format))))
+
+(ert-deftest s3-manager-test-failed-view-releases-its-directory ()
+  "A transfer that fails must not leave an empty view directory behind."
+  (let ((s3-manager--view-pending nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (s3-manager-test--with-fake-aws (:stderr "fatal error: nope\\n" :exit 1)
+          (s3-manager-view)
+          (should (s3-manager-test--wait
+                   (lambda () (zerop s3-manager--transfers))))))
+      (should (null s3-manager--view-pending)))))
+
+(ert-deftest s3-manager-test-pending-view-directories-are-swept ()
+  "Killing the origin buffer mid-download suppresses both callbacks.
+The sweep on `kill-emacs-hook' is the only thing left to recover it."
+  (let* ((s3-manager--view-pending nil)
+         (entry (s3-manager-entry--create
+                 :type 'object :key "a.txt" :display-name "a.txt"))
+         (path (s3-manager--view-destination entry))
+         (directory (file-name-directory path)))
+    (write-region "leaked object bytes\n" nil path nil 'silent)
+    (should (file-exists-p path))
+    (s3-manager--view-discard-all)
+    (should-not (file-exists-p path))
+    (should-not (file-directory-p directory))
+    (should (null s3-manager--view-pending))))
 
 (ert-deftest s3-manager-test-view-refuses-large-objects ()
   "RET is the most-pressed key and must never be unbounded."
@@ -2365,11 +2479,12 @@ directory it is meant to live in: `(expand-file-name \"../../etc/passwd\"
             (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
               (cl-letf* ((original (symbol-function 's3-manager--transfer))
                          ((symbol-function 's3-manager--transfer)
-                          (lambda (args description &optional on-done)
+                          (lambda (args description &optional on-done on-failure)
                             ;; Create the file the real CLI would have made.
                             (write-region "hello from s3\n" nil (nth 3 args)
                                           nil 'silent)
-                            (funcall original args description on-done))))
+                            (funcall original args description
+                                     on-done on-failure))))
                 (s3-manager-view)
                 (should (s3-manager-test--wait
                          (lambda () (buffer-live-p view-buffer)))))))
@@ -2407,18 +2522,26 @@ The object keeps its own name, so `auto-mode-alist' applies as usual."
       (ignore-errors (delete-directory directory t)))))
 
 (ert-deftest s3-manager-test-view-copy-is-removed-with-the-buffer ()
-  "Downloaded object data must not be left lying in the temp directory."
-  (let* ((entry (s3-manager-entry--create
+  "Downloaded object data must not be left lying in the temp directory.
+
+Drives `s3-manager--display-view' rather than re-creating what it does:
+setting the variable and adding the hook by hand would make the test
+pass even if the production path stopped doing either -- which is the
+regression it exists to catch."
+  (let* ((s3-manager--view-pending nil)
+         (entry (s3-manager-entry--create
                  :type 'object :key "a.txt" :display-name "a.txt"))
          (path (s3-manager--view-destination entry))
-         (directory (file-name-directory path)))
+         (directory (file-name-directory path))
+         (buffer nil))
     (write-region "data\n" nil path nil 'silent)
     (should (file-exists-p path))
-    (let ((buffer (find-file-noselect path)))
-      (with-current-buffer buffer
-        (setq s3-manager--view-file path)
-        (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t))
-      (kill-buffer buffer))
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (b &rest _) (setq buffer b))))
+      (s3-manager--display-view path "s3://media/a.txt"))
+    ;; Ownership moved from the pending set to the buffer.
+    (should (null s3-manager--view-pending))
+    (kill-buffer buffer)
     (should-not (file-exists-p path))
     (should-not (file-directory-p directory))))
 

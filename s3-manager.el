@@ -95,12 +95,18 @@ Takes precedence over `s3-manager-endpoint-url' for matching profiles."
 (defcustom s3-manager-page-size 1000
   "Number of entries fetched per listing request.
 
-This is passed as both `--max-items' and `--page-size', and the two must
-stay equal.  Given only `--max-items', the CLI hands back a resume token
-containing a client-side offset, so continuing a listing re-fetches
-everything already seen and discards it -- quadratic in the number of
-entries.  Equal values make the cut land on a page boundary, which
-yields a genuine server-side cursor instead."
+Passed as `--max-keys', which is the S3 API's own MaxKeys and counts
+objects and prefixes together.
+
+The CLI's documented paging flags are not used, because `--max-items'
+counts only the primary result key.  A listing truncated by it reports
+*zero* CommonPrefixes and resuming never recovers them, so every
+directory silently disappears from a paginated listing.  Measured
+against a prefix holding three objects and one sub-prefix:
+`--max-items 3' returned the three objects, no prefixes, and a
+continuation token; following that token returned nothing further.
+`--max-keys 2' with `--continuation-token' returned all four across two
+pages."
   :type 'integer)
 
 (defcustom s3-manager-download-directory "~/Downloads/"
@@ -238,7 +244,10 @@ with no warning, and a deleted one makes `make-process' signal
       version)))
 
 (defun s3-manager--check-cli ()
-  "Signal a `user-error' unless a usable AWS CLI is installed."
+  "Signal a `user-error' unless a usable AWS CLI is installed.
+
+Synchronous, and therefore not used on the interactive path: see
+`s3-manager--check-executable'."
   (let ((version (s3-manager--cli-version)))
     (cond
      ((eq version 'missing)
@@ -250,6 +259,46 @@ with no warning, and a deleted one makes `make-process' signal
        "S3 Manager: AWS CLI %s is too old; %s or newer is required"
        version s3-manager-minimum-cli-version)))
     version))
+
+(defun s3-manager--check-executable ()
+  "Signal a `user-error' unless the AWS CLI is on PATH.
+
+Only the program's presence is checked, which is instant.  The version
+is confirmed asynchronously by `s3-manager--check-version', because
+`aws --version' costs about half a second of Python interpreter startup
+-- measured at 0.55s -- and this runs on the very first keystroke.
+Spending that synchronously would break the one promise the package
+makes about never blocking Emacs."
+  (unless (executable-find s3-manager-aws-program)
+    (user-error
+     "S3 Manager: AWS CLI not found (%s).  Install AWS CLI v2, or set `s3-manager-aws-program'"
+     s3-manager-aws-program)))
+
+(defun s3-manager--check-version ()
+  "Confirm the AWS CLI version in the background, warning if it is too old.
+Runs at most once per session for a given `s3-manager-aws-program'."
+  (unless (and (consp s3-manager--cli-version)
+               (equal (car s3-manager--cli-version) s3-manager-aws-program))
+    (s3-manager--aws-async
+     '("--version")
+     :parse nil
+     :name "s3-version"
+     :on-success
+     (lambda (output)
+       (when (string-match "aws-cli/\\([0-9]+\\(?:\\.[0-9]+\\)*\\)"
+                           (or output ""))
+         (let ((version (match-string 1 output)))
+           (setq s3-manager--cli-version
+                 (cons s3-manager-aws-program version))
+           (when (version< version s3-manager-minimum-cli-version)
+             (display-warning
+              's3-manager
+              (format "AWS CLI %s is older than %s: `endpoint_url' in ~/.aws/config is ignored, so requests go to AWS rather than your configured endpoint"
+                      version s3-manager-minimum-cli-version)
+              :warning)))))
+     ;; A failed probe is not worth interrupting the user for; the command
+     ;; they actually asked for will report its own errors.
+     :on-error #'ignore)))
 
 
 ;;;; Command construction
@@ -752,7 +801,8 @@ the most recently chosen profile, so repeat use is a single RET."
 (defun s3-manager-list-profiles ()
   "Report the AWS profiles the CLI knows about."
   (interactive)
-  (s3-manager--check-cli)
+  (s3-manager--check-executable)
+  (s3-manager--check-version)
   (s3-manager--with-profiles
    (lambda (profiles)
      (if profiles
@@ -1004,6 +1054,15 @@ amount and the rate are pulled out of it."
               (match-string 2 line))
     (truncate-string-to-width (string-trim line) 40 nil nil t)))
 
+(defun s3-manager--quote-percent (string)
+  "Return STRING safe to put in a mode line or header line.
+
+Those are format constructs, not literal text, so a `%' in an S3 key is
+interpreted: \"sale-50%-off.png\" renders `%-' as padding to the right
+margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
+`%' are commonplace, URL-encoded ones especially."
+  (replace-regexp-in-string "%" "%%" string t t))
+
 (defun s3-manager--mode-line-status ()
   "Return the `mode-line-process' fragment for this buffer."
   (concat
@@ -1022,9 +1081,10 @@ amount and the rate are pulled out of it."
   "Refresh the header line from this buffer's state."
   (setq-local
    header-line-format
-   (concat " " (or s3-manager--profile "default")
+   (concat " " (s3-manager--quote-percent (or s3-manager--profile "default"))
            (if s3-manager--bucket
-               (format "  s3://%s/%s" s3-manager--bucket s3-manager--prefix)
+               (s3-manager--quote-percent
+                (format "  s3://%s/%s" s3-manager--bucket s3-manager--prefix))
              "  buckets")
            "   "
            (pcase s3-manager--status
@@ -1339,7 +1399,9 @@ is how `s3-manager-load-more' extends a truncated listing."
     (setq s3-manager--entries (if append
                                   (append s3-manager--entries new)
                                 new)
-          s3-manager--next-token (alist-get 'NextToken response)))
+          ;; Raw response, so this is S3's own cursor -- present exactly
+          ;; when IsTruncated is true.
+          s3-manager--next-token (alist-get 'NextContinuationToken response)))
   (setq tabulated-list-entries
         (mapcar #'s3-manager--entry-row s3-manager--entries))
   ;; Cache the accumulation, token included, so returning to a
@@ -1352,18 +1414,24 @@ is how `s3-manager-load-more' extends a truncated listing."
   (s3-manager--print-list)
   (s3-manager--update-header-line))
 
-(defun s3-manager--list-objects-args (&optional starting-token)
+(defun s3-manager--list-objects-args (&optional continuation-token)
   "Return the service arguments listing the current bucket and prefix.
-STARTING-TOKEN, when given, resumes a truncated listing."
+CONTINUATION-TOKEN, when given, resumes a truncated listing.
+
+`--no-paginate' turns off the CLI's own aggregation so that one
+invocation is exactly one S3 request, and `--max-keys' is the API's own
+MaxKeys.  See `s3-manager-page-size' for why the documented
+`--max-items' cannot be used: it drops CommonPrefixes."
   (append (list "s3api" "list-objects-v2" "--bucket" s3-manager--bucket)
           ;; Omitted entirely at the bucket root: an empty --prefix is
           ;; accepted but says nothing.
           (unless (string-empty-p s3-manager--prefix)
             (list "--prefix" s3-manager--prefix))
           (list "--delimiter" "/"
-                "--max-items" (number-to-string s3-manager-page-size)
-                "--page-size" (number-to-string s3-manager-page-size))
-          (when starting-token (list "--starting-token" starting-token))
+                "--no-paginate"
+                "--max-keys" (number-to-string s3-manager-page-size))
+          (when continuation-token
+            (list "--continuation-token" continuation-token))
           (list "--output" "json")))
 
 
@@ -1433,6 +1501,31 @@ TARGET, when given, is the entry to put point on once the listing lands."
 (defvar-local s3-manager--view-file nil
   "Local copy this buffer is displaying, deleted when the buffer dies.")
 
+(defvar s3-manager--view-pending nil
+  "View directories not yet handed to a buffer that will clean them up.
+
+A directory is created when the download starts and passes to the
+buffer's `kill-buffer-hook' once one exists.  Every other outcome --- a
+failed or timed-out transfer, or an origin buffer killed mid-download,
+which suppresses the callbacks entirely --- would otherwise leave the
+object's bytes in the temporary directory.")
+
+(defun s3-manager--view-discard (directory)
+  "Delete a pending view DIRECTORY and forget it."
+  (setq s3-manager--view-pending (delete directory s3-manager--view-pending))
+  (ignore-errors (delete-directory directory t)))
+
+(defun s3-manager--view-discard-all ()
+  "Delete every view directory still awaiting a buffer.
+Installed on `kill-emacs-hook': it is the only thing that can recover a
+download whose origin buffer was killed before it finished, since that
+suppresses the callbacks."
+  (mapc (lambda (directory) (ignore-errors (delete-directory directory t)))
+        s3-manager--view-pending)
+  (setq s3-manager--view-pending nil))
+
+(add-hook 'kill-emacs-hook #'s3-manager--view-discard-all)
+
 (defun s3-manager--view-file-name (entry)
   "Return a safe leaf file name for viewing ENTRY.
 
@@ -1442,7 +1535,12 @@ name anything other than a file inside its own directory.  Building a
 path from a key directly would let one escape the temporary directory."
   (let ((name (file-name-nondirectory
                (directory-file-name (s3-manager-entry-display-name entry)))))
-    (if (or (member name '("" "." "..")) (string-match-p "/" name))
+    (if (or (member name '("" "." ".."))
+            ;; A leading tilde is the escape that matters: `expand-file-name'
+            ;; expands it, so "~" resolves to the user's home directory and
+            ;; "~root" to root's.  An object with the key "backups/~" would
+            ;; otherwise have Emacs visit $HOME itself.
+            (string-prefix-p "~" name))
         "s3-object"
       name)))
 
@@ -1451,24 +1549,41 @@ path from a key directly would let one escape the temporary directory."
 A directory of its own per view, so that objects of the same name in
 different prefixes cannot collide and the buffer keeps the object's own
 name."
-  (expand-file-name
-   (s3-manager--view-file-name entry)
-   (file-name-as-directory (make-temp-file "s3-manager-view-" t))))
+  ;; `file-name-concat' rather than `expand-file-name': it performs no tilde
+  ;; expansion, so the result cannot leave the directory even if the guard
+  ;; above is ever weakened.
+  (let ((directory (file-name-as-directory
+                    (make-temp-file "s3-manager-view-" t))))
+    (push directory s3-manager--view-pending)
+    (file-name-concat directory (s3-manager--view-file-name entry))))
 
 (defun s3-manager--view-cleanup ()
   "Delete the local copy behind the current buffer."
   (when s3-manager--view-file
-    (let ((directory (file-name-directory s3-manager--view-file)))
-      (ignore-errors (delete-file s3-manager--view-file))
-      ;; Only ever this view's own directory, and only when now empty.
-      (ignore-errors (delete-directory directory)))))
+    ;; Recursive, so an auto-save or backup file landing beside the copy
+    ;; cannot leave the directory behind.  Only ever this view's own
+    ;; directory, which holds nothing else.
+    (s3-manager--view-discard (file-name-directory s3-manager--view-file))))
 
 (defun s3-manager--display-view (file uri)
   "Show FILE, a local copy of URI, in a read-only buffer."
-  (let ((buffer (find-file-noselect file)))
+  (let ((buffer
+         ;; The bytes came from S3 and are not trusted: a `-*- ... -*-' or
+         ;; `Local Variables:' section in them would otherwise be applied.
+         ;; And the size cap sits above `large-file-warning-threshold', so
+         ;; without silencing it an object between the two would prompt from
+         ;; inside a process callback.
+         (let ((enable-local-variables nil)
+               (large-file-warning-threshold nil))
+           (find-file-noselect file))))
     (with-current-buffer buffer
       (setq s3-manager--view-file file)
-      (setq-local header-line-format (format " %s  (read-only copy)" uri))
+      ;; This buffer now owns the directory; drop it from the pending set.
+      (setq s3-manager--view-pending
+            (delete (file-name-directory file) s3-manager--view-pending))
+      (setq-local header-line-format
+                  (format " %s  (read-only copy)"
+                          (s3-manager--quote-percent uri)))
       ;; The copy is disposable: remove it with the buffer rather than
       ;; leaving downloaded object data lying in the temporary directory.
       (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t)
@@ -1498,7 +1613,9 @@ name."
         (s3-manager--transfer
          (list "s3" "cp" uri destination "--progress-frequency" "1")
          (format "opening %s" key)
-         (lambda () (s3-manager--display-view destination uri)))))))
+         (lambda () (s3-manager--display-view destination uri))
+         (lambda ()
+           (s3-manager--view-discard (file-name-directory destination))))))))
 
 
 ;;;; Marks
@@ -1790,10 +1907,12 @@ input."
     (setq s3-manager--transfer-status nil))
   (force-mode-line-update))
 
-(defun s3-manager--transfer (args description &optional on-done)
+(defun s3-manager--transfer (args description &optional on-done on-failure)
   "Run the transfer ARGS, reporting progress in the current buffer.
 DESCRIPTION names the operation in messages and error reports.
-ON-DONE, when given, is called with no arguments after it succeeds."
+ON-DONE, when given, is called with no arguments after it succeeds.
+ON-FAILURE likewise after it fails, for releasing anything the caller
+set up in advance."
   (cl-incf s3-manager--transfers)
   (setq s3-manager--transfer-status "starting")
   (force-mode-line-update)
@@ -1821,7 +1940,8 @@ ON-DONE, when given, is called with no arguments after it succeeds."
                  (when on-done (funcall on-done)))
    :on-error (lambda (err)
                (s3-manager--transfer-finished)
-               (s3-manager--report-error err description))))
+               (s3-manager--report-error err description)
+               (when on-failure (funcall on-failure)))))
 
 (defun s3-manager--read-destination-file (name)
   "Read a local destination for an object called NAME."
@@ -1904,7 +2024,8 @@ placeholder carry a nil id, and every command must refuse them."
 With a prefix argument REREAD-PROFILES, discard the cached profile list
 and ask the AWS CLI for it again."
   (interactive "P")
-  (s3-manager--check-cli)
+  (s3-manager--check-executable)
+  (s3-manager--check-version)
   (when reread-profiles
     (setq s3-manager--profiles nil))
   (s3-manager-read-profile
