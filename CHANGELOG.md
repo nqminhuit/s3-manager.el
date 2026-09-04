@@ -3,7 +3,7 @@
 All notable changes to `s3-manager.el`. Dates are the release date; the design
 document is `doc/SPEC.md`.
 
-## Unreleased
+## 0.2.0 — 2026-09-04
 
 ### Added
 
@@ -12,11 +12,6 @@ document is `doc/SPEC.md`.
   (recursively for a prefix); bind `s3-manager-dired-do-copy` to `C` in Dired
   and it uploads the marked files to a *visible* S3 listing, falling back to
   `dired-do-copy` unchanged when there is none.
-
-## 0.2.0 — 2026-09-04
-
-### Added
-
 - **Upload.** `P` uploads a local file into the prefix on screen, or a
   directory recursively after a typed `yes`. An existing key is named, with its
   size and date, and confirmed before it is replaced — `aws s3 cp` overwrites
