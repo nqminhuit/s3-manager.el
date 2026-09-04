@@ -2736,6 +2736,164 @@ download directory when there is no Dired buffer to borrow from."
       (delete-file source))))
 
 
+;;;; Dired batch upload
+
+(defmacro s3-manager-test--with-dired (var files &rest body)
+  "Bind VAR to a Dired buffer over a directory holding FILES, run BODY."
+  (declare (indent 2))
+  `(let ((directory (make-temp-file "s3-dired" t)))
+     (unwind-protect
+         (progn
+           (dolist (name ,files)
+             (write-region "x\n" nil (expand-file-name name directory)
+                           nil 'silent))
+           (let ((,var (dired-noselect directory)))
+             (unwind-protect (with-current-buffer ,var ,@body)
+               (kill-buffer ,var))))
+       (delete-directory directory t))))
+
+(defun s3-manager-test--mark-all ()
+  "Mark every file in the current Dired buffer."
+  (goto-char (point-min))
+  (dired-mark-files-regexp "\\.txt\\'"))
+
+(ert-deftest s3-manager-test-dired-upload-needs-a-dired-buffer ()
+  (with-temp-buffer
+    (should-error (s3-manager-dired-upload) :type 'user-error)))
+
+(ert-deftest s3-manager-test-dired-upload-needs-an-s3-buffer ()
+  "With no listing to upload into there is nothing to ask about."
+  (skip-unless (require 'dired nil t))
+  (s3-manager-test--with-dired buffer '("a.txt")
+    (cl-letf (((symbol-function 'buffer-list) (lambda () nil))
+              ((symbol-function 'window-list) (lambda (&rest _) nil)))
+      (should-error (s3-manager-dired-upload) :type 'user-error))))
+
+(ert-deftest s3-manager-test-dired-upload-refuses-remote-files ()
+  "`aws' cannot read a TRAMP path, so say so rather than let it fail."
+  (skip-unless (require 'dired nil t))
+  (s3-manager-test--with-dired buffer '("a.txt")
+    (cl-letf (((symbol-function 'dired-get-marked-files)
+               (lambda (&rest _) '("/ssh:host:/tmp/a.txt"))))
+      (should-error (s3-manager--dired-sources) :type 'user-error))))
+
+(ert-deftest s3-manager-test-dired-upload-uploads-every-marked-file ()
+  "Three marks produce three probes and three transfers, into the prefix."
+  (skip-unless (require 'dired nil t))
+  (let ((argv-file (make-temp-file "s3-dired-argv"))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--with-dired buffer '("a.txt" "b.txt" "c.txt")
+            (s3-manager-test--in-object-buffer
+              (setq s3-manager--prefix "docs/")
+              (let ((s3-buffer (current-buffer)))
+                (with-current-buffer buffer
+                  (s3-manager-test--mark-all)
+                  (cl-letf (((symbol-function 's3-manager--dired-target)
+                             (lambda () s3-buffer))
+                            ((symbol-function 'y-or-n-p)
+                             (lambda (p) (setq asked p) t))
+                            ((symbol-function 'message) #'ignore))
+                    (s3-manager-test--with-fake-aws
+                        (:stdout "" :argv-file argv-file
+                         :head-exit 254
+                         :head-stderr s3-manager-test--head-404)
+                      (s3-manager-dired-upload)
+                      (should (s3-manager-test--wait
+                               (lambda ()
+                                 (>= (length (s3-manager-test--argv-records
+                                              argv-file))
+                                     6))))))))))
+          (let* ((records (s3-manager-test--argv-records argv-file))
+                 (probes (seq-filter (lambda (r) (member "head-object" r))
+                                     records))
+                 (copies (seq-filter (lambda (r) (member "cp" r)) records)))
+            (should (= 3 (length probes)))
+            (should (= 3 (length copies)))
+            (dolist (copy copies)
+              (should (seq-find (lambda (a)
+                                  (string-prefix-p "s3://media/docs/" a))
+                                copy)))
+            ;; One prompt for the batch, not one per file.
+            (should (string-match-p "Upload 3 files" asked))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-dired-upload-names-what-it-would-overwrite ()
+  "Existing keys are named in the single confirmation."
+  (skip-unless (require 'dired nil t))
+  (let ((asked nil))
+    (s3-manager-test--with-dired buffer '("a.txt")
+      (s3-manager-test--in-object-buffer
+        (let ((s3-buffer (current-buffer)))
+          (with-current-buffer buffer
+            (s3-manager-test--mark-all)
+            (cl-letf (((symbol-function 's3-manager--dired-target)
+                       (lambda () s3-buffer))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (setq asked p) nil))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout ""
+                   :head-exit 0
+                   :head-stdout (json-serialize '((ContentLength . 10))))
+                (s3-manager-dired-upload)
+                (should (s3-manager-test--wait (lambda () asked)))))))))
+    (should (string-match-p "overwriting 1" asked))))
+
+(ert-deftest s3-manager-test-dired-upload-refreshes-once ()
+  "N transfers, one refresh -- not one per file."
+  (skip-unless (require 'dired nil t))
+  (let ((refreshes 0))
+    (s3-manager-test--with-dired buffer '("a.txt" "b.txt")
+      (s3-manager-test--in-object-buffer
+        (let ((s3-buffer (current-buffer)))
+          (with-current-buffer buffer
+            (s3-manager-test--mark-all)
+            (cl-letf (((symbol-function 's3-manager--dired-target)
+                       (lambda () s3-buffer))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                      ((symbol-function 's3-manager--after-upload)
+                       (lambda (&rest _) (setq refreshes (1+ refreshes))))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :head-exit 254
+                   :head-stderr s3-manager-test--head-404)
+                (s3-manager-dired-upload)
+                (should (s3-manager-test--wait
+                         (lambda () (> refreshes 0))))
+                (s3-manager-test--wait #'ignore 0.3)))))))
+    (should (= 1 refreshes))))
+
+(ert-deftest s3-manager-test-dired-upload-counts-failures ()
+  "A batch is not atomic, so the report says how many failed."
+  (skip-unless (require 'dired nil t))
+  (let ((said nil))
+    (s3-manager-test--with-dired buffer '("a.txt" "b.txt")
+      (s3-manager-test--in-object-buffer
+        (let ((s3-buffer (current-buffer)))
+          (with-current-buffer buffer
+            (s3-manager-test--mark-all)
+            (cl-letf (((symbol-function 's3-manager--dired-target)
+                       (lambda () s3-buffer))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                      ((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) said))))
+              ;; Every `s3 cp' fails; the probes still report 404.
+              (s3-manager-test--with-fake-aws
+                  (:stderr "upload failed" :exit 1
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-dired-upload)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (seq-find (lambda (m) (string-match-p "failed" m))
+                                     said))))))))))
+    (should (seq-find (lambda (m) (string-match-p "uploaded 0, 2 failed" m))
+                      said))))
+
+
 ;;;; Upload
 
 (defconst s3-manager-test--head-404

@@ -252,23 +252,28 @@ since the symlink decision leans on it."
             ;; run, which transfers nothing to report on.
             '("--progress-frequency" "1"))))
 
-(defun s3-manager--upload-start (source uri key prefix &optional recursive)
+(defun s3-manager--upload-start (source uri key prefix &optional recursive done)
   "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards.
-With RECURSIVE, SOURCE is a directory and its whole tree is sent."
+With RECURSIVE, SOURCE is a directory and its whole tree is sent.  DONE
+replaces the refresh, for a batch that refreshes once at the end; it is
+called on failure too."
   ;; Re-checked here rather than only at the prompt: a head-object round trip
   ;; and an unbounded `y-or-n-p' sit between the two, and a file removed in
   ;; that window would otherwise be reported as a partial transfer failure
   ;; for a file that was never opened.
   (unless (file-readable-p source)
     (user-error "%s is no longer readable" source))
-  (let ((done (lambda () (s3-manager--after-upload prefix key recursive))))
+  (let ((finish (lambda (ok)
+                  (if done
+                      (funcall done ok)
+                    (s3-manager--after-upload prefix key recursive)))))
     (s3-manager--transfer
      (s3-manager--upload-args source uri recursive)
      (format "uploading %s to %s" (abbreviate-file-name source) uri)
-     done
+     (lambda () (funcall finish t))
      ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
      ;; exactly as in `s3-manager--delete-prefix'.
-     done)))
+     (lambda () (funcall finish nil)))))
 
 (defun s3-manager--upload-later (buffer thunk)
   "Run THUNK in BUFFER from a zero-second timer.
@@ -391,6 +396,143 @@ recursively, after a typed confirmation."
             (user-error "Upload aborted"))
           (s3-manager--upload-start source uri key prefix t))
       (s3-manager--upload-probe source uri key prefix))))
+
+(declare-function dired-get-marked-files "dired"
+                  (&optional localp arg filter distinguish-one-marked error))
+
+(defun s3-manager--dired-target ()
+  "Return an S3 object-listing buffer to upload into.
+A visible one wins, so the window layout picks the destination."
+  (let ((visible (seq-find (lambda (buffer)
+                             (buffer-local-value 's3-manager--bucket buffer))
+                           (mapcar #'window-buffer (window-list))))
+        (live (seq-filter (lambda (buffer)
+                            (buffer-local-value 's3-manager--bucket buffer))
+                          (buffer-list))))
+    (cond
+     (visible visible)
+     ((null live) (user-error "No S3 object listing to upload into"))
+     ((null (cdr live)) (car live))
+     (t (get-buffer (completing-read "Upload into: "
+                                     (mapcar #'buffer-name live) nil t))))))
+
+(defun s3-manager--dired-sources ()
+  "Return the marked files in this Dired buffer, as absolute paths."
+  (let ((files (dired-get-marked-files)))
+    (unless files (user-error "Nothing to upload"))
+    (dolist (file files)
+      ;; `aws' cannot read a TRAMP path, and the transport pins
+      ;; `default-directory' to a local one, so fail plainly instead.
+      (when (file-remote-p file)
+        (user-error "%s is remote; aws cannot read it" file)))
+    (mapcar #'expand-file-name files)))
+
+(defun s3-manager--upload-probe-each (keys existing unchecked done)
+  "Probe KEYS one at a time, then call DONE with EXISTING and UNCHECKED.
+Sequential rather than parallel: the ordering makes the confirmation
+reproducible, and the probes are dwarfed by the transfer that follows."
+  (if (null keys)
+      (funcall done (nreverse existing) (nreverse unchecked))
+    (let ((key (car keys)) (rest (cdr keys)))
+      (s3-manager--aws-async
+       (list "s3api" "head-object" "--bucket" s3-manager--bucket
+             "--key" key "--output" "json")
+       :profile s3-manager--profile
+       :buffer (current-buffer)
+       :name "s3-head-object"
+       :on-success
+       (lambda (_response)
+         (s3-manager--upload-probe-each rest (cons key existing) unchecked done))
+       :on-error
+       (lambda (err)
+         (if (s3-manager--head-object-absent-p err)
+             (s3-manager--upload-probe-each rest existing unchecked done)
+           (s3-manager--record-error err "head-object")
+           (s3-manager--upload-probe-each rest existing (cons key unchecked)
+                                          done)))))))
+
+(defun s3-manager--upload-batch (sources prefix)
+  "Upload SOURCES into PREFIX, refreshing once when the last one lands.
+A batch is not atomic, so failures are counted and named rather than
+folded into a total."
+  (let* ((total (length sources))
+         (pending total)
+         (failed 0)
+         (directories (seq-filter #'file-directory-p sources))
+         (finish
+          (lambda ()
+            (setq pending (1- pending))
+            (when (zerop pending)
+              (s3-manager--after-upload prefix nil)
+              ;; Each uploaded directory created keys beneath its own prefix.
+              (dolist (directory directories)
+                (s3-manager--cache-purge
+                 s3-manager--profile
+                 (s3-manager--endpoint-for s3-manager--profile)
+                 s3-manager--bucket
+                 (s3-manager--upload-key directory prefix)))
+              (if (zerop failed)
+                  (message "S3: uploaded %d file%s" total
+                           (if (= total 1) "" "s"))
+                (message "S3: uploaded %d, %d failed -- see %s"
+                         (- total failed) failed
+                         s3-manager--error-buffer))))))
+    (dolist (source sources)
+      (let* ((recursive (file-directory-p source))
+             (key (s3-manager--upload-key source prefix))
+             (uri (s3-manager--s3-uri key)))
+        (s3-manager--upload-start
+         source uri key prefix recursive
+         (lambda (ok)
+           (unless ok (setq failed (1+ failed)))
+           (funcall finish)))))))
+
+;;;###autoload
+(defun s3-manager-dired-upload ()
+  "Upload the marked files in this Dired buffer into an S3 listing.
+With nothing marked, the file at point, as Dired itself does.
+
+One confirmation covers the whole batch: a probe per file is bounded,
+but a prompt per file is not."
+  (interactive)
+  (unless (derived-mode-p 'dired-mode)
+    (user-error "Not a Dired buffer"))
+  (let* ((sources (s3-manager--dired-sources))
+         (target (s3-manager--dired-target))
+         (recursive (seq-some #'file-directory-p sources)))
+    (with-current-buffer target
+      (let* ((prefix s3-manager--prefix)
+             (keys (mapcar (lambda (source)
+                             (s3-manager--upload-key source prefix))
+                           (seq-remove #'file-directory-p sources)))
+             (origin (current-buffer)))
+        (message "S3: checking %d destination%s..."
+                 (length keys) (if (= (length keys) 1) "" "s"))
+        (s3-manager--upload-probe-each
+         keys nil nil
+         (lambda (existing unchecked)
+           (s3-manager--upload-later
+            origin
+            (lambda ()
+              (let ((question
+                     (concat
+                      (format "Upload %d file%s to %s"
+                              (length sources)
+                              (if (= (length sources) 1) "" "s")
+                              (s3-manager--s3-uri prefix))
+                      (when existing
+                        (format ", overwriting %d (%s)"
+                                (length existing)
+                                (string-join (seq-take existing 3) ", ")))
+                      (when unchecked
+                        (format ", %d unchecked" (length unchecked)))
+                      "? ")))
+                ;; A directory makes the volume unbounded, as it does for `P'.
+                (unless (if recursive
+                            (yes-or-no-p question)
+                          (y-or-n-p question))
+                  (user-error "Upload aborted"))
+                (s3-manager--upload-batch sources prefix))))))))))
 
 (defun s3-manager-upload-dry-run ()
   "Show what uploading a local file or directory would write, without writing.

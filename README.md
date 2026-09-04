@@ -148,6 +148,16 @@ its directory instead of `s3-manager-download-directory` — the same thing
 `dired-dwim-target` does between two Dired buffers, and it is honoured, so
 setting it to nil turns this off too.
 
+Going the other way, `M-x s3-manager-dired-upload` in a Dired buffer uploads
+its marked files (or the file at point, as Dired itself does) into the S3
+listing in the other window. One confirmation covers the batch, naming any keys
+it would overwrite; the listing refreshes once when the last transfer lands.
+The package does not touch `dired-mode-map`, so bind it yourself:
+
+```elisp
+(keymap-set dired-mode-map "U" #'s3-manager-dired-upload)
+```
+
 ### When something fails
 
 Failures are never summarised away. Every one is appended to `*S3 Manager
