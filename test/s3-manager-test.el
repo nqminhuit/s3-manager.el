@@ -5327,3 +5327,41 @@ point on a row every command refuses."
     (s3-manager-beginning-of-listing 1)
     (should (= 1 (line-number-at-pos)))))
 
+(ert-deftest s3-manager-test-show-report-replaces-and-does-not-steal ()
+  "The shared renderer: one current answer, in a window of its own."
+  (let ((buffer "*S3 Manager Test Report*"))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'display-buffer) #'ignore))
+            (s3-manager--show-report buffer "First:" "one\n")
+            (s3-manager--show-report buffer "Second:" "two\n"))
+          (with-current-buffer buffer
+            ;; Replaced, not appended -- the previous answer described a
+            ;; different target.
+            (should-not (string-match-p "First" (buffer-string)))
+            (should (string-match-p "Second:" (buffer-string)))
+            (should (string-match-p "two" (buffer-string)))
+            ;; Read-only, and point at the top so the heading is what you see.
+            (should (derived-mode-p 'special-mode))
+            (should (= (point) (point-min)))))
+      (when (get-buffer buffer) (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-show-report-spells-out-nothing ()
+  "A blank buffer reads as a failure, and the difference matters here."
+  (let ((buffer "*S3 Manager Test Report*"))
+    (unwind-protect
+        (dolist (body (list nil "" "   \n  "))
+          (cl-letf (((symbol-function 'display-buffer) #'ignore))
+            (s3-manager--show-report buffer "Would do:" body))
+          (with-current-buffer buffer
+            (should (string-match-p "(nothing)" (buffer-string)))))
+      (when (get-buffer buffer) (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-dry-run-uses-the-shared-renderer ()
+  "`s3-manager--show-dry-run' is the shared renderer plus a buffer name."
+  (let (seen)
+    (cl-letf (((symbol-function 's3-manager--show-report)
+               (lambda (buffer heading body) (setq seen (list buffer heading body)))))
+      (s3-manager--show-dry-run "Would delete:" "x\n"))
+    (should (equal seen (list s3-manager--dry-run-buffer "Would delete:" "x\n")))))
+

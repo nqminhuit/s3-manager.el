@@ -402,25 +402,32 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
 (defconst s3-manager--dry-run-buffer "*S3 Manager Dry Run*"
   "Name of the buffer showing what an operation would do.")
 
-(defun s3-manager--show-dry-run (heading output)
-  "Display OUTPUT under HEADING in `s3-manager--dry-run-buffer'.
+(defun s3-manager--show-report (buffer heading body)
+  "Display BODY under HEADING in BUFFER, replacing what was there.
 
-Replaced rather than appended, unlike `s3-manager--error-buffer': a dry
-run is a question with exactly one current answer, and the previous
-answer described a different target.  Empty output is spelled out
-rather than left blank, because a blank buffer reads as a failure and
-the difference matters when the next keystroke acts on what this
-listed."
-  (with-current-buffer (get-buffer-create s3-manager--dry-run-buffer)
+Replaced rather than appended, unlike `s3-manager--error-buffer': each
+of these buffers answers one question, and the previous answer described
+a different target.  An empty BODY is spelled out rather than left
+blank, because a blank buffer reads as a failure and the difference
+matters when the next keystroke acts on what this listed.
+
+`display-buffer', so the report appears without stealing the selected
+window -- the user is still in the listing and about to press something
+there."
+  (with-current-buffer (get-buffer-create buffer)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert heading "\n\n")
-      (insert (if (string-empty-p (string-trim (or output "")))
+      (insert (if (string-empty-p (string-trim (or body "")))
                   "(nothing)\n"
-                output))
+                body))
       (goto-char (point-min)))
     (unless (derived-mode-p 'special-mode) (special-mode))
     (display-buffer (current-buffer))))
+
+(defun s3-manager--show-dry-run (heading output)
+  "Display OUTPUT under HEADING in `s3-manager--dry-run-buffer'."
+  (s3-manager--show-report s3-manager--dry-run-buffer heading output))
 
 (defun s3-manager--uri (bucket key)
   "Return the s3:// URI for KEY in BUCKET."
