@@ -316,6 +316,10 @@ since the symlink decision leans on it."
             ;; run, which transfers nothing to report on.
             '("--progress-frequency" "1"))))
 
+(defun s3-manager--upload-description (source uri)
+  "Return the gerund clause naming an upload of SOURCE to URI."
+  (format "uploading %s to %s" (abbreviate-file-name source) uri))
+
 (defun s3-manager--upload-start (source uri key prefix &optional recursive done)
   "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards.
 With RECURSIVE, SOURCE is a directory and its whole tree is sent.  DONE
@@ -331,27 +335,13 @@ called on failure too."
                   (if done
                       (funcall done ok)
                     (s3-manager--after-upload prefix key recursive)))))
-    (let ((args (s3-manager--upload-args source uri recursive))
-          (description (format "uploading %s to %s"
-                               (abbreviate-file-name source) uri)))
-      ;; Not in a batch: DONE means the Dired batch is driving, which must
-      ;; not ask per file and whose callback has to fire either way or the
-      ;; remaining files never start.
-      ;;
-      ;; Not for a recursive upload either, which has already demanded a
-      ;; typed `yes'.  Two questions for one action is worse than not
-      ;; offering, and the typed `yes' is the one that must not go: it is
-      ;; there because the operation is unbounded.
-      (when (or done recursive
-                (s3-manager--offer-command
-                 args description
-                 (or (file-attribute-size (file-attributes source)) 0)))
-        (s3-manager--transfer
-         args description
-         (lambda () (funcall finish t))
-         ;; Also on failure: `aws s3' exits 1 or 2 having done part of the
-         ;; work, exactly as in `s3-manager--delete-prefix'.
-         (lambda () (funcall finish nil)))))))
+    (s3-manager--transfer
+     (s3-manager--upload-args source uri recursive)
+     (s3-manager--upload-description source uri)
+     (lambda () (funcall finish t))
+     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
+     ;; exactly as in `s3-manager--delete-prefix'.
+     (lambda () (funcall finish nil)))))
 
 (defun s3-manager--prompt-later (buffer thunk &optional context)
   "Run THUNK in BUFFER from a zero-second timer.
@@ -500,7 +490,15 @@ recursively, after a typed confirmation."
                                " (following symlinks)" "")))
             (user-error "Upload aborted"))
           (s3-manager--upload-start source uri key prefix t))
-      (s3-manager--upload-probe source uri key prefix))))
+      ;; Ahead of the probe, deliberately.  The size is known here without
+      ;; asking anyone, so a user who wants the command should not have to
+      ;; wait for a `head-object' round trip and answer an overwrite
+      ;; question about an upload they are not going to run.
+      (when (s3-manager--offer-command
+             (s3-manager--upload-args source uri nil)
+             (s3-manager--upload-description source uri)
+             (or (file-attribute-size (file-attributes source)) 0))
+        (s3-manager--upload-probe source uri key prefix)))))
 
 (declare-function dired-get-marked-files "dired"
                   (&optional localp arg filter distinguish-one-marked error))

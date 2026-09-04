@@ -223,23 +223,8 @@ the default would only pin us to it."
 
 (defun s3-manager--copy-start (job)
   "Run JOB, refreshing both ends when it stops, either way."
-  (let ((args (s3-manager--copy-args job)))
-    ;; Nil for a recursive job, which has already demanded a typed `yes':
-    ;; two questions for one action is worse than not offering.
-    ;;
-    ;; The bytes never cross this machine either way, so what the offer buys
-    ;; here is duration rather than bandwidth -- a long copy outlives an
-    ;; Emacs session more often than it saturates anything.
-    (when (s3-manager--offer-command
-           args (s3-manager--job-describe job)
-           (and (not (s3-manager-job-recursive job))
-                (s3-manager-job-size job)))
-      (s3-manager--copy-run job args))))
-
-(defun s3-manager--copy-run (job args)
-  "Run ARGS as JOB, refreshing both ends when it stops, either way."
   (s3-manager--transfer
-   args
+   (s3-manager--copy-args job)
    (s3-manager--job-describe job)
    (lambda () (s3-manager--after-copy job))
    (lambda ()
@@ -274,6 +259,10 @@ given, so copying videos/ to backup/ puts the objects in backup/, and
 putting them in backup/videos/ means saying so at the prompt."
   (if (s3-manager-job-recursive job)
       (progn
+        ;; No command offer for a recursive job: it is about to demand a
+        ;; typed `yes', and two questions for one action is worse than not
+        ;; offering.  The typed `yes' is the one that cannot go -- it is
+        ;; there because the operation is unbounded.
         (unless (yes-or-no-p
                  (format "Recursively %s everything under %s to %s%s? "
                          (s3-manager--job-verb job)
@@ -283,7 +272,17 @@ putting them in backup/videos/ means saying so at the prompt."
                              ", deleting the originals" "")))
           (user-error "%s" (s3-manager--job-aborted job)))
         (s3-manager--copy-start job))
-    (s3-manager--copy-probe job)))
+    ;; Ahead of the probe: the size is already in the job, so a user who
+    ;; wants the command should not wait for a `head-object' round trip and
+    ;; answer an overwrite question about a copy they will not run.
+    ;;
+    ;; The bytes never cross this machine either way, so what the offer buys
+    ;; here is duration rather than bandwidth -- a long copy outlives an
+    ;; Emacs session more often than it saturates anything.
+    (when (s3-manager--offer-command
+           (s3-manager--copy-args job) (s3-manager--job-describe job)
+           (s3-manager-job-size job))
+      (s3-manager--copy-probe job))))
 
 (defun s3-manager--copy-probe (job)
   "Check whether JOB's destination exists, then run it.

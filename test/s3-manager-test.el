@@ -5552,3 +5552,91 @@ on top of it."
       (with-current-buffer s3-manager--command-buffer
         (should-not (string-match-p "no longer" (buffer-string)))))))
 
+(ert-deftest s3-manager-test-upload-offers-before-probing ()
+  "The offer is the first question, not the last.
+
+The size is known locally, so a user who wants the command must not have
+to wait for a `head-object' round trip and answer an overwrite question
+about an upload they are not going to run."
+  (s3-manager-test--with-upload-source source
+    (let ((argv-file (make-temp-file "s3-offer-argv")))
+      (unwind-protect
+          (s3-manager-test--in-object-buffer
+            (s3-manager-test--answering-offer ?c
+              (cl-letf (((symbol-function 'read-file-name)
+                         (lambda (&rest _) source))
+                        ((symbol-function 'y-or-n-p)
+                         (lambda (&rest _) (error "Must not probe first")))
+                        ((symbol-function 'display-buffer) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                  (let ((s3-manager-large-transfer-size 1))
+                    (s3-manager-upload)
+                    (s3-manager-test--wait #'ignore 0.3))))
+              (should (string-match-p "uploading" offered)))
+            ;; Not even the probe ran.
+            (should (equal "" (with-temp-buffer
+                                (insert-file-contents argv-file)
+                                (buffer-string)))))
+        (delete-file argv-file)))))
+
+(ert-deftest s3-manager-test-copy-to-offers-before-probing ()
+  "Same for a server-side copy: the size is already in the job."
+  (let ((argv-file (make-temp-file "s3-offer-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)        ; README.md, 1234 bytes
+          (s3-manager-test--answering-offer ?c
+            (s3-manager-test--copying-to "s3://media/backup/README.md"
+              (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                        ;; Reaching the probe's confirmation means the offer
+                        ;; did not come first.  Signal rather than block on
+                        ;; stdin, so the failure is a failure and not a hang.
+                        ((symbol-function 'y-or-n-p)
+                         (lambda (&rest _) (error "Must not probe first")))
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                  (let ((s3-manager-large-transfer-size 100))
+                    (s3-manager-copy-to)
+                    (s3-manager-test--wait #'ignore 0.3)))))
+            (should (string-match-p "copying" offered))
+            (should (string-match-p "1.2 KiB" offered)))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-dired-batch-never-offers ()
+  "A batch must not ask per file, whatever the threshold.
+
+It drives `s3-manager--upload-start' once per source, and an answer of
+`c' there would leave the callback unfired and the remaining files
+never started -- the batch would stall with no summary."
+  (skip-unless (require 'dired nil t))
+  (let ((said nil))
+    (s3-manager-test--with-dired buffer '("a.txt" "b.txt")
+      (s3-manager-test--in-object-buffer
+        (let ((s3-buffer (current-buffer)))
+          (with-current-buffer buffer
+            (s3-manager-test--mark-all)
+            (cl-letf (((symbol-function 's3-manager--dired-target)
+                       (lambda () s3-buffer))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                      ((symbol-function 'read-multiple-choice)
+                       (lambda (&rest _) (error "Must not ask per file")))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) said))))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :head-exit 254
+                   :head-stderr s3-manager-test--head-404)
+                ;; Every file is "large" at this threshold.
+                (let ((s3-manager-large-transfer-size 1))
+                  (s3-manager-dired-upload)
+                  (should (s3-manager-test--wait
+                           (lambda ()
+                             (seq-find (lambda (m) (string-match-p "uploaded" m))
+                                       said)))))))))))
+    ;; Both files went, and the batch reported its summary.
+    (should (seq-find (lambda (m) (string-match-p "uploaded 2 files" m)) said))))
+
