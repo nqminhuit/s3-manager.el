@@ -224,11 +224,13 @@ Listings are cached per `(profile, endpoint, bucket, prefix)`, so moving back
 up a level is instant. Nothing expires on a timer — `g` is one keystroke, which
 is what every other Emacs listing does.
 
-## Not in v0.1.0
+## Not in v0.2.0
 
-Upload, copy and move; sync; bucket creation and deletion; ACLs; metadata
-editing; versioning; presigned URLs; recursive listing in one buffer; TRAMP and
-Dired integration.
+Copy and move between S3 locations; sync; bucket creation and deletion; ACLs;
+metadata editing; versioning; presigned URLs; recursive listing in one buffer;
+uploading from a remote (TRAMP) directory.
+
+See [CHANGELOG.md](CHANGELOG.md) for what each release added.
 
 ## Development
 
@@ -281,7 +283,7 @@ CI installs Evil from NonGNU ELPA and fails the step if the tests skip rather
 than run -- a `skip-unless` test is worth only as much as the guarantee that
 its dependency is present.
 
-`doc/SPEC-v0.1.0.md` is the design document, including a reference appendix of
+`doc/SPEC.md` is the design document, including a reference appendix of
 AWS CLI and Emacs subprocess behaviour that was measured rather than assumed.
 
 ## License

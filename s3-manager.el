@@ -4,7 +4,7 @@
 
 ;; Author: Minh Nguyen <nqminhuit@gmail.com>
 ;; URL: https://github.com/nqminhuit/s3-manager.el
-;; Version: 0.1.1
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -37,7 +37,7 @@
 ;; Requires AWS CLI 2.13.0 or newer -- earlier releases silently ignore
 ;; `endpoint_url' in ~/.aws/config and send every request to AWS.
 ;;
-;; doc/SPEC-v0.1.0.md is the design document; the code refers to its sections.
+;; doc/SPEC.md is the design document; the code refers to its sections.
 
 ;;; Code:
 

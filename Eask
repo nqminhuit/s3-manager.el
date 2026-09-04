@@ -1,6 +1,6 @@
 ;; -*- mode: eask; lexical-binding: t -*-
 
-(package "s3-manager" "0.1.1" "Manage S3 objects from Emacs")
+(package "s3-manager" "0.2.0" "Manage S3 objects from Emacs")
 
 (website-url "https://github.com/nqminhuit/s3-manager.el")
 (keywords "tools" "convenience")

@@ -1,6 +1,8 @@
-# `s3-manager.el` — Specification v0.1.0
+# `s3-manager.el` — Specification
 
-Status: **Draft, approved for implementation**
+Status: **Describes v0.2.0.** One living document rather than one per release:
+superseded decisions are marked in place, and the text as it stood for an
+earlier release is recoverable from that release's tag.
 
 > This document is written to be implemented without re-deciding anything.
 > Where a plausible design was considered and rejected, it is recorded as a
@@ -40,13 +42,16 @@ rewrite rather than a patch:
 - View a small object in a read-only buffer.
 - Structured error reporting that preserves the CLI's own stderr.
 
-### 1.3 Explicitly out of scope for v0.1.0
+### 1.3 Explicitly out of scope
 
-Upload; copy/move; sync; multipart tuning; bucket creation/deletion; ACL;
-object metadata editing; versioning; presigned URLs; a native AWS SDK; a job
-queue; recursive listing in the UI; TRAMP/Dired integration.
+Copy/move between S3 locations; sync; multipart tuning; bucket
+creation/deletion; ACL; object metadata editing; versioning; presigned URLs; a
+native AWS SDK; a job queue; recursive listing in the UI; TRAMP sources.
 
-§17 records which of these have seams left for them and which do not.
+Shipped since v0.1.0, and no longer out of scope: **upload** (§11.8) and
+**Dired interoperability** (§11.9).
+
+§17 records which of the remainder have seams left for them and which do not.
 
 ---
 
@@ -1289,7 +1294,108 @@ most-pressed key from ever being an unbounded operation.
 
 ---
 
+### 11.8 Upload
+
+```
+aws s3 cp /abs/local/file s3://BUCKET/PREFIX/name --progress-frequency 1
+aws s3 cp /abs/local/dir/ s3://BUCKET/PREFIX/dir/ --recursive --progress-frequency 1
+aws s3 cp … --dryrun                                    (preview; transfers nothing)
+aws s3api head-object --bucket BUCKET --key PREFIX/name  (existence probe)
+```
+
+`P` uploads into the listing's own prefix under the source's leaf name,
+regardless of where point is. A directory goes recursively after a typed `yes`,
+the same bar as a recursive delete.
+
+**The trailing slash on a recursive destination is load-bearing.** Measured:
+`s3 cp DIR s3://B/PREFIX --recursive` maps `DIR/a.txt` onto `PREFIX/a.txt` and
+drops the directory's own name, scattering the tree across the listing the user
+was looking at. The leaf is written into the destination URI, never inferred.
+
+**Overwrite: `head-object`, then confirm.** `s3 cp` replaces a key without a
+word and has no flag that would stop it. The discrimination is an **allowlist**:
+absent is exit 254 *plus* `An error occurred (404) when calling the HeadObject
+operation` — botocore's own format string, hence identical across
+S3-compatible endpoints. A 403 is a permission error, 255 an unreachable
+endpoint, a timeout carries no exit code; reading any of them as absence would
+silently overwrite an object the caller was merely forbidden to *look at*. When
+the check itself fails, the error is reported and the user asked, because real
+AWS answers 403 for a missing key when the caller lacks `s3:ListBucket`.
+
+**Rejected alternative: probe per key on a recursive upload.** Unbounded. The
+dry run plus the typed confirmation cover it instead.
+
+**The confirmation cannot run where the answer arrives.** A sentinel executes
+at whatever point the command loop had reached when the pipe became readable,
+so `y-or-n-p` there re-enters the minibuffer from an arbitrary place. The
+probe's callbacks classify only; a zero-second timer does the prompting, as
+`s3-manager--profiles-resolved` already does for the profile prompt. Both
+branches take the hop, so ordering does not depend on the answer.
+
+**Symlinks are followed**, the CLI's default, and it does not detect cycles. A
+link beside its own target uploads the same file twice — observed. Silently
+*skipping* files the user asked to upload is the worse failure, so the default
+stands and `s3-manager-upload-dry-run` makes it visible beforehand;
+`s3-manager-upload-follow-symlinks` is the escape hatch. Every argument
+deciding *what* is sent is shared between preview and upload, or the preview
+would not describe the thing it previews.
+
+**Refused up front:** a directory that is empty (S3 has no directories, so it
+would report success having done nothing), anything not a regular file (a fifo
+would be read forever, and transfers have no timeout), and a source that has
+become unreadable between the prompt and the transfer.
+
+**After an upload** the destination's cache entry is invalidated and, for a
+recursive one, everything at and beneath the new prefix. The refresh names the
+prefix recorded when the upload *started*: a transfer is outside the generation
+guard, so the user may have navigated since. Point is restored by key, not by
+entry — an uploaded object's `Size` and `LastModified` are the server's, so no
+entry for it can be synthesized in advance.
+
+---
+
+### 11.9 Dired interoperability
+
+Two windows, both directions.
+
+`G`, `R` and `P` default their local path to a Dired buffer visible in another
+window, via `dired-dwim-target-directory`. The user's `dired-dwim-target`
+decides; nil there turns it off.
+
+`M-x s3-manager-dired-upload` goes the other way: the marked files, or the file
+at point when none are marked, into the S3 listing in the other window.
+
+- **One confirmation for the batch**, naming the keys that already exist. A
+  probe per file is bounded and cheap beside the transfer; a prompt per file is
+  not. Probes are sequential, so the question is reproducible.
+- **Remote sources are refused** before anything starts: `aws` cannot read a
+  TRAMP path, and `default-directory` is pinned to a local directory anyway.
+- **One transfer per file** — `s3 cp` takes one source — and **one refresh**
+  when the last lands.
+- **A batch is not atomic.** Failures are counted and reported individually,
+  never folded into a total.
+
+The package does not modify `dired-mode-map`; the binding is the user's.
+
+---
+
 ## 12. Error handling
+
+**[CORRECTED] The report is displayed, not merely recorded.** v0.1.0 wrote
+every failure to `*S3 Manager Error*` and never showed it, on the grounds that
+a permission error during a browse should not steal a window. That holds for a
+browse and fails everywhere else: an echo-area summary is overwritten by the
+next `message`, which during a transfer is under a second. `display-buffer`
+unless `s3-manager-display-errors` is nil; the summary always names the buffer;
+`!` opens it on demand.
+
+**Nothing is swallowed.** An audit found four places that discarded an error —
+`:on-error #'ignore` on the version probe, `ignore-errors` around temporary
+directory cleanup, an empty `cond` branch for exit 130, and a callback failure
+that was only `message`d. Recording is now separate from reporting, so
+background work the user did not ask for still leaves a trace.
+
+**No failure is reported only as a count.** A batch names each one.
 
 ```elisp
 (define-error 's3-manager-error "S3 Manager error")
@@ -1432,12 +1538,27 @@ sensitive, so the buffer is ordinary and killable and is never written to disk.
 
 ## 14. Repository layout and tooling
 
+**[CORRECTED] The package is no longer a single file.** v0.1.0 shipped one
+2100-line file and v0.2.0 grew it to 2532, at which point it was reported
+unnavigable. Each file now requires only the ones below it. The one place the
+layering runs backwards is the keymap, which binds commands defined above it;
+those are `declare-function`ed, since a `#'` reference to an undefined function
+is a warning and warnings are fatal here.
+
 ```
-s3-manager.el          the package — single file, expected 600–800 lines
+s3-manager.el          entry point: M-x s3-manager, and the requires
+s3-manager-core.el     options, buffer-local state, error reporting
+s3-manager-process.el  the async CLI transport, profiles
+s3-manager-model.el    entries and the listing cache
+s3-manager-ui.el       major mode, rendering, navigation, marks
+s3-manager-transfer.el download and upload
+s3-manager-view.el     reading a small object
+s3-manager-delete.el   removing objects and prefixes
 Eask                   build / lint / test manifest
 README.md              user-facing documentation
+CHANGELOG.md           per-release, user-facing
 LICENSE                GPL-3.0
-doc/SPEC-v0.1.0.md     this document
+doc/SPEC.md            this document
 test/
   s3-manager-test.el   ERT suite
   fixtures/
@@ -1621,9 +1742,24 @@ invisible in normal use and expensive to rediscover:
 
 ---
 
+### 15.2.1 Cases added for v0.2.0
+
+Upload argv for both forms, including the trailing slash that keeps a
+directory's leaf; key derivation and its refusals; the `head-object`
+discrimination, with 403, 255 and a timeout each asserted *not* to mean
+absence; the overwrite prompt and what declining does; the sentinel-to-timer
+hop; cache invalidation naming the destination rather than the current prefix;
+point restoration by key; the dry run sharing every decisive argument with the
+upload; the Dired batch — one prompt, one refresh, failures counted, remote
+sources refused; and two hygiene tests over every source file, since splitting
+the package introduced a file-local-variables trap that no functional test
+would catch.
+
+---
+
 ## 16. Definition of Done
 
-v0.1.0 is complete when this runs end to end against a real endpoint:
+Each release is complete when this runs end to end against a real endpoint.
 
 1. `M-x s3-manager` → profile prompt → select `production`.
 2. `*s3: production*` lists buckets; Emacs stayed responsive throughout.
@@ -1646,7 +1782,29 @@ v0.1.0 is complete when this runs end to end against a real endpoint:
 11. Revoking `s3:DeleteObject` and retrying: `AccessDenied` is reported in the
     echo area and in `*S3 Manager Error*`, and the package continues to work.
 
-Items 6, 10, and 11 are the ones that distinguish this from a CLI wrapper.
+### v0.2.0 adds
+
+12. `P` on a file not yet in the prefix → uploads with no overwrite prompt; the
+    row appears and **point lands on it**.
+13. `P` on the same file again → `already exists (31 B, modified …).
+    Overwrite?` quoting the service's own size and date; declining changes
+    nothing.
+14. `P` on a directory → typed `yes` → the tree lands under `NAME/`, not
+    flattened into the current prefix.
+15. `M-x s3-manager-upload-dry-run` on that directory first → the preview names
+    exactly what step 14 then uploads, symlinks resolved the same way, and
+    writes nothing.
+16. A transfer longer than 120 seconds completes rather than timing out.
+17. Dired in one window, an S3 listing in the other: mark three files,
+    `M-x s3-manager-dired-upload` → one prompt, three transfers, one refresh,
+    `uploaded 3 files`.
+18. `G` with that Dired window open → the destination defaults to its
+    directory, not `~/Downloads/`.
+19. Uploading where the caller may not write: the service's own words reach the
+    screen, the report is displayed, and the package keeps working.
+
+Items 6, 10, 11, 13 and 15 are the ones that distinguish this from a CLI
+wrapper.
 
 ---
 
@@ -1654,11 +1812,13 @@ Items 6, 10, and 11 are the ones that distinguish this from a CLI wrapper.
 
 | Version | Work | Seam already in place? |
 |---|---|---|
-| 0.2.0 | Upload, copy, move | Yes — `s3-manager--aws-async` and the mark set generalize to any bulk operation |
-| 0.2.0 | `package-lint` / MELPA readiness | Partly — naming and docstring discipline from v0.1.0 |
-| 0.3.0 | Dired integration | Yes — `s3-manager-entry` carries everything a Dired line needs |
+| ~~0.2.0~~ | ~~Upload~~ | **Shipped** — §11.8 |
+| ~~0.3.0~~ | ~~Dired integration~~ | **Shipped early** — §11.9 |
+| 0.3.0 | Copy and move between S3 locations | Yes — `s3 cp` with two S3 URIs; the overwrite probe generalizes |
+| 0.3.0 | `package-lint` / MELPA readiness | Partly — naming and docstring discipline, but the multi-file layout needs checking |
 | 0.4.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
-| 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns and `s3api head-object` |
+| 0.4.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
+| 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
 | 1.0.0 | Stable public API | — |
 
 **No seam is left** for: a native AWS SDK (would replace the transport layer
@@ -1686,6 +1846,31 @@ Help text, verbatim: *"`NextToken` is provided in the command's output. To
 resume pagination, provide the `NextToken` value in the `--starting-token`
 argument of a subsequent command. **Do not** use the `NextToken` response
 element directly outside of the AWS CLI."*
+
+### 18.1.1 Upload facts, measured for v0.2.0
+
+Against `aws-cli/2.33.30` and a live S3-compatible endpoint, using `--dryrun`
+so nothing was written.
+
+| Probe | Result |
+|---|---|
+| `s3 cp FILE s3://… --dryrun` | prints `(dryrun) upload: SRC to DEST`, exit 0, writes nothing |
+| `s3 cp DIR s3://B/P/ --recursive` | uploads DIR's **contents flat into `P/`**; the leaf is dropped |
+| `s3 cp DIR s3://B/P/DIR/ --recursive` | mirrors the tree under `P/DIR/` |
+| `head-object`, key present | exit **0**, JSON with `ContentLength`, `LastModified`, `ETag` |
+| `head-object`, key absent | exit **254**, stderr `An error occurred (404) when calling the HeadObject operation: Not Found` |
+| `--follow-symlinks` | **default**; a link beside its own target uploads the file twice |
+| MIME type | guessed from the extension unless `--no-guess-mime-type` |
+| `--generate-cli-skeleton` | works for `s3api head-object`; **absent** on the high-level `s3 cp` |
+| filenames with spaces | intact — argv vector, never a shell |
+
+**The transfer timeout was wrong.** `(run-at-time timeout nil …)` arms one
+timer for total duration, not idle time, so any transfer outliving it was
+killed mid-flight and reported as `No response after 120 seconds` — measured
+with the CLI alive and still writing progress. Transfers now take
+`s3-manager-transfer-timeout`, default nil.
+
+---
 
 ### 18.2 `s3 cp` / `s3 rm` flags
 
