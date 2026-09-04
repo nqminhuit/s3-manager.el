@@ -50,14 +50,21 @@ From GitHub:
 | `c` | copy to another S3 location, server-side |
 | `r` | rename, or move elsewhere in S3 |
 | `P` | upload a local file, or a directory recursively |
-| `G` / `R` | download the object, or the prefix recursively |
 | `d` / `x` | mark for deletion; delete everything marked |
 | `u` / `U` | unmark at point / unmark everything |
 | `D` | delete the object, or the prefix recursively |
 | `!` | show the accumulated error reports |
 | `n` / `p` / `q` | next line / previous line / bury |
 
-Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
+**`C` is the download key.** With nothing in the other window it prompts for a
+path, exactly as a dedicated download key would; with Dired there it uses that
+directory. So `s3-manager-get` and `s3-manager-get-recursive` have no binding of
+their own — reach them with `M-x` on the rare occasion you want a download
+*while* a second S3 listing is on screen, where `C` would copy server-side
+instead. Leaving `G` unbound also hands it back to Evil for end-of-buffer.
+
+Also `M-x`: `s3-manager-get`, `s3-manager-get-recursive`,
+`s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
 `s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
 `s3-manager-clear-cache`, `s3-manager-forget-profiles`,
 `s3-manager-list-profiles`.
@@ -84,7 +91,7 @@ recursive move into "copy every object onto itself, then delete it".
 
 With a Dired buffer beside a listing, `C` copies toward the other window in
 both directions. With a *second S3 listing* there instead, `C` copies into its
-prefix, server-side. `G`, `R` and `P` default their path there too, honouring
+prefix, server-side. `C` and `P` default their path there too, honouring
 `dired-dwim-target`. For the Dired half, bind it yourself:
 
 ```elisp
@@ -126,7 +133,7 @@ Or from Emacs, with `s3-manager-endpoint-alist` / `s3-manager-endpoint-url`.
 | `s3-manager-aws-program` | `"aws"` | path to the CLI |
 | `s3-manager-page-size` | `1000` | entries per listing request |
 | `s3-manager-download-directory` | `"~/Downloads/"` | fallback download target |
-| `s3-manager-view-max-size` | 10 MiB | above this, `RET` suggests `G` |
+| `s3-manager-view-max-size` | 10 MiB | above this, `RET` suggests `C` |
 | `s3-manager-timeout` | `120` | seconds before a listing is abandoned |
 | `s3-manager-transfer-timeout` | `nil` | same for transfers; `nil` waits |
 | `s3-manager-cache-max-entries` | `200` | cached listings retained |

@@ -1070,11 +1070,9 @@ and preserved CRs *look* stripped.
 | `^` | `s3-manager-up` | parent prefix, or back to bucket list |
 | `g` | `s3-manager-refresh` | invalidate cache for this prefix and re-list |
 | `+` | `s3-manager-load-more` | fetch the next page |
-| `C` | `s3-manager-copy` | copy to the other window: Dired → `G`/`R`, an S3 listing → server-side (§11.10) |
+| `C` | `s3-manager-copy` | copy to the other window: Dired, or nothing there, → download; an S3 listing → server-side (§11.10) |
 | `c` | `s3-manager-copy-to` | copy to a prompted S3 location (§11.10) |
 | `r` | `s3-manager-rename` | rename, or move elsewhere in S3 (§11.10) |
-| `G` | `s3-manager-get` | download object to a prompted path |
-| `R` | `s3-manager-get-recursive` | download prefix recursively |
 | `P` | `s3-manager-upload` | upload a local file, or a directory recursively (§11.8) |
 | `d` | `s3-manager-mark-delete` | mark for deletion, move down |
 | `u` | `s3-manager-unmark` | unmark, move down |
@@ -1089,21 +1087,29 @@ Unbound, `M-x` only: `s3-manager-upload-dry-run`,
 `s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
 `s3-manager-dired-upload`,
 `s3-manager-dired-do-copy` (meant for `C` in `dired-mode-map`),
-`s3-manager-switch-profile`, `s3-manager-clear-cache`,
-`s3-manager-forget-profiles`, `s3-manager-list-profiles`.
+`s3-manager-get`, `s3-manager-get-recursive`, `s3-manager-switch-profile`,
+`s3-manager-clear-cache`, `s3-manager-forget-profiles`,
+`s3-manager-list-profiles`.
 
-`RET` on an object **views** it; it does not download. Binding both `RET` and
-`G` to "get object" would spend the most valuable key on the map duplicating
-another, and a `RET` that silently starts a multi-gigabyte download is a
-footgun.
+`RET` on an object **views** it; it does not download. A `RET` that silently
+starts a multi-gigabyte download is a footgun, and spending the most valuable
+key on the map to duplicate `C` would waste it.
 
 The `d`/`x` split follows Dired: `d` marks, `x` executes. Making `d` delete
 immediately would put the destructive action on one of the most easily mistyped
 keys in the map.
 
-`C` duplicates `G`/`R` deliberately, and that is the point: it is Dired's copy
-key, so one key means "copy to the other window" on both sides of the pair
-(§11.9). `G` and `R` remain as the explicit forms.
+`C` is the download key, not a duplicate of one. With nothing in the other
+window it prompts for a path, exactly as a dedicated key would; with Dired
+there it uses that directory; with a second S3 listing it copies server-side
+(§11.9, §11.10).
+
+**`s3-manager-get` and `s3-manager-get-recursive` are therefore unbound.** They
+had `G` and `R` through 0.3.0, and `C` reaches both, so a key each bought only
+one thing: forcing a download *past* a visible S3 listing. That is rare enough
+for `M-x`, and keeping `G` cost Evil users end-of-buffer, which they press far
+more often than they force a download. The commands stay; only the bindings
+went.
 
 ---
 
@@ -1312,7 +1318,7 @@ only when `Size` is below a threshold:
   :type 'integer :group 's3-manager)
 ```
 
-Above the threshold, `RET` reports the size and suggests `G`. This keeps the
+Above the threshold, `RET` reports the size and suggests `C`. This keeps the
 most-pressed key from ever being an unbounded operation.
 
 ---
@@ -1384,7 +1390,7 @@ entry for it can be synthesized in advance.
 
 Two windows, both directions.
 
-`G`, `R` and `P` default their local path to a Dired buffer visible in another
+`C` and `P` default their local path to a Dired buffer visible in another
 window, via `dired-dwim-target-directory`. The user's `dired-dwim-target`
 decides; nil there turns it off.
 
@@ -1890,10 +1896,12 @@ Each release is complete when this runs end to end against a real endpoint.
      README.md                1.2 KB   2026-09-01
    ```
 4. `RET` on `videos/` → descends; header line reads `s3://media/videos/`.
-5. `G` on `old.mp4` → destination prompt → file appears locally; progress was
-   visible in the mode line; Emacs remained usable during the transfer.
+5. `C` on `old.mp4`, with no other window → destination prompt → file appears
+   locally; progress was visible in the mode line; Emacs remained usable
+   during the transfer.
 6. `^` → back at `videos/`, **with point on `old.mp4`**.
-7. `R` on `2026/` → destination prompt → the whole prefix downloads.
+7. `C` on `2026/`, with no other window → destination prompt → the whole
+   prefix downloads.
 8. `d` `d` `d` on three objects, `x` → `Delete 3 objects?` → confirm → one
    `delete-objects` call → buffer refreshes without them.
 9. `D` on `videos/` → `yes-or-no-p` requiring the full word → recursive delete.
@@ -1918,7 +1926,7 @@ Each release is complete when this runs end to end against a real endpoint.
 17. Dired in one window, an S3 listing in the other: mark three files,
     `M-x s3-manager-dired-upload` → one prompt, three transfers, one refresh,
     `uploaded 3 files`.
-18. `G` with that Dired window open → the destination defaults to its
+18. `C` with that Dired window open → the destination defaults to its
     directory, not `~/Downloads/`.
 19. Uploading where the caller may not write: the service's own words reach the
     screen, the report is displayed, and the package keeps working.
@@ -1954,7 +1962,7 @@ because a Definition of Done nobody has executed is a wish:
 | | |
 |---|---|
 | Run live | 1-9, 12-15, 17, 20-24, 26, and the first clause of 25 |
-| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`G` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), and the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing) |
+| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), and the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing) |
 
 The test-only ones need a large object, a bucket the caller cannot write, a
 second profile, and a hand-arranged window layout respectively — none hard,

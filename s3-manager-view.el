@@ -148,7 +148,7 @@ name."
         (user-error
          "%s"
          (substitute-command-keys
-          (format "%s is %s -- too large to open; \\[s3-manager-get] downloads it"
+          (format "%s is %s -- too large to open; \\[s3-manager-copy] downloads it"
                   (s3-manager-entry-display-name entry)
                   (s3-manager--format-size size)))))
       (let* ((key (s3-manager-entry-key entry))

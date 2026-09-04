@@ -95,6 +95,12 @@
   :parent tabulated-list-mode-map
   ;; `g' and `q' arrive from `special-mode' via the replaced
   ;; `revert-buffer-function', so they are deliberately not rebound here.
+  ;;
+  ;; `s3-manager-get' and `s3-manager-get-recursive' are deliberately not
+  ;; bound either.  `C' already falls back to them when no other window holds
+  ;; anything, so a key each would only buy forcing a download past a visible
+  ;; S3 listing -- and it would cost `G', which Evil users want for
+  ;; end-of-buffer.  Both remain available as `M-x'.
   "RET" #'s3-manager-open
   "^" #'s3-manager-up
   ;; `g' is bound explicitly, not left to `special-mode' -> `revert-buffer',
@@ -105,8 +111,6 @@
   "C" #'s3-manager-copy
   "c" #'s3-manager-copy-to
   "r" #'s3-manager-rename
-  "G" #'s3-manager-get
-  "R" #'s3-manager-get-recursive
   "d" #'s3-manager-mark-delete
   "u" #'s3-manager-unmark
   "U" #'s3-manager-unmark-all

@@ -2596,10 +2596,19 @@ releases it."
         (should (string-match-p "partial" (buffer-string))))))
   (when (get-buffer "*S3 Manager Error*") (kill-buffer "*S3 Manager Error*")))
 
-(ert-deftest s3-manager-test-transfer-keys-are-bound ()
-  (should (eq (keymap-lookup s3-manager-mode-map "G") #'s3-manager-get))
-  (should (eq (keymap-lookup s3-manager-mode-map "R")
-              #'s3-manager-get-recursive)))
+(ert-deftest s3-manager-test-download-is-reachable-without-a-key ()
+  "`G' and `R' are deliberately unbound; `C' and `M-x' both still reach them.
+
+`s3-manager-copy' falls back to these two when no other window holds
+anything, so a key each would only buy forcing a download past a visible
+S3 listing -- and it would cost `G', which Evil wants for end-of-buffer."
+  (should-not (keymap-lookup s3-manager-mode-map "G"))
+  (should-not (keymap-lookup s3-manager-mode-map "R"))
+  ;; Still commands, so `M-x' reaches them.
+  (should (commandp 's3-manager-get))
+  (should (commandp 's3-manager-get-recursive))
+  ;; And `C' is the fallback path, not a separate implementation.
+  (should (eq (keymap-lookup s3-manager-mode-map "C") #'s3-manager-copy)))
 
 
 ;;;; Marks
@@ -4538,7 +4547,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g" "+" "G" "R" "C" "c" "r" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g" "+" "C" "c" "r" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.
@@ -4565,6 +4574,9 @@ another."
     (should (eq (key-binding (kbd "j")) #'evil-next-line))
     (should (eq (key-binding (kbd "k")) #'evil-previous-line))
     (should (eq (key-binding (kbd ":")) #'evil-ex))
+    ;; `G' was ours until the map stopped binding it; Evil gets it back, which
+    ;; is half the reason for unbinding it.
+    (should (eq (key-binding (kbd "G")) #'evil-goto-line))
     ;; Inherited from the parent maps, and equally required by the manual.
     (should (eq (key-binding (kbd "n")) #'next-line))
     (should (eq (key-binding (kbd "p")) #'previous-line))
