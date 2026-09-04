@@ -2063,8 +2063,9 @@ URL. They are listed so that "covered" is never mistaken for "tried".
 | ~~0.2.0~~ | ~~Upload~~ | **Shipped** — §11.8 |
 | ~~0.3.0~~ | ~~Dired integration~~ | **Shipped early** — §11.9 |
 | ~~0.3.0~~ | ~~Copy and move between S3 locations~~ | **Shipped** — §11.10 |
-| 0.4.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
-| 0.4.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
+| ~~0.4.0~~ | ~~Hand over the command for a large transfer~~ | **Shipped** — §11.11, issue #1 |
+| 0.5.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
+| 0.5.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
 | 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
 | 1.0.0 | Stable public API | — |
 
