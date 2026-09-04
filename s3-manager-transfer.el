@@ -6,28 +6,13 @@
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 
 ;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Part of s3-manager.el.  GPL-3.0-or-later; see LICENSE.
 
 ;;; Commentary:
 
-;; Bytes move with `aws s3 cp' rather than `s3api get-object'/`put-object': it
-;; does multipart transfers, reports progress, and guesses content types.
-;;
-;; A transfer is deliberately outside the staleness machinery -- it is neither
-;; registered nor generation-guarded -- because aborting a multi-gigabyte
-;; transfer when the user presses `^' would be indefensible.
+;; Download and upload.  Bytes move with `aws s3 cp', which does multipart
+;; transfers and reports progress.  A transfer is neither registered nor
+;; generation-guarded, so navigating away cannot abort one.
 
 ;;; Code:
 
@@ -79,11 +64,9 @@ set up in advance."
    args
    :profile s3-manager--profile
    :buffer (current-buffer)
-   ;; Deliberately neither :register nor :generation.  Registering would let
-   ;; navigation cancel the transfer, and aborting a multi-gigabyte download
-   ;; because the user pressed `^' would be indefensible.  Omitting the
-   ;; generation keeps progress reporting into the buffer that started it even
-   ;; after that buffer has moved on, which is what the user wants to see.
+   ;; Neither :register nor :generation: navigation must not abort a
+   ;; multi-gigabyte transfer, and progress keeps reporting into the buffer
+   ;; that started it even after that buffer has moved on.
    :parse nil
    ;; Not `s3-manager-timeout': that deadline is measured from the start of
    ;; the process, so a transfer big enough to outlast it is killed while
@@ -174,14 +157,10 @@ set up in advance."
 
 (defun s3-manager--upload-key-name (source)
   "Return the S3 leaf name for local SOURCE.
-
-The mirror image of `s3-manager--view-file-name', and it differs from
-it in two ways because it runs in the opposite direction.  A leading
-`~' needs no guard: nothing expands tildes on the S3 side, and SOURCE
-has been through `expand-file-name' already.  And a name that cannot be
-used is refused rather than replaced with a fallback -- inventing a name
-for a downloaded copy costs nothing, whereas inventing one for an upload
-writes the user's bytes to a key they never named."
+The mirror of `s3-manager--view-file-name', but running outwards: no
+tilde guard is needed (nothing expands them on the S3 side), and an
+unusable name is refused rather than defaulted -- inventing a key would
+write the user's bytes somewhere they never named."
   (let ((name (file-name-nondirectory (directory-file-name source))))
     (when (member name '("" "." ".."))
       (user-error "Cannot derive an object name from %s" source))
@@ -228,18 +207,10 @@ Writing the leaf into the destination is what keeps it."
 
 (defun s3-manager--after-upload (prefix key &optional recursive)
   "Refresh after an upload of KEY into PREFIX.
-
-With RECURSIVE, KEY is itself a prefix and every cached listing at or
-beneath it goes too: the upload created keys under it, so a listing
-cached from before describes a tree that no longer exists.
-
-PREFIX is the destination recorded when the upload started rather than
-this buffer's prefix now: a transfer is deliberately outside the
-generation guard, so the user may have navigated while it ran, and
-invalidating whatever is current then would clear the wrong entry and
-reload a listing nobody asked about.  The listing is re-read only when
-the destination is still the one on screen; otherwise dropping it from
-the cache is enough, and it is re-read when the user returns."
+With RECURSIVE, cached listings at and beneath KEY go too.  PREFIX is
+the destination recorded when the upload started, not the buffer's
+prefix now -- a transfer outlives navigation -- so the listing is
+re-read only while that destination is still on screen."
   (s3-manager--cache-invalidate (s3-manager--cache-key prefix))
   (when recursive
     (s3-manager--cache-purge s3-manager--profile
@@ -293,17 +264,11 @@ With RECURSIVE, SOURCE is a directory and its whole tree is sent."
 
 (defun s3-manager--upload-later (buffer thunk)
   "Run THUNK in BUFFER from a zero-second timer.
-
-The transport's callbacks run inside a process sentinel, and a prompt
-there re-enters the minibuffer from whatever Emacs happened to be doing
-when the CLI answered.  `s3-manager--profiles-resolved' already hands
-its prompt to a timer for this reason; this does the same, and both
-branches take the hop so the ordering does not depend on the answer.
-
-A `user-error' from THUNK is the user declining and gets an echo-area
-line.  Anything else is a real failure and is reported in full: a signal
-raised inside a timer is otherwise left to the timer machinery, which
-is easy to miss entirely."
+A prompt inside a process sentinel re-enters the minibuffer from
+wherever Emacs happened to be; `s3-manager--profiles-resolved' takes the
+same hop.  Both branches take it, so ordering does not depend on the
+answer.  A `user-error' from THUNK is the user declining; anything else
+is reported, since a signal inside a timer is easy to miss."
   (run-at-time
    0 nil
    (lambda ()
@@ -319,15 +284,11 @@ is easy to miss entirely."
 
 (defun s3-manager--head-object-absent-p (err)
   "Return non-nil when ERR is `head-object' reporting that the key is absent.
-
-An allowlist, never a denylist.  Exit 254 with a 403 is a permission
-error, 255 is an unreachable endpoint, and a timeout carries no exit
-code at all; reading any of them as absence would silently overwrite an
-object the user was merely forbidden to look at.  Both facts matched
-here were measured against the CLI: absence is exit 254 plus this
-sentence on stderr, and the parenthesised status is botocore's own
-format string rather than the service's wording, which is why it is the
-same across S3-compatible endpoints."
+An allowlist, never a denylist: 403 is a permission error, 255 an
+unreachable endpoint, a timeout has no exit code, and reading any as
+absence would silently overwrite an object.  Measured: absence is exit
+254 plus this stderr, whose status is botocore's format string and so
+identical across S3-compatible endpoints."
   (and (eq (nth 0 err) 's3-manager-cli-error)
        (eql (nth 2 err) 254)
        (string-match-p

@@ -6,26 +6,13 @@
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 
 ;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Part of s3-manager.el.  GPL-3.0-or-later; see LICENSE.
 
 ;;; Commentary:
 
-;; `RET' on a small object downloads it to a temporary directory and shows the
-;; copy read-only.  The bytes come from S3 and are not trusted: local variables
-;; are disabled while visiting, and the file name is derived from the key's leaf
-;; only, since a key may legally be or contain "..".
+;; `RET' on a small object downloads it and shows the copy read-only.  The
+;; bytes are untrusted: local variables are disabled, and the file name comes
+;; from the key's leaf only, since a key may legally contain "..".
 
 ;;; Code:
 
@@ -123,14 +110,11 @@ name."
 (defun s3-manager--display-view (file uri)
   "Show FILE, a local copy of URI, in a read-only buffer."
   (let ((buffer
-         ;; The bytes came from S3 and are not trusted: a `-*- ... -*-'
-         ;; cookie or a file-local variables section in them would otherwise
-         ;; be applied.  (Spelled out rather than quoted verbatim: Emacs scans
-         ;; the last 3000 characters of a file for that exact phrase, and in a
-         ;; file this size a comment mentioning it lands inside the window.)
-         ;; And the size cap sits above `large-file-warning-threshold', so
-         ;; without silencing it an object between the two would prompt from
-         ;; inside a process callback.
+         ;; Untrusted bytes: a `-*- ... -*-' cookie or file-local section in
+         ;; them would otherwise be applied.  (Phrase not spelled verbatim --
+         ;; Emacs scans a file's last 3000 chars for it.)  The size cap sits
+         ;; above `large-file-warning-threshold', which would otherwise prompt
+         ;; from inside a process callback.
          (let ((enable-local-variables nil)
                (large-file-warning-threshold nil))
            (find-file-noselect file))))

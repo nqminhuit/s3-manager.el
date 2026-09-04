@@ -6,29 +6,13 @@
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 
 ;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Part of s3-manager.el.  GPL-3.0-or-later; see LICENSE.
 
 ;;; Commentary:
 
-;; The foundation every other file rests on, and deliberately the only one
-;; that knows nothing about the rest.  It holds the customization group, the
-;; error conditions, every buffer-local variable an S3 buffer carries, the
-;; small pure formatters, and the failure report.
-;;
-;; Buffer-local state lives here rather than beside the code that uses it so
-;; that the whole of what an S3 buffer *is* can be read in one place.
+;; Customization group, error conditions, every buffer-local variable an S3
+;; buffer carries, the pure formatters, and the failure report.  Knows nothing
+;; about the rest of the package.
 
 ;;; Code:
 
@@ -102,19 +86,10 @@ Governs listings and other metadata calls.  Transfers use
 
 (defcustom s3-manager-transfer-timeout nil
   "Seconds before a transfer is abandoned, or nil to wait indefinitely.
-
-Separate from `s3-manager-timeout' because the two measure different
-things.  A listing that has not answered in two minutes is stuck; a
-transfer that has been running for two minutes may simply be large.
-The timer in `s3-manager--aws-async' is armed once for a total
-duration rather than reset by activity, so any wall-clock value kills a
-healthy transfer that is merely big -- measured, with the CLI still
-running and reporting progress at the moment it was killed.
-
-nil is therefore the only correct default until there is a watchdog
-measuring silence rather than elapsed time.  The CLI's own connect and
-read timeouts still apply, so a transfer to a black hole does not hang
-forever."
+Separate from `s3-manager-timeout': that timer runs for a total
+duration, not idle time, so any value kills a healthy transfer that is
+merely large -- measured, mid-progress.  The CLI's own connect and read
+timeouts still bound a transfer to a black hole."
   :type '(choice (const :tag "No timeout" nil) integer))
 
 (defcustom s3-manager-upload-follow-symlinks t
@@ -131,12 +106,8 @@ would be sent before a byte moves.  Set this to nil to pass
 
 (defcustom s3-manager-display-errors t
   "Whether a failure shows `s3-manager--error-buffer' as well as recording it.
-
-Every failure is recorded either way, with the CLI's own stderr intact;
-this only decides whether the report is put on screen.  The default is
-non-nil because the echo-area summary is transient -- the next `message'
-overwrites it, which during a transfer is under a second -- and an error
-the user never saw is indistinguishable from one that never happened."
+Recorded either way; this only decides display.  Non-nil by default
+because the echo-area summary is overwritten by the next `message'."
   :type 'boolean)
 
 (defconst s3-manager-minimum-cli-version "2.13.0"
@@ -336,18 +307,9 @@ PREFIX is the prefix being left and ENTRY is the row point was on, so
 
 (defvar-local s3-manager--restore-key nil
   "S3 key to put point on once the pending listing arrives.
-
-`s3-manager--restore-target' cannot serve here.  It holds an
-`s3-manager-entry', which is compared with `equal', and only a
-*directory* entry can be synthesized in advance -- see the struct's own
-docstring.  An object that has just been uploaded cannot: its Size and
-LastModified belong to the server, not to the local file, so an entry
-built from what is known locally would match nothing and point would
-silently fall back to the top of the buffer.
-
-A key is the one part of the row that is known before the listing comes
-back, so this is the weaker request: match on the key alone.  It sits
-beside the struct-identity rule rather than weakening it.")
+The weaker form of `s3-manager--restore-target', which compares whole
+entries: an uploaded object's Size and LastModified are the server's, so
+no entry for it can be synthesized in advance.  The key can.")
 
 (defvar-local s3-manager--transfers 0
   "Number of transfers started from this buffer that are still running.

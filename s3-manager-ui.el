@@ -6,27 +6,13 @@
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 
 ;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Part of s3-manager.el.  GPL-3.0-or-later; see LICENSE.
 
 ;;; Commentary:
 
-;; The buffer the user actually looks at: the major mode and its keymap, the
-;; two column layouts, listing requests, pagination, marks and movement.
-;;
-;; One mode serves both the bucket list and the object browser, whose columns
-;; differ; each setup function installs its own layout.
+;; Major mode and keymap, the two column layouts, listing requests,
+;; pagination, marks and movement.  One mode serves both the bucket list and
+;; the object browser; each setup function installs its own layout.
 
 ;;; Code:
 
@@ -120,15 +106,10 @@
   "P" #'s3-manager-upload
   "!" #'s3-manager-show-errors)
 
-;; Evil's state keymaps take precedence over a major-mode map, and its normal
-;; state -- the state this mode gets, since it is in none of Evil's state
-;; lists -- binds nearly every key above: `RET' to `evil-ret', `^' to
-;; `evil-first-non-blank', `d' to `evil-delete', `g' to a prefix keymap.  So
-;; under Evil this keymap is almost entirely dead unless it is registered as
-;; overriding.  Passing nil for the state covers all of them, including
-;; motion and visual.  Keys this map does *not* bind still reach Evil, so
-;; `j', `k', `:' and `/' keep working; and because an overriding map ranks
-;; below custom state bindings, a user's own `evil-define-key' still wins.
+;; Evil's state maps outrank a major-mode map, and its normal state binds
+;; nearly every key above, so without this the keymap is dead under Evil.  nil
+;; covers every state; unbound keys still reach Evil, and a user's own
+;; `evil-define-key' still outranks this.
 (declare-function evil-make-overriding-map "evil-core"
                   (keymap &optional state copy))
 (with-eval-after-load 'evil
@@ -173,12 +154,9 @@ correctly as a string.")
 
 (defun s3-manager--print-list ()
   "Print the list, restoring point to the row that was asked for.
-`tabulated-list-print' REMEMBER-POS matches the id already at point,
-which is useless when the whole listing is being replaced, so moving up
-a level supplies the row to land on explicitly.
-
-REMEMBER-POS stays on for the by-key request: if that key is not in the
-listing, keeping point where it was beats moving it anywhere."
+REMEMBER-POS matches the id already at point, which is useless when the
+whole listing is replaced -- so moving up supplies the row explicitly.
+It stays on for a by-key request, whose key may not be in the listing."
   (let ((target s3-manager--restore-target)
         (key s3-manager--restore-key))
     (setq s3-manager--restore-target nil
@@ -412,12 +390,8 @@ The timestamps are ISO-8601, so they order correctly as strings."
 
 (defun s3-manager--goto-key (key)
   "Put point on the row whose entry has KEY, or leave point alone.
-
-Unlike `s3-manager--goto-entry' there is no fallback to `point-min'.
-A key that is not on screen is an ordinary outcome here -- an object
-just uploaded can sort past the end of a truncated listing -- and
-jerking point to the top of the buffer then is worse than leaving it
-where the reprint put it."
+No `point-min' fallback, unlike `s3-manager--goto-entry': a key absent
+from a truncated listing is ordinary, and jumping to the top is worse."
   (let ((found nil))
     (save-excursion
       (goto-char (point-min))

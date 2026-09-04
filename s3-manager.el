@@ -26,35 +26,18 @@
 ;;; Commentary:
 
 ;; Browse and manage objects on AWS S3 and S3-compatible services through the
-;; `aws' command line client.
+;; `aws' command line client.  M-x s3-manager picks a profile and lists its
+;; buckets; C-u re-reads the profile list first.  \<s3-manager-mode-map>See
+;; `s3-manager-mode' for the keys.
 ;;
-;; Usage:
+;; Two properties hold throughout: Emacs never blocks, and the CLI's stderr
+;; survives intact so failures are reported in the service's own words.
+;; Credentials are never read, parsed, stored or logged.
 ;;
-;;   M-x s3-manager        choose a profile, list its buckets
-;;   C-u M-x s3-manager    re-read the profile list first
+;; Requires AWS CLI 2.13.0 or newer -- earlier releases silently ignore
+;; `endpoint_url' in ~/.aws/config and send every request to AWS.
 ;;
-;; In an S3 buffer: RET enters a bucket or prefix, or opens a small object
-;; read-only; `^' goes up a level; `+' loads the next page of a truncated
-;; listing; `G' downloads the object at point and `R' a prefix recursively;
-;; `d' marks an object for deletion and `x' deletes everything marked; `D'
-;; deletes the object or prefix at point outright; `g' refreshes and `q'
-;; buries the buffer.
-;;
-;; Two properties are treated as non-negotiable throughout:
-;;
-;;   * Emacs never blocks.  Every invocation is asynchronous.
-;;   * The CLI's stderr survives intact, separated from stdout, so failures can
-;;     be reported in the service's own words.
-;;
-;; Credentials are never read, parsed, stored or logged.  The package selects a
-;; profile by name and lets the AWS CLI do everything else.
-;;
-;; Requires AWS CLI 2.13.0 or newer: earlier releases ignore the `endpoint_url'
-;; key in ~/.aws/config, which silently sends every request to AWS instead of
-;; the configured S3-compatible endpoint.
-;;
-;; See doc/SPEC-v0.1.0.md for the full design; section references in the code
-;; below point into it.
+;; doc/SPEC-v0.1.0.md is the design document; the code refers to its sections.
 
 ;;; Code:
 

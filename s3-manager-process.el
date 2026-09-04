@@ -6,30 +6,13 @@
 ;; URL: https://github.com/nqminhuit/s3-manager.el
 
 ;; This file is not part of GNU Emacs.
-
-;; This program is free software: you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-;;
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-;;
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+;; Part of s3-manager.el.  GPL-3.0-or-later; see LICENSE.
 
 ;;; Commentary:
 
 ;; Everything that runs the `aws' program: argument construction, the
-;; subprocess primitive, and profile discovery.
-;;
-;; This is the layer the rest of the package is shaped around, and §4 of the
-;; specification describes why it looks the way it does -- separated streams, a
-;; two-flag completion barrier because the sentinels fire in a nondeterministic
-;; order, CR-preserving coding so progress parsing survives, and callbacks that
-;; deliver failures rather than signalling out of a sentinel.
+;; subprocess primitive, and profile discovery.  See spec §4 for why the
+;; transport looks the way it does.
 
 ;;; Code:
 
@@ -107,13 +90,8 @@ Synchronous, and therefore not used on the interactive path: see
 
 (defun s3-manager--check-executable ()
   "Signal a `user-error' unless the AWS CLI is on PATH.
-
-Only the program's presence is checked, which is instant.  The version
-is confirmed asynchronously by `s3-manager--check-version', because
-`aws --version' costs about half a second of Python interpreter startup
--- measured at 0.55s -- and this runs on the very first keystroke.
-Spending that synchronously would break the one promise the package
-makes about never blocking Emacs."
+Presence only: `aws --version' costs 0.55s of Python startup, so the
+version is confirmed asynchronously by `s3-manager--check-version'."
   (unless (executable-find s3-manager-aws-program)
     (user-error
      "S3 Manager: AWS CLI not found (%s).  Install AWS CLI v2, or set `s3-manager-aws-program'"
@@ -310,39 +288,23 @@ unterminated tail is carried into the next call."
                                  (timeout s3-manager-timeout))
   "Run the AWS CLI with ARGS asynchronously.  Return the process.
 
-ARGS is the service invocation only, such as (\"s3api\" \"list-buckets\").
-The global flags for PROFILE are prepended here rather than by the
-caller, so that the service name is always (car ARGS): the classification
-of exit codes 1 and 2 depends on knowing whether this is an `aws s3'
-command, and a caller-assembled vector begins with a global flag instead.
+ARGS is the service invocation only, e.g. (\"s3api\" \"list-buckets\");
+PROFILE\='s global flags are prepended here so (car ARGS) is always the
+service name, which is what exit codes 1 and 2 are classified against.
+It is an argument vector -- no shell -- so quote nothing.
 
-ARGS is passed as an argument vector.  No shell is involved, so callers
-must not quote anything: object keys may legally contain spaces, quotes
-and newlines.
-
-REGISTER, when non-nil, records the process in `s3-manager--process' of
-the origin buffer so `s3-manager--cancel' can abandon it.  Listings pass
+REGISTER records the process for `s3-manager--cancel\='.  Listings pass
 it; transfers must not, or navigating away would abort a download.
 
-ON-SUCCESS is called with the parsed stdout when the CLI exits 0 --- an
-alist when PARSE is non-nil, otherwise the raw string.
+ON-SUCCESS gets the stdout on exit 0: an alist when PARSE, else a string.
+ON-ERROR gets (CONDITION COMMAND EXIT-CODE DETAIL) otherwise, where
+EXIT-CODE is an integer, nil for a timeout, or \"signal 9\".  Failures are
+delivered rather than signalled: a signal in a sentinel is swallowed.
+ON-PROGRESS gets the latest segment of PROGRESS-STREAM, `stdout\=' or
+`stderr\='; only `aws s3' transfers emit any.
 
-ON-ERROR is called with an error object (CONDITION COMMAND EXIT-CODE
-DETAIL) on any other exit.  EXIT-CODE is the CLI's integer exit status,
-nil for a timeout, or a string such as \"signal 9\" when the process was
-killed.  It defaults to `s3-manager--report-error'.
-Errors are delivered this way rather than signalled because a signal
-raised in a sentinel is swallowed by Emacs.
-
-ON-PROGRESS, when given, is called with the most recent progress segment
-from PROGRESS-STREAM, which is `stdout' (the default) or `stderr'.  The
-default is stdout because that is the only stream that ever carries
-progress: the `aws s3' transfer commands write it there, and `s3api'
-commands emit none at all.
-
-BUFFER and GENERATION gate every callback: nothing runs if BUFFER has
-died or its `s3-manager--generation' has moved on.  NAME labels the
-process.  TIMEOUT is in seconds, or nil to wait indefinitely."
+BUFFER and GENERATION gate every callback.  NAME labels the process.
+TIMEOUT is seconds, or nil to wait indefinitely."
   (let* ((argv (cons s3-manager-aws-program
                      (append (s3-manager--base-args profile) args)))
          (label (or name "s3-aws"))
@@ -398,12 +360,9 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                                       stderr))
                               nil))
                     ((eql exit-code 130)
-                     ;; The CLI's own SIGINT status.  This is not our own
-                     ;; cancel -- `s3-manager--cancel' detaches the sentinels
-                     ;; before killing, so a cancelled request never arrives
-                     ;; here -- which makes this a real interruption from
-                     ;; outside, and saying nothing would leave an abandoned
-                     ;; command indistinguishable from one that never ran.
+                     ;; The CLI's SIGINT status.  Not our own cancel, which
+                     ;; detaches sentinels before killing -- so this is a real
+                     ;; interruption, and silence would hide it.
                      (message "S3: interrupted (%s)" (car args)))
                     ((eql exit-code 0)
                      (condition-case parse-err
@@ -427,13 +386,10 @@ process.  TIMEOUT is in seconds, or nil to wait indefinitely."
                                 proc))
                    (with-current-buffer origin (setq s3-manager--process nil)))
                  (s3-manager--cleanup proc))))))
-      ;; The stderr pipe is constructed explicitly and given an explicit
-      ;; sentinel.  Passing a buffer to :stderr, or omitting the sentinel here,
-      ;; makes Emacs insert its own "Process ... finished" line into the text we
-      ;; are trying to report verbatim.  The :coding is not inherited from the
-      ;; main process and must be spelled out: any coding system without an
-      ;; explicit EOL suffix rewrites carriage returns to newlines and destroys
-      ;; progress output.
+      ;; Explicit pipe and sentinel: a buffer for :stderr, or no sentinel,
+      ;; makes Emacs insert "Process ... finished" into the text we report
+      ;; verbatim.  :coding is not inherited and must be spelled out, or CRs
+      ;; become newlines and progress parsing breaks.
       (setq stderr-proc
             (make-pipe-process
              :name (format " *%s-stderr*" label)
