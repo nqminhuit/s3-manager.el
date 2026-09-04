@@ -413,9 +413,49 @@ listed."
     (unless (derived-mode-p 'special-mode) (special-mode))
     (display-buffer (current-buffer))))
 
+(defun s3-manager--uri (bucket key)
+  "Return the s3:// URI for KEY in BUCKET."
+  (format "s3://%s/%s" bucket key))
+
 (defun s3-manager--s3-uri (key)
   "Return the s3:// URI for KEY in this buffer's bucket."
-  (format "s3://%s/%s" s3-manager--bucket key))
+  (s3-manager--uri s3-manager--bucket key))
+
+(defun s3-manager--parse-uri (uri)
+  "Return (BUCKET . KEY) for URI, or signal a `user-error'.
+KEY may be empty, meaning the bucket root; a caller needing an object
+says so itself.
+
+Split rather than matched: a key may legally contain a newline, which
+`.' in an Emacs regexp does not match, and `s3-manager--delete-payload'
+already relies on keys being arbitrary.  Bucket naming is the
+endpoint's business -- this package exists for the S3-compatible ones --
+so only what would otherwise reach the CLI as a mystery is refused."
+  (unless (string-prefix-p "s3://" uri)
+    (user-error "Not an s3:// URI: %s" uri))
+  (let* ((rest (substring uri 5))
+         (slash (string-search "/" rest))
+         (bucket (if slash (substring rest 0 slash) rest))
+         (key (if slash (substring rest (1+ slash)) "")))
+    (when (string-empty-p bucket)
+      (user-error "No bucket in %s" uri))
+    (when (string-match-p "[[:space:]]" bucket)
+      (user-error "Not a bucket name: %s" bucket))
+    (cons bucket key)))
+
+(defun s3-manager--key-leaf (key)
+  "Return KEY's last segment, without a trailing slash.
+The S3 mirror of `file-name-nondirectory' on a directory name, and
+hand-rolled for the same reason `s3-manager--parent-prefix' is: a key is
+not a file name, and the file-name functions consult
+`file-name-handler-alist', so a key beginning \"/ssh:\" would take a TRAMP
+detour."
+  (let ((trimmed (if (string-suffix-p "/" key)
+                     (substring key 0 (1- (length key)))
+                   key)))
+    (if (string-match "\\`.*/\\([^/]*\\)\\'" trimmed)
+        (match-string 1 trimmed)
+      trimmed)))
 
 (provide 's3-manager-core)
 

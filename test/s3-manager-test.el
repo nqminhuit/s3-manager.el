@@ -1871,6 +1871,21 @@ and no Emacs file browser behaves that way."
       (should-not (equal aws minio))
       (should (equal aws '("p" nil "media" "x/"))))))
 
+(ert-deftest s3-manager-test-cache-key-for-another-bucket ()
+  "A copy invalidates a listing of a bucket this buffer is not showing."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "p" s3-manager--bucket "media"
+          s3-manager--prefix "x/")
+    (let ((s3-manager-endpoint-url nil)
+          (s3-manager-endpoint-alist nil))
+      (should (equal (s3-manager--cache-key-for "p" "backup" "y/")
+                     '("p" nil "backup" "y/")))
+      ;; The buffer-local form is the same shape, so a key built either way
+      ;; finds the same entry.
+      (should (equal (s3-manager--cache-key)
+                     (s3-manager--cache-key-for "p" "media" "x/"))))))
+
 (ert-deftest s3-manager-test-cache-roundtrip-and-invalidate ()
   (s3-manager-test--with-clean-cache
     (let ((key '("p" nil "media" "")))
@@ -2147,6 +2162,43 @@ and no Emacs file browser behaves that way."
     (setq s3-manager--bucket "media")
     (should (equal (s3-manager--s3-uri "videos/a.mp4") "s3://media/videos/a.mp4"))
     (should (equal (s3-manager--s3-uri "videos/") "s3://media/videos/"))))
+
+(ert-deftest s3-manager-test-uri-names-a-bucket-explicitly ()
+  "A copy's destination need not be the bucket this buffer is showing."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--bucket "media")
+    (should (equal (s3-manager--uri "backup" "a.txt") "s3://backup/a.txt"))
+    ;; The buffer-local form is the same function with the bucket filled in.
+    (should (equal (s3-manager--s3-uri "a.txt")
+                   (s3-manager--uri "media" "a.txt")))))
+
+(ert-deftest s3-manager-test-parse-uri ()
+  (should (equal (s3-manager--parse-uri "s3://b/k") '("b" . "k")))
+  (should (equal (s3-manager--parse-uri "s3://b/a/b/c.txt") '("b" . "a/b/c.txt")))
+  ;; The bucket root, both spellings.
+  (should (equal (s3-manager--parse-uri "s3://b/") '("b" . "")))
+  (should (equal (s3-manager--parse-uri "s3://b") '("b" . "")))
+  ;; A key may begin with a slash; S3 allows it and we must not eat it.
+  (should (equal (s3-manager--parse-uri "s3://b//k") '("b" . "/k"))))
+
+(ert-deftest s3-manager-test-parse-uri-keeps-an-awkward-key-intact ()
+  "Keys are arbitrary bytes.  A regexp using `.' would truncate this one."
+  (should (equal (s3-manager--parse-uri "s3://b/we\nird") '("b" . "we\nird")))
+  (should (equal (s3-manager--parse-uri "s3://b/100%") '("b" . "100%"))))
+
+(ert-deftest s3-manager-test-parse-uri-refuses-junk ()
+  "Only what would otherwise reach the CLI as a mystery is refused."
+  (dolist (bad '("/tmp/x" "s3:/b/k" "" "s3://" "s3:// b/k"))
+    (should-error (s3-manager--parse-uri bad) :type 'user-error)))
+
+(ert-deftest s3-manager-test-key-leaf ()
+  (should (equal (s3-manager--key-leaf "a/b/c.txt") "c.txt"))
+  (should (equal (s3-manager--key-leaf "c.txt") "c.txt"))
+  ;; A prefix loses its trailing slash, which is what makes it appendable.
+  (should (equal (s3-manager--key-leaf "a/b/") "b"))
+  (should (equal (s3-manager--key-leaf "a/") "a"))
+  (should (equal (s3-manager--key-leaf "") "")))
 
 (ert-deftest s3-manager-test-get-argv ()
   "Downloading uses `s3 cp', which does multipart and reports progress."

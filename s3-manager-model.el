@@ -105,12 +105,18 @@ they do not apply, so neither key may be assumed to exist."
 Global rather than buffer-local so that quitting a listing and coming
 back is instant, which is the most common thing a user does with one.")
 
+(defun s3-manager--cache-key-for (profile bucket prefix)
+  "Return the cache key for PREFIX in BUCKET under PROFILE.
+The shape lives here alone, so a listing cached from one buffer is
+found from another -- which a copy's destination needs, since it may be
+a bucket this buffer is not showing."
+  (list profile (s3-manager--endpoint-for profile) bucket prefix))
+
 (defun s3-manager--cache-key (&optional prefix)
   "Return the cache key for this buffer, at PREFIX if given."
-  (list s3-manager--profile
-        (s3-manager--endpoint-for s3-manager--profile)
-        s3-manager--bucket
-        (or prefix s3-manager--prefix)))
+  (s3-manager--cache-key-for s3-manager--profile
+                             s3-manager--bucket
+                             (or prefix s3-manager--prefix)))
 
 (defun s3-manager--cache-get (key)
   "Return the cached page for KEY, or nil."
