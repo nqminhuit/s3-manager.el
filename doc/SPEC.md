@@ -1946,6 +1946,20 @@ Each release is complete when this runs end to end against a real endpoint.
 Items 6, 10, 11, 13 and 15 are the ones that distinguish this from a CLI
 wrapper.
 
+### What has actually been run against a real endpoint
+
+The list above is the bar, not a record of having cleared it. Kept honest,
+because a Definition of Done nobody has executed is a wish:
+
+| | |
+|---|---|
+| Run live | 1-9, 12-15, 17, 20-24, 26, and the first clause of 25 |
+| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`G` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), and the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing) |
+
+The test-only ones need a large object, a bucket the caller cannot write, a
+second profile, and a hand-arranged window layout respectively — none hard,
+none yet done.
+
 ---
 
 ## 17. Deferred, and the seams left for it
