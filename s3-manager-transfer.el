@@ -121,6 +121,20 @@ set up in advance."
           (make-directory parent t)))
       destination)))
 
+(defun s3-manager--get-args (uri destination &optional recursive)
+  "Return the `s3 cp' arguments downloading URI to DESTINATION.
+With RECURSIVE, URI is a prefix and its whole tree comes down.
+
+The mirror of `s3-manager--upload-args', and separate from the commands
+for the same reason: what runs and what is shown to the user have to be
+the same vector.  DESTINATION is absolute, so it can never be read as an
+option."
+  (append (list "s3" "cp" uri destination)
+          (when recursive '("--recursive"))
+          ;; No --quiet and no --only-show-errors: both suppress the progress
+          ;; the mode line depends on.
+          '("--progress-frequency" "1")))
+
 (defun s3-manager-get ()
   "Download the object at point."
   (interactive)
@@ -135,8 +149,7 @@ set up in advance."
            (destination (s3-manager--read-destination-file
                          (s3-manager-entry-display-name entry))))
       (s3-manager--transfer
-       (list "s3" "cp" (s3-manager--s3-uri key) destination
-             "--progress-frequency" "1")
+       (s3-manager--get-args (s3-manager--s3-uri key) destination)
        (format "downloading %s to %s" key (abbreviate-file-name destination))))))
 
 (defun s3-manager-get-recursive ()
@@ -163,8 +176,7 @@ set up in advance."
           (user-error "Download aborted"))
         (make-directory destination t))
       (s3-manager--transfer
-       (list "s3" "cp" (s3-manager--s3-uri prefix) destination
-             "--recursive" "--progress-frequency" "1")
+       (s3-manager--get-args (s3-manager--s3-uri prefix) destination t)
        (format "downloading %s to %s"
                prefix (abbreviate-file-name destination))))))
 

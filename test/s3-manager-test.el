@@ -2360,6 +2360,41 @@ delete the object."
   (should (equal (s3-manager--key-leaf "a/") "a"))
   (should (equal (s3-manager--key-leaf "") "")))
 
+(ert-deftest s3-manager-test-get-args ()
+  "The download argv, as a value, so it can be shown as well as run."
+  (should (equal (s3-manager--get-args "s3://b/k" "/tmp/out")
+                 '("s3" "cp" "s3://b/k" "/tmp/out" "--progress-frequency" "1")))
+  (should (equal (s3-manager--get-args "s3://b/p/" "/tmp/d/" t)
+                 '("s3" "cp" "s3://b/p/" "/tmp/d/"
+                   "--recursive" "--progress-frequency" "1")))
+  ;; Both suppress the progress the mode line depends on, so neither may
+  ;; appear -- the same contract `s3-manager--upload-args' carries.
+  (dolist (args (list (s3-manager--get-args "s3://b/k" "/tmp/o")
+                      (s3-manager--get-args "s3://b/p/" "/tmp/d/" t)))
+    (should-not (member "--quiet" args))
+    (should-not (member "--only-show-errors" args))))
+
+(ert-deftest s3-manager-test-view-shares-the-download-args ()
+  "`RET' on a small object is a download; it must not drift from one.
+
+Three commands build this vector -- `s3-manager-get',
+`s3-manager-get-recursive' and `s3-manager-view' -- and the point of a
+single builder is that showing the user a command cannot describe
+something other than what runs."
+  (let ((argv-file (make-temp-file "s3-view-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+            (s3-manager-view)
+            (s3-manager-test--wait-for-argv argv-file 1))
+          (let* ((argv (car (s3-manager-test--argv-records argv-file)))
+                 (tail (seq-drop argv 4)))   ; past the four base args
+            ;; The destination is a temporary file, so compare around it.
+            (should (equal (seq-take tail 3) '("s3" "cp" "s3://media/README.md")))
+            (should (equal (seq-drop tail 4) '("--progress-frequency" "1")))))
+      (delete-file argv-file))))
+
 (ert-deftest s3-manager-test-get-argv ()
   "Downloading uses `s3 cp', which does multipart and reports progress."
   (let ((argv-file (make-temp-file "s3-get-argv"))

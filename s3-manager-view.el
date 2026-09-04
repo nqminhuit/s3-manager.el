@@ -155,7 +155,9 @@ name."
              (uri (s3-manager--s3-uri key))
              (destination (s3-manager--view-destination entry)))
         (s3-manager--transfer
-         (list "s3" "cp" uri destination "--progress-frequency" "1")
+         ;; The same argv as a download, because that is what this is: the
+         ;; only difference is where it lands and what happens next.
+         (s3-manager--get-args uri destination)
          (format "opening %s" key)
          (lambda () (s3-manager--display-view destination uri))
          (lambda ()
