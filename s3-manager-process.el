@@ -289,19 +289,19 @@ unterminated tail is carried into the next call."
   "Run the AWS CLI with ARGS asynchronously.  Return the process.
 
 ARGS is the service invocation only, e.g. (\"s3api\" \"list-buckets\");
-PROFILE\='s global flags are prepended here so (car ARGS) is always the
+PROFILE's global flags are prepended here so (car ARGS) is always the
 service name, which is what exit codes 1 and 2 are classified against.
 It is an argument vector -- no shell -- so quote nothing.
 
-REGISTER records the process for `s3-manager--cancel\='.  Listings pass
+REGISTER records the process for `s3-manager--cancel'.  Listings pass
 it; transfers must not, or navigating away would abort a download.
 
 ON-SUCCESS gets the stdout on exit 0: an alist when PARSE, else a string.
 ON-ERROR gets (CONDITION COMMAND EXIT-CODE DETAIL) otherwise, where
 EXIT-CODE is an integer, nil for a timeout, or \"signal 9\".  Failures are
 delivered rather than signalled: a signal in a sentinel is swallowed.
-ON-PROGRESS gets the latest segment of PROGRESS-STREAM, `stdout\=' or
-`stderr\='; only `aws s3' transfers emit any.
+ON-PROGRESS gets the latest segment of PROGRESS-STREAM, `stdout' or
+`stderr'; only `aws s3' transfers emit any.
 
 BUFFER and GENERATION gate every callback.  NAME labels the process.
 TIMEOUT is seconds, or nil to wait indefinitely."

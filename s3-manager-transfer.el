@@ -142,8 +142,8 @@ set up in advance."
 (defun s3-manager-copy ()
   "Copy the entry at point to the directory in the other window.
 An object downloads, a prefix downloads recursively; both prompt with
-the Dired window pre-filled, as `dired-do-copy\=' does.  The mirror of
-`s3-manager-dired-do-copy\=', so `C\=' means the same thing on both sides."
+the Dired window pre-filled, as `dired-do-copy' does.  The mirror of
+`s3-manager-dired-do-copy', so `C' means the same thing on both sides."
   (interactive)
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
@@ -196,7 +196,7 @@ write the user's bytes somewhere they never named."
 
 A directory yields a key ending in \"/\", and that slash is
 load-bearing rather than cosmetic: `s3 cp DIR s3://B/PREFIX --recursive'
-maps DIR/a.txt onto PREFIX/a.txt and drops the directory\='s own name, so
+maps DIR/a.txt onto PREFIX/a.txt and drops the directory's own name, so
 the tree is scattered flat across the listing the user was looking at.
 Writing the leaf into the destination is what keeps it."
   (concat prefix
@@ -517,7 +517,7 @@ reproducible, and the probes are dwarfed by the transfer that follows."
 Sequential, like the probes above and for a stronger reason: each
 transfer is an `aws' process holding a pipe and two buffers, and a Dired
 buffer can hand this hundreds of marked files.  A queue with a width is
-§17\='s work, not this.
+§17's work, not this.
 
 A batch is not atomic, so failures are counted and named rather than
 folded into a total."
