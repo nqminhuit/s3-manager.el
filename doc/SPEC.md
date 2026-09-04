@@ -1412,6 +1412,20 @@ also leaves room for §17's "copy between S3 locations": `C` reads as *copy to
 whatever is in the other window*, so a second S3 listing there is an addition
 rather than a redefinition.
 
+**Re-examined, and the measurements settle it.** Binding Dired's `C` from the
+package was considered, so that `P` could go and one key would serve both
+directions. It does not work, for reasons no amount of care in this package can
+fix (§18.7): under `evil-collection` a `dired-mode-map` binding never fires, and
+the Evil-state binding that does fire only wins if it runs *after*
+`evil-collection-init`, which is lazy. Making it stick would mean re-applying
+the binding from `dired-mode-hook` — a package overwriting another package's
+key on every Dired buffer to win a load-order race.
+
+**`P` therefore stays**, and it is not redundant with `C` from Dired: it needs
+no second window, no marked file, and no binding in anyone else's keymap, and
+it takes a path the user types. It is the only upload that works on a fresh
+install.
+
 `M-x s3-manager-dired-upload` goes the other way explicitly: the marked files,
 or the file at point when none are marked, into the S3 listing in the other
 window.
@@ -2166,6 +2180,25 @@ hard way.
 | `make-process` with remote `default-directory` | no error — subprocess silently runs in `$HOME` |
 | `make-process` with deleted `default-directory` | signals `(file-missing "Setting current directory" …)` |
 | `set-process-sentinel` to `#'ignore` before `delete-process` | callback suppressed; without it, sentinel fires with `"killed"` |
+
+### 18.7 Dired's `C` under `evil-collection`, measured for 0.4.0
+
+Emacs 31.1, `evil` and `evil-collection` from MELPA, a real `dired-mode`
+buffer in `evil-normal-state`.
+
+| Setup | `(key-binding "C")` |
+|---|---|
+| `keymap-set dired-mode-map "C"` ours, then `evil-collection-init 'dired` | `dired-do-copy` — **ours never fires**, though `keymap-lookup dired-mode-map` still reports it |
+| `evil-define-key 'normal dired-mode-map` ours, then `evil-collection-init 'dired` | `dired-do-copy` — **clobbered by ordering** |
+| `evil-collection-init 'dired`, then `evil-define-key 'normal` ours | `s3-manager-dired-do-copy` — the only arrangement that works |
+
+An Evil state map outranks a major-mode map, which is the same mechanism
+§10 documents for this package's own keymap — but here the package would be on
+the losing side of it, and the winning side is a race against another package's
+lazy initialisation. Hence §11.9: the Dired binding stays the user's.
+
+---
+
 | `json-available-p` | `t` here — but native JSON was **optional** in Emacs 29 |
 | `process-connection-type` default | `t`, i.e. a **pty** — `:connection-type 'pipe` is mandatory |
 | `tabulated-list-mode` `revert-buffer-function` | set to the **synchronous** `tabulated-list-revert`; must be overridden |
