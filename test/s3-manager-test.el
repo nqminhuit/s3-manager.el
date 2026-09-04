@@ -3309,9 +3309,13 @@ cannot see -- which is why the rule is the window layout, not
                   (:stderr "upload failed" :exit 1
                    :head-exit 254 :head-stderr s3-manager-test--head-404)
                 (s3-manager-dired-upload)
+                ;; Wait for the batch summary, not merely for something
+                ;; saying "failed": each transfer reports its own failure
+                ;; first, so the looser predicate let the assertion run
+                ;; before the batch had finished counting.
                 (should (s3-manager-test--wait
                          (lambda ()
-                           (seq-find (lambda (m) (string-match-p "failed" m))
+                           (seq-find (lambda (m) (string-match-p "uploaded" m))
                                      said))))))))))
     (should (seq-find (lambda (m) (string-match-p "uploaded 0, 2 failed" m))
                       said))))
