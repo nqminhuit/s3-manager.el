@@ -1533,6 +1533,50 @@ what arrived rather than on what left.
 
 ---
 
+### 11.11 Handing over the command
+
+```
+downloading s3://media/big.mp4 to ~/dl/big.mp4 (4.2 GiB)
+(r) run here  (c) copy command  (q) quit
+```
+
+Issue #1: a big transfer is better run in a terminal than in an editor the
+user might quit. Above `s3-manager-large-transfer-size` — and for any
+recursive download, whose extent nothing here can know — the transfer asks,
+and `c` hands over the `aws` command instead of running it.
+
+**What is shown is what would have run.** `s3-manager--full-argv` builds the
+vector for both, so the offered command carries `--profile` and
+`--endpoint-url` and is self-contained. Verified by pasting one into a real
+`sh`, against a live endpoint, on a key containing a space.
+
+**Both the kill ring and a buffer.** `kill-new` is what makes pasting one
+step; `*S3 Manager Command*` is what lets the command be read first, since the
+kill ring says nothing about what it holds.
+
+**A masked command is flagged, not handed over.** Nothing this package puts on
+a command line is a credential — only a profile name and possibly an endpoint
+URL — but an endpoint of the form `user:pass@host` is one, and a key shaped
+like an access-key id trips the same rules (§12). Either way the rendered
+string is no longer the command, and saying so beats a plausible wrong one.
+
+**Where it does not ask**, and why:
+
+| | |
+|---|---|
+| A recursive upload, or a recursive S3→S3 copy | Already demands a typed `yes`. Two questions for one action is worse than not offering, and the typed `yes` cannot go — it is there because the operation is unbounded. |
+| An object below the threshold | The common case must not grow a prompt. |
+| The Dired batch upload | It drives `s3-manager--upload-start` once per file; asking per file is wrong, and its callback has to fire either way or the remaining files never start. |
+| Anything, when the option is nil | The switch for someone who never wants the question, recursive included. |
+| Deletes | Fast regardless of size, and the typed `yes` is the point. |
+
+**A size is knowable only for a single object.** Directory entries carry `size`
+nil by design (§8 — entries are `equal`-compared list ids), and a delimited
+listing says nothing about what is beneath a prefix. So the rule is: a byte
+count over the threshold, or `unbounded` for anything recursive.
+
+---
+
 ## 12. Error handling
 
 **[CORRECTED] The report is displayed, not merely recorded.** v0.1.0 wrote
@@ -1982,6 +2026,19 @@ Each release is complete when this runs end to end against a real endpoint.
 Items 6, 10, 11, 13 and 15 are the ones that distinguish this from a CLI
 wrapper.
 
+### v0.4.0 adds
+
+28. `C` on an object below `s3-manager-large-transfer-size` → runs, no prompt.
+29. `C` on one above it → the prompt names the size; `r` runs it here.
+30. `c` at that prompt → nothing starts, and the command is in the kill ring
+    and in `*S3 Manager Command*`.
+31. **That command, pasted into a terminal, transfers the object.** The whole
+    feature is that it is pasteable; a command only displayed is unverified.
+32. `C` on a prefix → asks regardless of size, saying the size is unknown.
+33. `P` of a directory → the typed `yes` only, no second question.
+34. An `--endpoint-url` carrying `user:pass@host` → the command is masked and
+    carries the warning that it is no longer runnable.
+
 ### What has actually been run against a real endpoint
 
 The list above is the bar, not a record of having cleared it. Kept honest,
@@ -1989,12 +2046,13 @@ because a Definition of Done nobody has executed is a wish:
 
 | | |
 |---|---|
-| Run live | 1-9, 12-15, 17, 20-24, 26, and the first clause of 25 |
-| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), and the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing) |
+| Run live | 1-9, 12-15, 17, 20-24, 26, the first clause of 25, **30**, **31**, and the prompt half of **29** (it named the size; only `c` was answered, never `r`) |
+| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing), **28**, **32**, **33**, **34**, and the `r` half of **29** |
 
-The test-only ones need a large object, a bucket the caller cannot write, a
-second profile, and a hand-arranged window layout respectively — none hard,
-none yet done.
+None of the test-only ones are hard; they want things a scratch bucket does
+not have to hand — a large object, a bucket the caller cannot write, a second
+profile, a hand-arranged window layout, an endpoint with credentials in its
+URL. They are listed so that "covered" is never mistaken for "tried".
 
 ---
 

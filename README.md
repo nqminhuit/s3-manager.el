@@ -84,6 +84,25 @@ profile. `aws s3 cp` will happily copy an object onto itself, and `aws s3 mv`
 catches only some spellings of it — one dropped trailing slash turns a
 recursive move into "copy every object onto itself, then delete it".
 
+### Big transfers
+
+Above `s3-manager-large-transfer-size`, and for any recursive download, a
+transfer asks before it starts:
+
+```
+downloading s3://media/big.mp4 to ~/dl/big.mp4 (4.2 GiB)
+(r) run here  (c) copy command  (q) quit
+```
+
+`c` puts the `aws` command in the kill ring and shows it, so you can paste it
+into a terminal and leave it running there. It is the command that would have
+run — profile, endpoint and all — because both are built from the same
+argument vector.
+
+A recursive upload or S3-to-S3 copy does not ask: it already demands a typed
+`yes`, and two questions for one action is worse than none. Set the option to
+`nil` to switch the offer off entirely.
+
 ### Two windows
 
 With a Dired buffer beside a listing, `C` copies toward the other window in
@@ -131,6 +150,7 @@ Or from Emacs, with `s3-manager-endpoint-alist` / `s3-manager-endpoint-url`.
 | `s3-manager-page-size` | `1000` | entries per listing request |
 | `s3-manager-download-directory` | `"~/Downloads/"` | fallback download target |
 | `s3-manager-view-max-size` | 10 MiB | above this, `RET` suggests `C` |
+| `s3-manager-large-transfer-size` | 100 MiB | above this, a transfer offers its `aws` command; `nil` never offers |
 | `s3-manager-timeout` | `120` | seconds before a listing is abandoned |
 | `s3-manager-transfer-timeout` | `nil` | same for transfers; `nil` waits |
 | `s3-manager-cache-max-entries` | `200` | cached listings retained |
