@@ -5144,3 +5144,33 @@ previews would be worse than no preview at all."
                               (buffer-string)))))
       (delete-file argv-file))))
 
+(ert-deftest s3-manager-test-a-move-forgets-the-source-mark ()
+  "A moved object is gone, but its mark is keyed by name and outlives it.
+
+Marks are cleared wholesale only when the prefix changes, so renaming a
+marked object and later creating something at the old key would hand
+that new object a deletion mark the user never set."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "p" s3-manager--bucket "bk" s3-manager--prefix "")
+    (puthash "README.md" t s3-manager--marks)
+    (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
+      (s3-manager--after-copy
+       (s3-manager-copy-job--create
+        :profile "p" :source-bucket "bk" :source-key "README.md"
+        :bucket "bk" :key "renamed.md" :recursive nil :move t)))
+    (should-not (gethash "README.md" s3-manager--marks))))
+
+(ert-deftest s3-manager-test-a-copy-keeps-the-source-mark ()
+  "A copy leaves the source in place, so its mark still names something."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "p" s3-manager--bucket "bk" s3-manager--prefix "")
+    (puthash "README.md" t s3-manager--marks)
+    (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
+      (s3-manager--after-copy
+       (s3-manager-copy-job--create
+        :profile "p" :source-bucket "bk" :source-key "README.md"
+        :bucket "bk" :key "copied.md" :recursive nil :move nil)))
+    (should (gethash "README.md" s3-manager--marks))))
+

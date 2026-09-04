@@ -64,8 +64,6 @@ function of this struct."
           (if (s3-manager-job-move job) "moving" "copying")
           (s3-manager--job-source-uri job) (s3-manager--job-uri job)))
 
-;;;; Prompting
-
 (defun s3-manager--job-verb (job &optional capitalized)
   "Return \"copy\" or \"move\" for JOB, CAPITALIZED when asked."
   (let ((verb (if (s3-manager-job-move job) "move" "copy")))
@@ -76,6 +74,8 @@ function of this struct."
 A declined copy must not report itself as an aborted upload, nor a
 declined move as a copy."
   (format "%s aborted" (s3-manager--job-verb job t)))
+
+;;;; Prompting
 
 (defvar s3-manager--destination-history nil
   "Minibuffer history of s3:// destinations.")
@@ -128,12 +128,31 @@ creates and wrong for any other -- including the one that started the
 copy, if a caller ever holds a listing in a buffer of its own."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
-               (equal (buffer-local-value 'major-mode buffer) 's3-manager-mode)
+               (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                        's3-manager-mode)
                (equal (buffer-local-value 's3-manager--profile buffer) profile)
                (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
                (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
       (with-current-buffer buffer
         (s3-manager--reload nil key)))))
+
+(defun s3-manager--forget-mark (profile bucket prefix key)
+  "Drop KEY's deletion mark in any listing of PREFIX in BUCKET under PROFILE.
+
+A moved object is gone, but its mark is keyed by name and outlives it:
+marks are only cleared wholesale when the prefix changes, so renaming a
+marked object and later creating something at the old key would give
+that new object a mark the user never set, which `x' would act on.
+`s3-manager--delete-finished' clears marks for the same reason."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                        's3-manager-mode)
+               (equal (buffer-local-value 's3-manager--profile buffer) profile)
+               (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
+               (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
+      (with-current-buffer buffer
+        (when s3-manager--marks (remhash key s3-manager--marks))))))
 
 (defun s3-manager--after-copy (job)
   "Refresh both of JOB's ends, whether it succeeded or failed part-way.
@@ -166,6 +185,10 @@ listing that is about to be dropped."
     (when move
       (dolist (step (s3-manager--ancestor-steps source-key))
         (push (list source-bucket (car step) (cdr step)) targets)))
+    (when move
+      (s3-manager--forget-mark profile source-bucket
+                               (s3-manager--parent-prefix source-key)
+                               source-key))
     (setq targets (nreverse targets))
     (let ((seen nil))
       (dolist (target targets)
@@ -180,7 +203,7 @@ listing that is about to be dropped."
 ;;;; Running
 
 (defun s3-manager--copy-args (job &optional dry-run)
-  "Return the `s3 cp' arguments performing JOB.
+  "Return the `s3 cp' or `s3 mv' arguments performing JOB.
 With DRY-RUN nothing is written and the CLI reports what it would do.
 The verb, both URIs and `--recursive' are shared between the two forms,
 so a preview cannot describe something other than what it previews.
@@ -290,7 +313,6 @@ normalised form, which is what makes them complete."
      :recursive directory
      :move move)))
 
-;;;###autoload
 (defun s3-manager-copy-to ()
   "Copy the entry at point to another S3 location.
 
@@ -305,7 +327,6 @@ is taken literally rather than gaining the source's own name -- see
   (interactive)
   (s3-manager--copy-command nil))
 
-;;;###autoload
 (defun s3-manager-rename ()
   "Rename the entry at point, or move it elsewhere in S3.
 
@@ -398,7 +419,6 @@ mystifying."
       (user-error "Copy aborted"))
     (s3-manager--copy-confirm job)))
 
-;;;###autoload
 (defun s3-manager-copy ()
   "Copy the entry at point to whatever is in the other window.
 
@@ -415,7 +435,6 @@ listing means a server-side copy into its prefix, which is the one thing
         (s3-manager-get-recursive)
       (s3-manager-get))))
 
-;;;###autoload
 (defun s3-manager-copy-dry-run (&optional move)
   "Show what copying the entry at point elsewhere would do, doing nothing.
 With a prefix argument MOVE, preview a move instead.

@@ -4,7 +4,7 @@
 
 ;; Author: Minh Nguyen <nqminhuit@gmail.com>
 ;; URL: https://github.com/nqminhuit/s3-manager.el
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
