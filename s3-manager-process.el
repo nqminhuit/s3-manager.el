@@ -143,6 +143,15 @@ and these two strings cost nothing."
             (list "--endpoint-url" url))
           (list "--no-cli-pager" "--no-cli-auto-prompt")))
 
+(defun s3-manager--full-argv (profile args)
+  "Return the complete argument vector for ARGS under PROFILE.
+The program itself and the global flags included, so what this returns
+is what runs.  `s3-manager--aws-async' builds its vector with this, and
+so does anything that shows the user a command to paste: a shown command
+that differed from the run one would be worse than showing none."
+  (cons s3-manager-aws-program
+        (append (s3-manager--base-args profile) args)))
+
 (defun s3-manager--command-string (argv)
   "Render ARGV as a redacted, human-readable command line.
 
@@ -305,8 +314,7 @@ ON-PROGRESS gets the latest segment of PROGRESS-STREAM, `stdout' or
 
 BUFFER and GENERATION gate every callback.  NAME labels the process.
 TIMEOUT is seconds, or nil to wait indefinitely."
-  (let* ((argv (cons s3-manager-aws-program
-                     (append (s3-manager--base-args profile) args)))
+  (let* ((argv (s3-manager--full-argv profile args))
          (label (or name "s3-aws"))
          (origin (or buffer (current-buffer)))
          (stdout-buffer (generate-new-buffer (format " *%s-out*" label) t))

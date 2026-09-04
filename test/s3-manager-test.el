@@ -138,6 +138,74 @@ one exit code for both cannot express it."
     (should (equal (s3-manager--base-args nil)
                    '("--no-cli-pager" "--no-cli-auto-prompt")))))
 
+(ert-deftest s3-manager-test-full-argv-is-self-contained ()
+  "What is shown to the user must be what runs, flags and program included."
+  (let ((s3-manager-endpoint-url "https://minio.example.com")
+        (s3-manager-endpoint-alist nil)
+        (s3-manager-aws-program "aws"))
+    (should (equal (s3-manager--full-argv "minio" '("s3" "cp" "a" "b"))
+                   '("aws" "--profile" "minio"
+                     "--endpoint-url" "https://minio.example.com"
+                     "--no-cli-pager" "--no-cli-auto-prompt"
+                     "s3" "cp" "a" "b")))))
+
+(ert-deftest s3-manager-test-full-argv-is-what-aws-async-runs ()
+  "The extraction is only worth anything if the transport uses it too."
+  (let ((argv-file (make-temp-file "s3-fullargv")))
+    (unwind-protect
+        (let ((s3-manager-endpoint-url nil)
+              (s3-manager-endpoint-alist nil))
+          (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+            (s3-manager--aws-async '("s3api" "list-buckets")
+                                   :profile "production" :parse nil)
+            (s3-manager-test--wait-for-argv argv-file 1))
+          ;; The double records argv without its own program name, so compare
+          ;; against the tail of what `--full-argv' would have produced.
+          (should (equal (car (s3-manager-test--argv-records argv-file))
+                         (cdr (s3-manager--full-argv
+                               "production" '("s3api" "list-buckets"))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-command-string-is-pasteable ()
+  "A rendered command must parse back to the argv it came from.
+
+The property, not the escaping style: `shell-quote-argument' may use
+backslashes or quotes depending on the platform, and either is correct
+so long as a shell recovers the arguments."
+  (dolist (argv (list (list "aws" "s3" "cp" "s3://b/k" "/tmp/out")
+                      (list "aws" "s3" "cp" "s3://b/has space.txt" "/tmp/o (1)")
+                      (list "aws" "s3" "cp" "s3://b/it's" "/tmp/out" "--recursive")))
+    (should (equal argv
+                   (split-string-shell-command
+                    (s3-manager--command-string argv)))))
+  ;; An argument needing nothing is left bare, so the usual command reads
+  ;; the way the user would have typed it.
+  (should (equal (s3-manager--command-string (list "aws" "s3" "ls" "s3://b/p/"))
+                 "aws s3 ls s3://b/p/")))
+
+(ert-deftest s3-manager-test-command-string-survives-a-real-shell ()
+  "The only parser whose opinion counts is the one the user pastes into.
+
+`split-string-shell-command' is not a shell -- it mis-parses an escaped
+semicolon, which sh, bash and zsh all handle correctly.  An S3 key may
+contain any of these bytes, and a command a shell would re-split is how
+the wrong object gets fetched, or a second command gets run."
+  (skip-unless (executable-find "sh"))
+  (dolist (key (list "s3://b/k"
+                     "s3://b/has space.txt"
+                     "s3://b/semi;colon&"
+                     "s3://b/pipe|and>redirect"
+                     "s3://b/dollar$HOME"
+                     "s3://b/star*glob?"
+                     "s3://b/it's"))
+    ;; `printf' echoes the argument back, so the shell's own parse is what
+    ;; the assertion sees.
+    (let* ((rendered (s3-manager--command-string (list "printf" "[%s]" key)))
+           (output (with-output-to-string
+                     (with-current-buffer standard-output
+                       (call-process "sh" nil t nil "-c" rendered)))))
+      (should (equal output (format "[%s]" key))))))
+
 (ert-deftest s3-manager-test-base-args-scalar-endpoint ()
   (let ((s3-manager-endpoint-url "https://minio.example.com")
         (s3-manager-endpoint-alist nil))
