@@ -44,12 +44,13 @@ rewrite rather than a patch:
 
 ### 1.3 Explicitly out of scope
 
-Copy/move between S3 locations; sync; multipart tuning; bucket
-creation/deletion; ACL; object metadata editing; versioning; presigned URLs; a
-native AWS SDK; a job queue; recursive listing in the UI; TRAMP sources.
+Sync; multipart tuning; bucket creation/deletion; ACL; object metadata editing;
+versioning; presigned URLs; a native AWS SDK; a job queue; recursive listing in
+the UI; TRAMP sources.
 
-Shipped since v0.1.0, and no longer out of scope: **upload** (§11.8) and
-**Dired interoperability** (§11.9).
+Shipped since v0.1.0, and no longer out of scope: **upload** (§11.8), **Dired
+interoperability** (§11.9), and **copy and move between S3 locations**
+(§11.10).
 
 §17 records which of the remainder have seams left for them and which do not.
 
@@ -1069,7 +1070,9 @@ and preserved CRs *look* stripped.
 | `^` | `s3-manager-up` | parent prefix, or back to bucket list |
 | `g` | `s3-manager-refresh` | invalidate cache for this prefix and re-list |
 | `+` | `s3-manager-load-more` | fetch the next page |
-| `C` | `s3-manager-copy` | copy to the other window: object → `G`, prefix → `R` (§11.9) |
+| `C` | `s3-manager-copy` | copy to the other window: Dired → `G`/`R`, an S3 listing → server-side (§11.10) |
+| `c` | `s3-manager-copy-to` | copy to a prompted S3 location (§11.10) |
+| `r` | `s3-manager-rename` | rename, or move elsewhere in S3 (§11.10) |
 | `G` | `s3-manager-get` | download object to a prompted path |
 | `R` | `s3-manager-get-recursive` | download prefix recursively |
 | `P` | `s3-manager-upload` | upload a local file, or a directory recursively (§11.8) |
@@ -1083,7 +1086,8 @@ and preserved CRs *look* stripped.
 | `q` | `quit-window` | |
 
 Unbound, `M-x` only: `s3-manager-upload-dry-run`,
-`s3-manager-delete-recursive-dry-run`, `s3-manager-dired-upload`,
+`s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
+`s3-manager-dired-upload`,
 `s3-manager-dired-do-copy` (meant for `C` in `dired-mode-map`),
 `s3-manager-switch-profile`, `s3-manager-clear-cache`,
 `s3-manager-forget-profiles`, `s3-manager-list-profiles`.
@@ -1332,7 +1336,10 @@ drops the directory's own name, scattering the tree across the listing the user
 was looking at. The leaf is written into the destination URI, never inferred.
 
 **Overwrite: `head-object`, then confirm.** `s3 cp` replaces a key without a
-word and has no flag that would stop it. The discrimination is an **allowlist**:
+word. It grew a `--no-overwrite` flag by 2.33.30 — *"only files not present at
+the destination will be transferred"* — but that skips silently rather than
+asking, which is the opposite of what is wanted here, and the version that
+introduced it was not established against the 2.13.0 this package requires. The discrimination is an **allowlist**:
 absent is exit 254 *plus* `An error occurred (404) when calling the HeadObject
 operation` — botocore's own format string, hence identical across
 S3-compatible endpoints. A 403 is a permission error, 255 an unreachable
@@ -1413,7 +1420,82 @@ window.
 - **A batch is not atomic.** Failures are counted and reported individually,
   never folded into a total.
 
-The package does not modify `dired-mode-map`; the binding is the user's.
+
+---
+
+### 11.10 Copy and move between S3 locations
+
+```
+aws s3 cp s3://B/key  s3://B2/key2  --progress-frequency 1
+aws s3 mv s3://B/pre/ s3://B2/pre2/ --recursive --progress-frequency 1
+aws s3 cp … --dryrun                                  (preview; writes nothing)
+aws s3api head-object --bucket B2 --key key2           (existence probe)
+```
+
+Server-side: the bytes never reach this machine, which is why this is not
+spelled as a download followed by an upload.
+
+`c` copies and `r` renames or moves, both on the entry at point. Both offer a
+destination for editing — for `r` the entry's own URI, so changing the last
+segment renames and changing the rest moves. **What the prompt shows is what
+happens:** the destination is taken as typed, never given the source's own name
+behind the user's back. `C` is the exception, because it never prompts; it uses
+the other window's prefix plus the source's name, which is the Dired reading of
+"copy this there".
+
+**The guards are ours, and they run before anything is invoked.** Measured:
+`s3 cp SRC SRC` exits 0 having done nothing visible, and `s3 mv` catches only
+the spellings its own string comparison happens to match:
+
+```
+aws s3 mv s3://B/share/ s3://B/share --recursive --dryrun
+  → exit 0, and every object under share/ is mapped onto itself
+```
+
+One dropped slash. For a move that is copy-onto-self followed by delete, on an
+endpoint where self-copy succeeds — which is measured to be the case here, and
+is not true of real AWS. So the destination is normalised first (a prefix
+always gains its trailing slash) and compared here, and the CLI's exit 252 is
+only ever a backstop. §12 glosses that code accordingly, since it also means
+"this package built a bad argv".
+
+Also refused, all before any request:
+
+- **Overlapping prefixes, in either direction.** The CLI allows `share/` →
+  `share/sub/` and exits 0, but objects under the overlap are both source and
+  destination, and which of its worker threads reaches one first is a race.
+  There is no confirmation wording that makes a nondeterministic outcome
+  acceptable.
+- **An access point ARN or alias as the destination.** Two names can resolve to
+  one bucket, which no comparison of two strings can see; the CLI's own `s3 mv`
+  documentation warns that such a move can delete the object.
+  `--validate-same-s3-paths` is the alternative, at the cost of extra API calls
+  and an unestablished minimum version.
+- **A destination on another profile**, reachable only through `C`. One
+  invocation carries one `--profile`, and the endpoint follows from the
+  profile, so the copy is not a command that can be constructed.
+
+**A move is `s3 mv`, not a copy-verify-delete built here.** The CLI's own
+description is *"copies the source object … and then deletes the source
+object"* — per object — so a failure part-way leaves anything it did not reach
+untouched at the source, and re-running finishes the job. That is the invariant
+a move needs, already provided; reimplementing it would give up multipart copy,
+concurrency and retry for nothing. The failure message says which state the two
+ends are in, because the CLI's stderr does not.
+
+**Confirmation matches the damage.** A single object is probed and the existing
+destination named with its size and date, exactly as an upload is. A prefix
+takes a typed `yes` naming both URIs — and, for a move, saying that the
+originals are deleted. A prefix is not probed: one `head-object` per key is
+unbounded, which §11.8 already rejected for the recursive upload, and
+`s3-manager-copy-dry-run` is the answer instead.
+
+**Both ends are refreshed, on failure too**, since `aws s3` exits 1 or 2 having
+done part of the work. Not merely the destination's immediate parent: S3 has no
+directories, so one new key can bring a row into existence at several levels at
+once, and a listing showing any of them is stale. A rename in place — where the
+two ends are one listing — is deduplicated to a single reload, with point on
+what arrived rather than on what left.
 
 ---
 
@@ -1592,9 +1674,9 @@ s3-manager-ui.el       major mode, rendering, navigation, marks
 s3-manager-transfer.el download and upload
 s3-manager-view.el     reading a small object
 s3-manager-delete.el   removing objects and prefixes
+s3-manager-copy.el     copy and move between S3 locations
 Eask                   build / lint / test manifest
 README.md              user-facing documentation
-CHANGELOG.md           per-release, user-facing
 LICENSE                GPL-3.0
 doc/SPEC.md            this document
 test/
@@ -1841,6 +1923,26 @@ Each release is complete when this runs end to end against a real endpoint.
 19. Uploading where the caller may not write: the service's own words reach the
     screen, the report is displayed, and the package keeps working.
 
+### v0.3.0 adds
+
+20. `c` on an object → the destination is offered for editing → the object
+    appears at the new key and **point lands on it**.
+21. `c` onto an existing key → `already exists (N B, modified …). Overwrite?`
+    quoting the service's own size and date; declining changes nothing.
+22. `c` on a prefix → typed `yes` → the tree lands under the destination as
+    typed, and every listing above it shows the new row.
+23. `r` → the object is at the new key and gone from the old, both listings
+    refresh, and point is on what arrived.
+24. `r` on a prefix, answering with the trailing slash dropped → **refused by
+    us**, with no CLI call at all. This is the one that would otherwise move
+    every object onto itself and delete it.
+25. `C` with a second listing in the other window → a server-side copy into its
+    prefix; with Dired there → still a download; with Dired nearer than a
+    second listing → still a download.
+26. `M-x s3-manager-copy-dry-run` with a prefix argument → names every object a
+    recursive move would relocate, and writes and deletes nothing.
+27. A copy to a listing on another profile → refused, naming both profiles.
+
 Items 6, 10, 11, 13 and 15 are the ones that distinguish this from a CLI
 wrapper.
 
@@ -1852,7 +1954,7 @@ wrapper.
 |---|---|---|
 | ~~0.2.0~~ | ~~Upload~~ | **Shipped** — §11.8 |
 | ~~0.3.0~~ | ~~Dired integration~~ | **Shipped early** — §11.9 |
-| 0.3.0 | Copy and move between S3 locations | Yes — `s3 cp` with two S3 URIs; the overwrite probe generalizes |
+| ~~0.3.0~~ | ~~Copy and move between S3 locations~~ | **Shipped** — §11.10 |
 | 0.4.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
 | 0.4.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
 | 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
@@ -1914,6 +2016,34 @@ timer for total duration, not idle time, so any transfer outliving it was
 killed mid-flight and reported as `No response after 120 seconds` — measured
 with the CLI alive and still writing progress. Transfers now take
 `s3-manager-transfer-timeout`, default nil.
+
+---
+
+### 18.1.2 Copy and move facts, measured for v0.3.0
+
+Against `aws-cli/2.33.30` and a live S3-compatible endpoint. Everything that
+would have written used `--dryrun`, except the rows marked *(real)*, which ran
+inside `s3://temp/s3-manager-selftest/` and were removed afterwards.
+
+| Probe | Result |
+|---|---|
+| `s3 cp s3://A/k s3://B/k2` | `(dryrun) copy: SRC to DST`; cross-bucket is fine |
+| `s3 mv s3://A/k s3://B/k2` | `(dryrun) move: SRC to DST` |
+| `s3 cp s3://A/P/ s3://A/Q/ --recursive` | **flattens the leaf** — `P/README.md` lands as `Q/README.md`, exactly as the local directory upload does (§18.1.1) |
+| `s3 cp SRC SRC` | **exit 0.** No self-copy protection at all |
+| `s3 mv SRC SRC` | exit **252**, stderr `Cannot mv a file onto itself: SRC - DST`; client-side, fires under `--dryrun` too |
+| `s3 mv s3://A/P/ s3://A/P --recursive` | **exit 0**, and every object under `P/` is mapped onto itself — one dropped slash defeats the check above |
+| `s3 mv s3://A/P/ s3://A/P/sub/ --recursive` | allowed, exit 0; the source is enumerated up front, so it terminates |
+| `s3 cp` between two S3 URIs *(real)* | emits `Completed N Bytes/N Bytes (R/s)` on **stdout**, carriage-return terminated, the same shape `s3-manager--format-progress` already parses — so the mode line works even though no bytes cross this machine |
+| `s3 mv` *(real)* | *"copies the source object … and then deletes the source object"* — per object, so a partial failure never loses one |
+| `--copy-props` | S3→S3 only; its default copies tags and the metadata directive, so it is not passed |
+| `--no-overwrite` | exists in 2.33.30; **skips** silently rather than asking, and its introducing version was not established |
+| keys with spaces *(real)* | intact through copy, move and the dry run — argv vector, never a shell |
+
+The self-move row is why §11.10's guard is the package's own rather than the
+CLI's. Real AWS rejects a self-copy with `InvalidRequest`; this endpoint does
+not, so there `mv` would have deleted everything it had just copied onto
+itself.
 
 ---
 

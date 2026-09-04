@@ -46,7 +46,9 @@ From GitHub:
 | `^` | up one level |
 | `+` | fetch the next page of a truncated listing |
 | `g` / `C-u g` | refresh; with `C-u`, drop every cached listing for the bucket |
-| `C` | copy to the other window — download, recursively for a prefix |
+| `C` | copy to the other window — Dired downloads, an S3 listing copies server-side |
+| `c` | copy to another S3 location, server-side |
+| `r` | rename, or move elsewhere in S3 |
 | `P` | upload a local file, or a directory recursively |
 | `G` / `R` | download the object, or the prefix recursively |
 | `d` / `x` | mark for deletion; delete everything marked |
@@ -56,16 +58,33 @@ From GitHub:
 | `n` / `p` / `q` | next line / previous line / bury |
 
 Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
-`s3-manager-delete-recursive-dry-run`, `s3-manager-clear-cache`,
-`s3-manager-forget-profiles`, `s3-manager-list-profiles`.
+`s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
+`s3-manager-clear-cache`, `s3-manager-forget-profiles`,
+`s3-manager-list-profiles`.
 
 Nothing to configure for Evil; the keymap is registered as overriding, and keys
 it does not bind still reach Evil.
 
+### Copying within S3
+
+`c` copies the entry at point to a prompted `s3://` destination and `r` renames
+or moves it, both server-side — the bytes never reach your machine. The
+destination is offered for editing, and what the prompt shows is what happens.
+A prefix goes recursively after a typed `yes`, and
+`M-x s3-manager-copy-dry-run` (with `C-u`, for a move) lists exactly what would
+happen first.
+
+Refused before anything runs: a destination equal to its source, two
+overlapping prefixes, an access point ARN or alias, and a listing on another
+profile. `aws s3 cp` will happily copy an object onto itself, and `aws s3 mv`
+catches only some spellings of it — one dropped trailing slash turns a
+recursive move into "copy every object onto itself, then delete it".
+
 ### Two windows
 
 With a Dired buffer beside a listing, `C` copies toward the other window in
-both directions. `G`, `R` and `P` default their path there too, honouring
+both directions. With a *second S3 listing* there instead, `C` copies into its
+prefix, server-side. `G`, `R` and `P` default their path there too, honouring
 `dired-dwim-target`. For the Dired half, bind it yourself:
 
 ```elisp
@@ -121,9 +140,8 @@ on a timer, since `g` is one keystroke.
 
 ## Not included
 
-Copy and move between S3 locations; sync; bucket lifecycle; ACLs; metadata;
-versioning; presigned URLs; recursive listing in one buffer; uploading from a
-remote (TRAMP) directory.
+Sync; bucket lifecycle; ACLs; metadata; versioning; presigned URLs; recursive
+listing in one buffer; uploading from a remote (TRAMP) directory.
 
 ## Development
 
@@ -136,13 +154,14 @@ eask compile && eask test ert ./test/s3-manager-test.el
 Tests need no network and no `~/.aws` — `test/fake-aws` stands in for the CLI.
 Tests tagged `cli` and `evil` skip themselves when those are absent.
 
-The package is eight layered files, each requiring only the ones below it:
-`core` → `process` → `model` → `ui` → `transfer` → `view`/`delete`, with
+The package is nine layered files, each requiring only the ones below it:
+`core` → `process` → `model` → `ui` → `transfer` → `view`/`delete`/`copy`, with
 `s3-manager.el` as the entry point.
 
 [`doc/SPEC.md`](doc/SPEC.md) is the design document, including an appendix of
-AWS CLI behaviour that was measured rather than assumed.
-[`CHANGELOG.md`](CHANGELOG.md) records what each release added.
+AWS CLI behaviour that was measured rather than assumed. Release notes are
+generated from the commit log, on the
+[releases page](https://github.com/nqminhuit/s3-manager.el/releases).
 
 ## License
 
