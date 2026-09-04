@@ -4633,7 +4633,7 @@ changed, personal configuration would silently stop taking effect."
     (setq s3-manager--profile "production" s3-manager--bucket nil)
     (should-error (s3-manager-copy-to) :type 'user-error)))
 
-(ert-deftest s3-manager-test-after-copy-invalidates-every-ancestor ()
+(ert-deftest s3-manager-test-after-copy-refreshes-every-ancestor ()
   "A new key can bring several prefix rows into existence at once."
   (let ((s3-manager--cache (make-hash-table :test #'equal))
         (s3-manager-endpoint-url nil)
@@ -4674,4 +4674,109 @@ was not the one the derived name pointed at."
         (s3-manager--refresh-listing "p" "elsewhere" "a/" "a/x")
         (s3-manager--refresh-listing "other" "bk" "a/" "a/x")
         (should-not reloaded)))))
+
+(ert-deftest s3-manager-test-copy-to-a-prefix-is-recursive ()
+  "A prefix copies with --recursive, after a typed `yes', without probing."
+  (let ((argv-file (make-temp-file "s3-copy-argv"))
+        (asked nil))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-directory)   ; images/
+          (s3-manager-test--copying-to "s3://media/backup/images/"
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (p) (setq asked p) t))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (_) (error "A prefix must not be probed"))))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file)
+                (s3-manager-copy-to)
+                (s3-manager-test--wait-for-argv argv-file 1))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            ;; No `head-object' anywhere: one probe per key under the prefix
+            ;; would be unbounded.  Counting records would be wrong -- the
+            ;; refresh afterwards re-lists the prefix on screen, so how many
+            ;; there are depends on timing.
+            (should-not (seq-find (lambda (r) (member "head-object" r)) records))
+            (should (equal (seq-find (lambda (r) (member "cp" r)) records)
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp"
+                                 "s3://media/images/"
+                                 "s3://media/backup/images/"
+                                 "--recursive"
+                                 "--progress-frequency" "1"))))
+          ;; `yes-or-no-p', not `y-or-n-p': the same bar as a recursive
+          ;; delete, and the question names both URIs in full.
+          (should (string-match-p "s3://media/images/" asked))
+          (should (string-match-p "s3://media/backup/images/" asked)))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-a-prefix-declined-copies-nothing ()
+  (let ((argv-file (make-temp-file "s3-copy-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-directory)
+          (s3-manager-test--copying-to "s3://media/backup/images/"
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-copy-to) :type 'user-error))))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-a-prefix-keeps-the-destination-literal ()
+  "The destination is not given the source's own name; the prompt is truth.
+
+`s3 cp' flattens a prefix into whatever it is given -- measured, the
+same trap `s3-manager--upload-key' compensates for on upload -- so the
+confirmation names both URIs and the user decides."
+  (should (equal (s3-manager--copy-key "backup/" "images/" t) "backup/"))
+  ;; Putting them under backup/images/ means saying so, which
+  ;; `s3-manager--key-into' is what `C' uses to say it automatically.
+  (should (equal (s3-manager--key-into "backup/" "images/") "backup/images/")))
+
+(ert-deftest s3-manager-test-after-copy-purges-the-destination-subtree ()
+  "A recursive copy writes below the destination, not only at it."
+  (let ((s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (dolist (prefix '("backup/images/" "backup/images/raw/" "backup/other/"))
+      (s3-manager--cache-put (s3-manager--cache-key-for "p" "bk" prefix)
+                             nil nil nil))
+    (s3-manager--after-copy
+     (s3-manager-copy-job--create
+      :profile "p" :source-bucket "bk" :source-key "images/"
+      :bucket "bk" :key "backup/images/" :recursive t))
+    (should-not (s3-manager--cache-get
+                 (s3-manager--cache-key-for "p" "bk" "backup/images/")))
+    (should-not (s3-manager--cache-get
+                 (s3-manager--cache-key-for "p" "bk" "backup/images/raw/")))
+    ;; A sibling under the same parent survives.
+    (should (s3-manager--cache-get
+             (s3-manager--cache-key-for "p" "bk" "backup/other/")))))
+
+(ert-deftest s3-manager-test-after-copy-refreshes-a-grandparent-listing ()
+  "A new key adds a row at every level above it, not only its parent.
+
+Caught live: a recursive copy into backup/src/ left the listing that was
+actually on screen -- the prefix above backup/ -- showing no `backup/'
+at all, because only backup/'s own listing was re-read."
+  (let ((reloaded nil)
+        (s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "bk"
+            s3-manager--prefix "self/")     ; two levels above the new key
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (&optional _t key) (push key reloaded))))
+        (s3-manager--after-copy
+         (s3-manager-copy-job--create
+          :profile "p" :source-bucket "bk" :source-key "self/src/"
+          :bucket "bk" :key "self/backup/src/" :recursive t))
+        ;; Point lands on what appeared at this level: `self/backup/', the
+        ;; child on the path, not the full destination key.
+        (should (equal reloaded '("self/backup/")))))))
 

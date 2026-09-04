@@ -83,19 +83,29 @@ space is far commoner than a key that really ends in one."
 
 ;;;; Refreshing both ends
 
-(defun s3-manager--invalidate-ancestors (profile bucket key)
-  "Drop PROFILE's cached listings for every prefix above KEY in BUCKET.
-Not merely its parent: S3 has no directories, so a key names whatever
-prefixes it happens to contain, and writing one can bring several rows
-into existence at once.  Copying to a/b/c.txt adds the row `b/' to the
-listing of a/ and the row `a/' to the listing of the bucket root."
-  (let ((prefix (s3-manager--parent-prefix key)))
-    (s3-manager--cache-invalidate
-     (s3-manager--cache-key-for profile bucket prefix))
-    (while (not (string-empty-p prefix))
-      (setq prefix (s3-manager--parent-prefix prefix))
-      (s3-manager--cache-invalidate
-       (s3-manager--cache-key-for profile bucket prefix)))))
+(defun s3-manager--refresh-ancestors (profile bucket key)
+  "Drop and re-read PROFILE's listings above KEY in BUCKET.
+
+Every level, not merely the immediate parent.  S3 has no directories, so
+a key names whatever prefixes it happens to contain and writing one can
+bring a row into existence at each level above it: copying to
+a/b/c.txt adds the row `c.txt' to a/b/, the row `b/' to a/, and the row
+`a/' to the bucket root.
+
+Caught live -- a recursive copy into backup/src/ left the listing of the
+prefix above it showing no `backup/' at all, because only backup/'s own
+listing was re-read and nothing was displaying that."
+  (let ((child key) (done nil))
+    (while (not done)
+      (let ((prefix (s3-manager--parent-prefix child)))
+        (s3-manager--cache-invalidate
+         (s3-manager--cache-key-for profile bucket prefix))
+        ;; CHILD is what appeared in PREFIX, so point lands on it at every
+        ;; level; `s3-manager--goto-key' leaves point alone when it is not
+        ;; there, which is what happens for a prefix that already existed.
+        (s3-manager--refresh-listing profile bucket prefix child)
+        (setq done (string-empty-p prefix)
+              child prefix)))))
 
 (defun s3-manager--refresh-listing (profile bucket prefix key)
   "Re-read any listing of PREFIX in BUCKET under PROFILE, point on KEY.
@@ -123,12 +133,12 @@ listing that is about to be dropped."
   (let ((profile (s3-manager-job-profile job))
         (bucket (s3-manager-job-bucket job))
         (key (s3-manager-job-key job)))
-    (s3-manager--invalidate-ancestors profile bucket key)
+    ;; The subtree first: a recursive copy writes below the destination, and
+    ;; a reload must not re-cache a listing that is about to be dropped.
     (when (s3-manager-job-recursive job)
       (s3-manager--cache-purge profile (s3-manager--endpoint-for profile)
                                bucket key))
-    (s3-manager--refresh-listing profile bucket
-                                 (s3-manager--parent-prefix key) key)))
+    (s3-manager--refresh-ancestors profile bucket key)))
 
 ;;;; Running
 
@@ -161,6 +171,26 @@ the default would only pin us to it."
     (s3-manager--transfer (s3-manager--copy-args job)
                           (s3-manager--job-describe job)
                           finish finish)))
+
+(defun s3-manager--copy-confirm (job)
+  "Confirm JOB, then run it.
+
+A prefix takes a typed `yes', the bar a recursive upload and a recursive
+delete already set, and is not probed: one `head-object' per key is
+unbounded, and §11.8 rejected that for the recursive upload for the same
+reason.  The question names both URIs in full, because the destination
+is taken literally -- `s3 cp' flattens a prefix into whatever it is
+given, so copying videos/ to backup/ puts the objects in backup/, and
+putting them in backup/videos/ means saying so at the prompt."
+  (if (s3-manager-job-recursive job)
+      (progn
+        (unless (yes-or-no-p
+                 (format "Recursively copy everything under %s to %s? "
+                         (s3-manager--job-source-uri job)
+                         (s3-manager--job-uri job)))
+          (user-error "Copy aborted"))
+        (s3-manager--copy-start job))
+    (s3-manager--copy-probe job)))
 
 (defun s3-manager--copy-probe (job)
   "Check whether JOB's destination exists, then run it.
@@ -205,20 +235,22 @@ normalised form, which is what makes them complete."
 
 ;;;###autoload
 (defun s3-manager-copy-to ()
-  "Copy the object at point to another S3 location.
+  "Copy the entry at point to another S3 location.
 
 The service copies it: the bytes never reach this machine.  The
 destination is offered for editing, so what the prompt shows is what
 happens, and an existing object there is named with its size and date
-before it is replaced."
+before it is replaced.
+
+A prefix is copied recursively after a typed `yes', and its destination
+is taken literally rather than gaining the source's own name -- see
+`s3-manager--copy-confirm'."
   (interactive)
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
   (let ((entry (s3-manager--entry-at-point)))
     (unless (s3-manager-entry-p entry)
       (user-error "Copying buckets is not supported"))
-    (when (eq (s3-manager-entry-type entry) 'directory)
-      (user-error "Copying a prefix is not supported yet"))
     (let* ((destination
             (s3-manager--read-destination
              (format "Copy %s to: " (s3-manager-entry-display-name entry))
@@ -228,7 +260,7 @@ before it is replaced."
                                (s3-manager-entry-display-name entry)))))
            (job (s3-manager--copy-job entry (car destination)
                                       (cdr destination))))
-      (s3-manager--copy-probe job))))
+      (s3-manager--copy-confirm job))))
 
 (provide 's3-manager-copy)
 
