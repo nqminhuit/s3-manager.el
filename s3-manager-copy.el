@@ -339,6 +339,82 @@ finishes the job."
                                       (cdr destination) move)))
       (s3-manager--copy-confirm job))))
 
+(defun s3-manager--same-profile-p (buffer)
+  "Return non-nil when BUFFER speaks to the same account as this one.
+One `aws' invocation carries one --profile, and the endpoint follows
+from the profile through `s3-manager--endpoint-for', so a server-side
+copy across two of them is not a command that can be constructed."
+  (equal s3-manager--profile
+         (buffer-local-value 's3-manager--profile buffer)))
+
+(defun s3-manager--copy-target ()
+  "Return the S3 listing `C' should copy into, or nil for a download.
+
+The nearest other window decides, not merely whether a listing is on
+screen anywhere: with Dired beside this listing and a second listing in
+a third window, `C' must still mean the window being aimed at.
+`s3-manager--visible-listing' answers the broader question, which is the
+one `s3-manager-dired-do-copy' needs.
+
+Signals rather than falling back when that window is another profile: a
+download is not what was asked for, and the CLI's own failure would be
+mystifying."
+  (let ((buffer (seq-some
+                 (lambda (window)
+                   (let ((b (window-buffer window)))
+                     (and (or (buffer-local-value 's3-manager--bucket b)
+                              (provided-mode-derived-p
+                               (buffer-local-value 'major-mode b) 'dired-mode))
+                          b)))
+                 (cdr (window-list nil nil (selected-window))))))
+    (when (and buffer (buffer-local-value 's3-manager--bucket buffer))
+      (unless (s3-manager--same-profile-p buffer)
+        (user-error "Cannot copy across profiles: this listing is %s, %s is %s"
+                    (or s3-manager--profile "default")
+                    (buffer-name buffer)
+                    (or (buffer-local-value 's3-manager--profile buffer)
+                        "default")))
+      buffer)))
+
+(defun s3-manager--copy-into (target)
+  "Copy the entry at point into the listing TARGET is showing."
+  (let* ((entry (s3-manager--entry-at-point))
+         (job (s3-manager--copy-job
+               entry
+               (buffer-local-value 's3-manager--bucket target)
+               ;; The other window's prefix, under the source's own name --
+               ;; the Dired reading of "copy this there", and the reason
+               ;; `s3-manager--key-into' is separate from
+               ;; `s3-manager--copy-key', which honours a typed key exactly.
+               (s3-manager--key-into
+                (buffer-local-value 's3-manager--prefix target)
+                (s3-manager-entry-display-name entry)))))
+    ;; `C' writes without having prompted for anywhere, so it confirms.  A
+    ;; prefix is already about to face the typed `yes'.
+    (unless (or (s3-manager-job-recursive job)
+                (y-or-n-p (format "Copy %s to %s? "
+                                  (s3-manager--job-source-uri job)
+                                  (s3-manager--job-uri job))))
+      (user-error "Copy aborted"))
+    (s3-manager--copy-confirm job)))
+
+;;;###autoload
+(defun s3-manager-copy ()
+  "Copy the entry at point to whatever is in the other window.
+
+Dired there means a download, recursively for a prefix.  Another S3
+listing means a server-side copy into its prefix, which is the one thing
+`G' and `R' cannot do.  The mirror of `s3-manager-dired-do-copy', so
+`C' means the same thing wherever it is pressed."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (if-let* ((target (s3-manager--copy-target)))
+      (s3-manager--copy-into target)
+    (if (eq (s3-manager-entry-type (s3-manager--entry-at-point)) 'directory)
+        (s3-manager-get-recursive)
+      (s3-manager-get))))
+
 (provide 's3-manager-copy)
 
 ;;; s3-manager-copy.el ends here

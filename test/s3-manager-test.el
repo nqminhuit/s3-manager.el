@@ -4898,3 +4898,165 @@ this spelling -- dropping the trailing slash on a prefix walks past it."
           :bucket "bk" :key "new.txt" :recursive nil :move t))
         (should (equal reloaded '("new.txt")))))))
 
+;;;; C dispatches on the other window
+
+(defmacro s3-manager-test--with-other-listing (var bucket prefix profile &rest body)
+  "Run BODY with VAR a listing buffer for BUCKET/PREFIX shown in another window."
+  (declare (indent 4))
+  `(let ((,var (generate-new-buffer "*other listing*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer ,var
+             (s3-manager-mode)
+             (setq s3-manager--profile ,profile
+                   s3-manager--bucket ,bucket
+                   s3-manager--prefix ,prefix))
+           (save-window-excursion
+             (delete-other-windows)
+             (set-window-buffer (selected-window) (current-buffer))
+             (set-window-buffer (split-window) ,var)
+             ,@body))
+       (kill-buffer ,var))))
+
+(ert-deftest s3-manager-test-copy-dispatches-to-a-visible-listing ()
+  "Another S3 listing in the other window means a server-side copy."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--with-other-listing other "backup" "keep/" "production"
+            (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-copy)
+                (s3-manager-test--wait-for-argv argv-file 2))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            ;; The destination is the other window's prefix plus the source's
+            ;; own name -- the Dired reading of "copy this there".
+            (should (equal (seq-find (lambda (r) (member "cp" r)) records)
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp"
+                                 "s3://media/README.md"
+                                 "s3://backup/keep/README.md"
+                                 "--progress-frequency" "1")))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-still-downloads-to-dired ()
+  "The v0.2.0 behaviour is unchanged when the other window holds Dired."
+  (skip-unless (require 'dired nil t))
+  (let ((got nil))
+    (s3-manager-test--with-dired dired-buffer '("a.txt")
+      (s3-manager-test--in-object-buffer
+        (s3-manager-test--goto-object)
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) (current-buffer))
+          (set-window-buffer (split-window) dired-buffer)
+          (cl-letf (((symbol-function 's3-manager-get)
+                     (lambda () (setq got 'download)))
+                    ((symbol-function 's3-manager--copy-into)
+                     (lambda (_) (setq got 'server-side))))
+            (s3-manager-copy)))))
+    (should (eq got 'download))))
+
+(ert-deftest s3-manager-test-copy-refuses-across-profiles ()
+  "One invocation carries one --profile, so this is not constructible."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer     ; profile "production"
+          (s3-manager-test--goto-object)
+          (s3-manager-test--with-other-listing other "backup" "" "staging"
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (should-error (s3-manager-copy) :type 'user-error)))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-ignores-a-buried-listing ()
+  "A listing that exists but is displayed nowhere must not hijack `C'."
+  (let ((other (generate-new-buffer "*buried listing*"))
+        (got nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer other
+            (s3-manager-mode)
+            (setq s3-manager--profile "production" s3-manager--bucket "backup"
+                  s3-manager--prefix ""))
+          (s3-manager-test--in-object-buffer
+            (s3-manager-test--goto-object)
+            (save-window-excursion
+              (delete-other-windows)
+              (set-window-buffer (selected-window) (current-buffer))
+              (cl-letf (((symbol-function 's3-manager-get)
+                         (lambda () (setq got 'download)))
+                        ((symbol-function 's3-manager--copy-into)
+                         (lambda (_) (setq got 'server-side))))
+                (s3-manager-copy))))
+          (should (eq got 'download)))
+      (kill-buffer other))))
+
+(ert-deftest s3-manager-test-copy-target-excludes-the-selected-window ()
+  "Asked from the listing itself, the answer is not that listing."
+  (s3-manager-test--in-object-buffer
+    (save-window-excursion
+      (delete-other-windows)
+      (set-window-buffer (selected-window) (current-buffer))
+      (should-not (s3-manager--copy-target)))))
+
+(ert-deftest s3-manager-test-copy-prefers-the-nearest-window ()
+  "With Dired nearer than a second listing, `C' still means Dired.
+
+`s3-manager--visible-listing' answers whether any listing is on screen,
+which is the question `s3-manager-dired-do-copy' needs and the wrong one here:
+it would turn a download into a server-side copy because of a window the
+user was not aiming at."
+  (skip-unless (require 'dired nil t))
+  (let ((other (generate-new-buffer "*third window listing*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer other
+            (s3-manager-mode)
+            (setq s3-manager--profile "production" s3-manager--bucket "backup"
+                  s3-manager--prefix ""))
+          (s3-manager-test--with-dired dired-buffer '("a.txt")
+            (s3-manager-test--in-object-buffer
+              (save-window-excursion
+                (delete-other-windows)
+                (set-window-buffer (selected-window) (current-buffer))
+                (split-window) (split-window)
+                (let ((others (cdr (window-list nil nil (selected-window)))))
+                  ;; Dired nearest, the second listing beyond it.
+                  (set-window-buffer (nth 0 others) dired-buffer)
+                  (set-window-buffer (nth 1 others) other)
+                  (should-not (s3-manager--copy-target))
+                  ;; Swapped, the listing wins.
+                  (set-window-buffer (nth 0 others) other)
+                  (set-window-buffer (nth 1 others) dired-buffer)
+                  (should (eq (s3-manager--copy-target) other)))))))
+      (kill-buffer other))))
+
+(ert-deftest s3-manager-test-copy-dispatches-a-prefix-under-its-own-name ()
+  "`C' on a prefix must nest it, not flatten it into the destination.
+
+For an object `s3-manager--copy-key' would append the leaf anyway, so
+only a prefix shows whether `s3-manager--key-into' was applied: the
+destination has to be keep/images/, never keep/."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-directory)   ; images/
+          (s3-manager-test--with-other-listing other "backup" "keep/" "production"
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-copy)
+                (s3-manager-test--wait-for-argv argv-file 1))))
+          (let ((transfer (seq-find (lambda (r) (member "cp" r))
+                                    (s3-manager-test--argv-records argv-file))))
+            (should (member "s3://backup/keep/images/" transfer))
+            (should-not (member "s3://backup/keep/" transfer))
+            (should (member "--recursive" transfer))))
+      (delete-file argv-file))))
+

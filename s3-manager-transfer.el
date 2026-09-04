@@ -139,18 +139,6 @@ set up in advance."
              "--progress-frequency" "1")
        (format "downloading %s to %s" key (abbreviate-file-name destination))))))
 
-(defun s3-manager-copy ()
-  "Copy the entry at point to the directory in the other window.
-An object downloads, a prefix downloads recursively; both prompt with
-the Dired window pre-filled, as `dired-do-copy' does.  The mirror of
-`s3-manager-dired-do-copy', so `C' means the same thing on both sides."
-  (interactive)
-  (unless s3-manager--bucket
-    (user-error "Not an object listing"))
-  (if (eq (s3-manager-entry-type (s3-manager--entry-at-point)) 'directory)
-      (s3-manager-get-recursive)
-    (s3-manager-get)))
-
 (defun s3-manager-get-recursive ()
   "Download every object under the prefix at point."
   (interactive)
