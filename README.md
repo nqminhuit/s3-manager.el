@@ -28,7 +28,7 @@ and send everything to `amazonaws.com`; the package warns if it finds one.
 
 ## Installation
 
-Not on MELPA.
+From GitHub:
 
 ```elisp
 (use-package s3-manager

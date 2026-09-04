@@ -1853,7 +1853,6 @@ wrapper.
 | ~~0.2.0~~ | ~~Upload~~ | **Shipped** — §11.8 |
 | ~~0.3.0~~ | ~~Dired integration~~ | **Shipped early** — §11.9 |
 | 0.3.0 | Copy and move between S3 locations | Yes — `s3 cp` with two S3 URIs; the overwrite probe generalizes |
-| 0.3.0 | `package-lint` / MELPA readiness | Partly — naming and docstring discipline, but the multi-file layout needs checking |
 | 0.4.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
 | 0.4.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
 | 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
@@ -1862,6 +1861,14 @@ wrapper.
 **No seam is left** for: a native AWS SDK (would replace the transport layer
 wholesale), recursive listing in the UI (deliberately excluded — see §5.1), or
 server-side sync.
+
+**Distribution is GitHub only.** MELPA submission is not planned, so
+`package-lint` conformance is not a release gate. For the record, the multi-file
+layout is already clean under it: with `package-lint-main-file` set to
+`s3-manager.el` the seven secondary files report nothing, and the entry point
+reports one cosmetic warning about the summary line. Linting the secondary files
+without that setting produces noise, because each is then judged as a package of
+its own.
 
 ---
 
