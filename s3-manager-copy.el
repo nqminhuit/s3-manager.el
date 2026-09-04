@@ -415,6 +415,60 @@ listing means a server-side copy into its prefix, which is the one thing
         (s3-manager-get-recursive)
       (s3-manager-get))))
 
+;;;###autoload
+(defun s3-manager-copy-dry-run (&optional move)
+  "Show what copying the entry at point elsewhere would do, doing nothing.
+With a prefix argument MOVE, preview a move instead.
+
+The preview a recursive transfer deserves, and most of all a recursive
+move: it names every object that would be written, before any source is
+deleted.  The destination is asked for the same way the transfer would
+ask, or this would be previewing a different operation, and the guards
+run first, so a self-move is refused here too.
+
+No overwrite check.  `--dryrun' reports what would be sent, not what
+would be replaced, and pretending otherwise would need one probe per
+key -- the same caveat `s3-manager-upload-dry-run' carries."
+  (interactive "P")
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (let ((entry (s3-manager--entry-at-point)))
+    (unless (s3-manager-entry-p entry)
+      (user-error "Buckets cannot be copied"))
+    (let* ((destination
+            (s3-manager--read-destination
+             (format "Preview %s of %s to: "
+                     (if move "move" "copy")
+                     (s3-manager-entry-display-name entry))
+             (s3-manager--uri s3-manager--bucket
+                              (s3-manager--key-into
+                               s3-manager--prefix
+                               (s3-manager-entry-display-name entry)))))
+           (job (s3-manager--copy-job entry (car destination)
+                                      (cdr destination) move)))
+      (message "S3: listing what %s would do..." (s3-manager--job-describe job))
+      (s3-manager--aws-async
+       (s3-manager--copy-args job t)
+       :profile s3-manager--profile
+       :buffer (current-buffer)
+       :parse nil
+       ;; Enumerates the whole prefix; no fixed deadline fits one.
+       :timeout s3-manager-transfer-timeout
+       :name "s3-copy-dryrun"
+       :on-success
+       (lambda (output)
+         (s3-manager--show-dry-run
+          (format "Would %s %s to %s:"
+                  (s3-manager--job-verb job)
+                  (s3-manager--job-source-uri job)
+                  (s3-manager--job-uri job))
+          output))
+       :on-error
+       (lambda (err)
+         (s3-manager--report-error
+          err (format "s3 %s --dryrun"
+                      (if (s3-manager-job-move job) "mv" "cp"))))))))
+
 (provide 's3-manager-copy)
 
 ;;; s3-manager-copy.el ends here

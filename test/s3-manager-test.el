@@ -5060,3 +5060,87 @@ destination has to be keep/images/, never keep/."
             (should (member "--recursive" transfer))))
       (delete-file argv-file))))
 
+;;;; Copy dry run
+
+(ert-deftest s3-manager-test-copy-dry-run-matches-the-copy-it-previews ()
+  "Every argument deciding *what* moves must be identical in both forms.
+A preview that could describe something other than the transfer it
+previews would be worse than no preview at all."
+  (dolist (move '(nil t))
+    (dolist (recursive '(nil t))
+      (let* ((job (s3-manager-copy-job--create
+                   :profile "p" :source-bucket "a" :source-key "k"
+                   :bucket "b" :key "k2" :recursive recursive :move move))
+             (real (s3-manager--copy-args job))
+             (preview (s3-manager--copy-args job t))
+             (decisive (lambda (args)
+                         (seq-remove
+                          (lambda (a)
+                            (member a '("--dryrun" "--progress-frequency" "1")))
+                          args))))
+        (should (equal (funcall decisive real) (funcall decisive preview)))
+        (should (member "--dryrun" preview))
+        (should-not (member "--dryrun" real))
+        ;; --progress-frequency has nothing to report on a dry run.
+        (should-not (member "--progress-frequency" preview))
+        ;; The verb travels with the job, so a move is previewed as a move.
+        (should (member (if move "mv" "cp") preview))))))
+
+(ert-deftest s3-manager-test-copy-dry-run-renders-and-writes-nothing ()
+  "The preview lands in the shared buffer, and no transfer starts."
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--with-fresh-dry-run-buffer
+          (s3-manager-test--in-object-buffer
+            (s3-manager-test--goto-object)
+            (s3-manager-test--copying-to "s3://backup/README.md"
+              (cl-letf (((symbol-function 'display-buffer) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "(dryrun) copy: s3://media/README.md to s3://backup/README.md\n"
+                     :argv-file argv-file)
+                  (s3-manager-copy-dry-run)
+                  ;; The argv is recorded before the output is rendered, so
+                  ;; waiting on it alone races the buffer this asserts on.
+                  (should (s3-manager-test--wait
+                           (lambda () (s3-manager-test--dry-run-text))))))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (= 1 (length records)))
+            (should (member "--dryrun" (car records)))
+            (should-not (member "--progress-frequency" (car records))))
+          (let ((text (s3-manager-test--dry-run-text)))
+            (should (string-match-p "Would copy s3://media/README.md" text))
+            (should (string-match-p "(dryrun) copy:" text))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-dry-run-previews-a-move-with-a-prefix-arg ()
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--with-fresh-dry-run-buffer
+          (s3-manager-test--in-object-buffer
+            (s3-manager-test--goto-object)
+            (s3-manager-test--copying-to "s3://media/renamed.md"
+              (cl-letf (((symbol-function 'display-buffer) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "(dryrun) move: x to y\n" :argv-file argv-file)
+                  (s3-manager-copy-dry-run t)
+                  (should (s3-manager-test--wait
+                           (lambda () (s3-manager-test--dry-run-text))))))))
+          (should (member "mv" (car (s3-manager-test--argv-records argv-file))))
+          (should (string-match-p "Would move"
+                                  (s3-manager-test--dry-run-text))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-dry-run-refuses-a-self-copy ()
+  "The guards run before the preview, so it cannot preview the impossible."
+  (let ((argv-file (make-temp-file "s3-dryrun-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/README.md"
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (should-error (s3-manager-copy-dry-run) :type 'user-error)))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
