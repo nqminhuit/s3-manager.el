@@ -689,13 +689,18 @@ S3 Manager: no AWS profiles found. Run `aws configure' first.
 ### 7.2 Selection
 
 ```elisp
-(completing-read "S3 profile: " profiles nil t nil
+(completing-read "S3 profile (missing one? M-x s3-manager-forget-profiles): "
+                 profiles nil t nil
                  's3-manager--profile-history
                  (car s3-manager--profile-history))
 ```
 
 A history variable is used so that repeat invocations default sensibly, and the
 most recent choice is the default, so re-selecting is a single `RET`.
+
+The prompt names `s3-manager-forget-profiles` because the list is cached for
+the session: a profile added to `~/.aws/config` after the first discovery is
+not in it, and the prompt is the one place the absence is noticed.
 
 **The prompt must not run inside a process sentinel.** Discovery is
 asynchronous, so the naive arrangement — prompt from the `on-success`

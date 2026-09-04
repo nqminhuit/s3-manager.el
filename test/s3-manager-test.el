@@ -1224,6 +1224,16 @@ timers as well as sentinels."
       (should (equal collection '("default" "production")))
       (should (equal chosen "production")))))
 
+(ert-deftest s3-manager-test-read-profile-prompt-names-the-refresh ()
+  "The list is cached for the session, so the prompt says how to re-read it."
+  (s3-manager-test--with-clean-profiles
+    (setq s3-manager--profiles '("default"))
+    (let (prompt)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (p &rest _) (setq prompt p) "default")))
+        (s3-manager-read-profile #'ignore))
+      (should (string-match-p "s3-manager-forget-profiles" prompt)))))
+
 (ert-deftest s3-manager-test-read-profile-with-none-configured ()
   "With no profiles there is nothing to prompt for; say so, do not prompt."
   (s3-manager-test--with-clean-profiles

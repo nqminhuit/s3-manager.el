@@ -533,16 +533,21 @@ sentinel, so it is safe for it to prompt."
   "Prompt for an AWS profile and call CALLBACK with the chosen name.
 
 Does nothing but report when no profiles are configured.  The default is
-the most recently chosen profile, so repeat use is a single RET."
+the most recently chosen profile, so repeat use is a single RET.
+
+The prompt names `s3-manager-forget-profiles': the list is cached for
+the session, so a profile added to ~/.aws since then is absent."
   (s3-manager--with-profiles
    (lambda (profiles)
      (if (null profiles)
          (message
           "S3: no AWS profiles found.  Run `aws configure' to create one")
-       (funcall callback
-                (completing-read "S3 profile: " profiles nil t nil
-                                 's3-manager--profile-history
-                                 (car s3-manager--profile-history)))))))
+       (funcall
+        callback
+        (completing-read
+         "S3 profile (missing one? M-x s3-manager-forget-profiles): "
+         profiles nil t nil 's3-manager--profile-history
+         (car s3-manager--profile-history)))))))
 
 ;;;###autoload
 (defun s3-manager-forget-profiles ()

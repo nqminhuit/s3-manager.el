@@ -3,6 +3,14 @@
 All notable changes to `s3-manager.el`. Dates are the release date; the design
 document is `doc/SPEC.md`.
 
+## Unreleased
+
+### Changed
+
+- The profile prompt names `s3-manager-forget-profiles`. The list is read once
+  per session, so a profile added to `~/.aws` afterwards is missing from it,
+  and the prompt is where that is noticed.
+
 ## 0.2.0 — 2026-09-04
 
 ### Added
