@@ -141,6 +141,13 @@ That is what `M-x s3-manager-upload-dry-run` is for: it names every object that
 would be created, before any of them are, resolving links exactly as the upload
 would. Worth running once on anything you have not sent before.
 
+### Two windows
+
+With a Dired buffer visible in another window, `G`, `R` and `P` all default to
+its directory instead of `s3-manager-download-directory` — the same thing
+`dired-dwim-target` does between two Dired buffers, and it is honoured, so
+setting it to nil turns this off too.
+
 ### When something fails
 
 Failures are never summarised away. Every one is appended to `*S3 Manager

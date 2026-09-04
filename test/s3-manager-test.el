@@ -2683,6 +2683,59 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
 
 
+;;;; Dired interoperability
+
+(ert-deftest s3-manager-test-dwim-directory-follows-the-option ()
+  "A visible Dired buffer decides the default, but only when
+`dired-dwim-target' is on: nil there means the user does not want it."
+  (skip-unless (require 'dired-aux nil t))
+  (cl-letf (((symbol-function 'dired-dwim-target-directory)
+             (lambda () "/tmp/from-dired/")))
+    (let ((dired-dwim-target t))
+      (should (equal (s3-manager--dwim-directory) "/tmp/from-dired/")))
+    (let ((dired-dwim-target nil))
+      (should (null (s3-manager--dwim-directory))))))
+
+(ert-deftest s3-manager-test-local-default-prefers-the-dired-window ()
+  "Both directions default to the other window, falling back to the
+download directory when there is no Dired buffer to borrow from."
+  (cl-letf (((symbol-function 's3-manager--dwim-directory)
+             (lambda () "/tmp/from-dired")))
+    (should (equal (s3-manager--local-default-directory) "/tmp/from-dired/")))
+  (cl-letf (((symbol-function 's3-manager--dwim-directory) (lambda () nil)))
+    (let ((s3-manager-download-directory "/tmp/downloads"))
+      (should (equal (s3-manager--local-default-directory) "/tmp/downloads/")))))
+
+(ert-deftest s3-manager-test-download-defaults-to-the-dired-window ()
+  "`G' offers the Dired directory rather than `s3-manager-download-directory'."
+  (let ((offered nil)
+        (target (file-name-as-directory (make-temp-file "s3-dired" t))))
+    (unwind-protect
+        (cl-letf (((symbol-function 's3-manager--dwim-directory)
+                   (lambda () target))
+                  ((symbol-function 'read-file-name)
+                   (lambda (_prompt dir &rest _)
+                     (setq offered dir)
+                     (expand-file-name "README.md" dir))))
+          (let ((s3-manager-download-directory "/tmp/never-used/"))
+            (s3-manager--read-destination-file "README.md"))
+          (should (equal offered target)))
+      (delete-directory target t))))
+
+(ert-deftest s3-manager-test-upload-defaults-to-the-dired-window ()
+  "`P' offers the same directory, so the two-window workflow is symmetric."
+  (let ((offered nil)
+        (source (make-temp-file "s3-upload" nil ".txt" "x\n")))
+    (unwind-protect
+        (cl-letf (((symbol-function 's3-manager--dwim-directory)
+                   (lambda () "/tmp/from-dired"))
+                  ((symbol-function 'read-file-name)
+                   (lambda (_prompt dir &rest _) (setq offered dir) source)))
+          (s3-manager--upload-source)
+          (should (equal offered "/tmp/from-dired/")))
+      (delete-file source))))
+
+
 ;;;; Upload
 
 (defconst s3-manager-test--head-404

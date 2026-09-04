@@ -32,6 +32,14 @@
 
 (declare-function dired-dwim-target-directory "dired-aux" ())
 
+(defun s3-manager--local-default-directory ()
+  "Return the directory local paths should default to.
+A Dired buffer in another window wins, so the two-window copy workflow
+works in both directions; otherwise `s3-manager-download-directory'."
+  (file-name-as-directory
+   (expand-file-name (or (s3-manager--dwim-directory)
+                         s3-manager-download-directory))))
+
 (defun s3-manager--dwim-directory ()
   "Return a Dired directory visible in another window, or nil.
 
@@ -90,8 +98,7 @@ set up in advance."
 
 (defun s3-manager--read-destination-file (name)
   "Read a local destination for an object called NAME."
-  (let* ((directory (file-name-as-directory
-                     (expand-file-name s3-manager-download-directory)))
+  (let* ((directory (s3-manager--local-default-directory))
          (chosen (expand-file-name
                   (read-file-name (format "Download %s to: " name)
                                   directory nil nil name)))
@@ -139,7 +146,7 @@ set up in advance."
     (let* ((prefix (s3-manager-entry-key entry))
            (leaf (directory-file-name (s3-manager-entry-display-name entry)))
            (default (expand-file-name
-                     leaf (expand-file-name s3-manager-download-directory)))
+                     leaf (s3-manager--local-default-directory)))
            (destination (file-name-as-directory
                          (expand-file-name
                           (read-directory-name
@@ -182,7 +189,8 @@ Writing the leaf into the destination is what keeps it."
   "Read a local file or directory to upload, and return its absolute path."
   (let ((source (expand-file-name
                  (read-file-name "Upload file or directory: "
-                                 (s3-manager--dwim-directory) nil t))))
+                                 (s3-manager--local-default-directory)
+                                 nil t))))
     ;; MUSTMATCH is advisory -- a default, a history entry, or completion
     ;; ignoring it all reach here -- and these checks also narrow the window
     ;; between this prompt and the transfer, which for a single file spans a
