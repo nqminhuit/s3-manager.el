@@ -5279,3 +5279,16 @@ point on a row every command refuses."
                           (while (null (tabulated-list-get-id)) (forward-line 1))
                           (point))))))
 
+(ert-deftest s3-manager-test-gg-still-takes-a-count ()
+  "`5gg' is the Evil idiom, and binding `gg' ourselves must not cost it."
+  (s3-manager-test--in-object-buffer
+    (goto-char (point-max))
+    (s3-manager-beginning-of-listing 3)
+    (should (= 3 (line-number-at-pos)))
+    ;; The count is a line number, as Evil and `goto-line' both mean it --
+    ;; not an index into the entries, which would silently differ by the
+    ;; header row.
+    (goto-char (point-max))
+    (s3-manager-beginning-of-listing 1)
+    (should (= 1 (line-number-at-pos)))))
+

@@ -1100,11 +1100,14 @@ key on the map to duplicate `C` would waste it.
 `gr` reverts, `gg` is left to Evil -- and binding `g` itself would swallow
 `gg`, since this map is registered as overriding and anything it resolves beats
 Evil, an inherited `g` from `special-mode` included. `gg` is bound rather than
-left to Evil so that it works without Evil too, and it is
-`s3-manager-beginning-of-listing` rather than `beginning-of-buffer`: this mode
-sets `tabulated-list-use-header-line` to nil, spending the header line on the
+left to Evil, and it is `s3-manager-beginning-of-listing` rather than
+`beginning-of-buffer` or `evil-goto-first-line`. Both of those go to line 1,
+and line 1 here is the column header: this mode sets
+`tabulated-list-use-header-line` to nil, spending the header line on the
 profile and prefix, so the column names are a real line in the buffer with no
-entry behind them and every command refuses it.
+entry behind them — measured, `tabulated-list-get-id` returns nil there and
+every command in this map refuses the row. Binding it also gives `gg` to users
+without Evil. It takes a count, so `5gg` still means line 5.
 
 The `d`/`x` split follows Dired: `d` marks, `x` executes. Making `d` delete
 immediately would put the destructive action on one of the most easily mistyped

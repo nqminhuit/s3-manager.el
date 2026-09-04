@@ -46,7 +46,7 @@ From GitHub:
 | `^` | up one level |
 | `+` | fetch the next page of a truncated listing |
 | `g r` / `C-u g r` | refresh; with `C-u`, drop every cached listing for the bucket |
-| `g g` | first row of the listing |
+| `g g` / `5 g g` | first row of the listing / line 5 |
 | `C` | copy toward the other window — download, or a server-side copy into another listing |
 | `c` | copy to another S3 location, server-side |
 | `r` | rename, or move elsewhere in S3 |

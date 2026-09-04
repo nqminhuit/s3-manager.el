@@ -504,18 +504,24 @@ TARGET, when given, is the entry to put point on once the listing lands."
      (t
       (s3-manager-view)))))
 
-(defun s3-manager-beginning-of-listing ()
-  "Move to the first row of the listing.
+(defun s3-manager-beginning-of-listing (&optional count)
+  "Move to the first row of the listing, or to line COUNT.
 
-`beginning-of-buffer' would land on the column header: this mode sets
-`tabulated-list-use-header-line' to nil, because the header line is
-spent on the profile and prefix, so those column names are a real line
-in the buffer with no entry behind them.  Every command here refuses a
-row without one, so `gg' has to skip it."
-  (interactive)
+Bound to `gg', and it takes a count the way Evil's own `gg' does, so
+`5gg' still goes to line 5.
+
+Without a count it does not go to line 1, which is what
+`evil-goto-first-line' and `beginning-of-buffer' both do and what makes
+them wrong here: this mode sets `tabulated-list-use-header-line' to nil,
+spending the header line on the profile and prefix, so the column names
+are a real line in the buffer with no entry behind them.  Every command
+in this map refuses such a row, so landing there is landing nowhere."
+  (interactive "P")
   (goto-char (point-min))
-  (while (and (not (eobp)) (null (tabulated-list-get-id)))
-    (forward-line 1)))
+  (if count
+      (forward-line (1- (prefix-numeric-value count)))
+    (while (and (not (eobp)) (null (tabulated-list-get-id)))
+      (forward-line 1))))
 
 (defun s3-manager-up ()
   "Move to the parent prefix, or back to the bucket list."
