@@ -298,25 +298,30 @@ called on failure too."
      ;; exactly as in `s3-manager--delete-prefix'.
      (lambda () (funcall finish nil)))))
 
-(defun s3-manager--upload-later (buffer thunk)
+(defun s3-manager--prompt-later (buffer thunk &optional context)
   "Run THUNK in BUFFER from a zero-second timer.
+CONTEXT names the operation in a failure report, and defaults to
+\"Upload\" -- the only caller when this was written, and now one of
+several.
+
 A prompt inside a process sentinel re-enters the minibuffer from
 wherever Emacs happened to be; `s3-manager--profiles-resolved' takes the
 same hop.  Both branches take it, so ordering does not depend on the
 answer.  A `user-error' from THUNK is the user declining; anything else
 is reported, since a signal inside a timer is easy to miss."
-  (run-at-time
-   0 nil
-   (lambda ()
-     (when (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (condition-case err
-             (funcall thunk)
-           (user-error (message "S3: %s" (error-message-string err)))
-           (error
-            (s3-manager--report-error
-             (s3-manager--local-error "Upload" (error-message-string err))
-             "upload"))))))))
+  (let ((context (or context "Upload")))
+    (run-at-time
+     0 nil
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (condition-case err
+               (funcall thunk)
+             (user-error (message "S3: %s" (error-message-string err)))
+             (error
+              (s3-manager--report-error
+               (s3-manager--local-error context (error-message-string err))
+               (downcase context))))))))))
 
 (defun s3-manager--head-object-absent-p (err)
   "Return non-nil when ERR is `head-object' reporting that the key is absent.
@@ -331,9 +336,13 @@ identical across S3-compatible endpoints."
         "An error occurred (404) when calling the HeadObject operation"
         (or (nth 3 err) ""))))
 
-(defun s3-manager--upload-confirm-overwrite (response uri)
+(defun s3-manager--confirm-overwrite (response uri &optional aborted)
   "Confirm overwriting URI, which `head-object' RESPONSE says exists.
-Signals a `user-error' when the answer is no."
+Signals a `user-error' reading ABORTED, by default \"Upload aborted\",
+when the answer is no.
+
+The service's own size and date, not ours: they are what tells the user
+whether the object about to be replaced is the one they think it is."
   (unless (y-or-n-p
            (format "%s already exists (%s, modified %s).  Overwrite? "
                    uri
@@ -341,54 +350,72 @@ Signals a `user-error' when the answer is no."
                     (alist-get 'ContentLength response))
                    (s3-manager--format-date
                     (alist-get 'LastModified response))))
-    (user-error "Upload aborted")))
+    (user-error "%s" (or aborted "Upload aborted"))))
 
-(defun s3-manager--upload-probe (source uri key prefix)
-  "Check whether KEY exists, then upload SOURCE to URI.
+(defun s3-manager--head-object-args (bucket key)
+  "Return the `head-object' arguments probing KEY in BUCKET."
+  (list "s3api" "head-object" "--bucket" bucket "--key" key "--output" "json"))
 
-`aws s3 cp' overwrites without a word and has no flag that would stop
-it, so `s3api head-object' is the only way to ask first."
+(defun s3-manager--head-object (bucket key on-present on-absent on-unknown)
+  "Ask whether KEY exists in BUCKET, then take one of three branches.
+ON-PRESENT is called with the parsed response; the other two take no
+arguments.  ON-UNKNOWN means the check itself failed, and the failure
+has already been reported by the time it runs.
+
+BUCKET is explicit because a copy's destination need not be the bucket
+this buffer is showing.  The profile is this buffer's and must be: one
+invocation carries one --profile.
+
+Every branch goes through `s3-manager--prompt-later'.  This runs in a
+sentinel and all three callers may prompt, so none of them can run
+where the answer arrives."
   (let ((origin (current-buffer)))
-    (message "S3: checking %s..." uri)
     (s3-manager--aws-async
-     (list "s3api" "head-object"
-           "--bucket" s3-manager--bucket "--key" key
-           "--output" "json")
+     (s3-manager--head-object-args bucket key)
      :profile s3-manager--profile
      :buffer origin
      ;; No :register -- that slot belongs to the listing, and taking it would
      ;; orphan a fetch in flight and let `^' cancel this probe.  No
-     ;; :generation either: the user asked for this upload and must get an
-     ;; answer even if they have navigated since, which is also why URI, KEY
-     ;; and PREFIX were captured before the call.
+     ;; :generation either: the user asked for this and must get an answer
+     ;; even if they have navigated since, which is why the caller captures
+     ;; everything it will need before calling.
      :name "s3-head-object"
-     :on-success
-     (lambda (response)
-       (s3-manager--upload-later
-        origin
-        (lambda ()
-          (s3-manager--upload-confirm-overwrite response uri)
-          (s3-manager--upload-start source uri key prefix))))
+     :on-success (lambda (response)
+                   (s3-manager--prompt-later
+                    origin (lambda () (funcall on-present response))))
      :on-error
      (lambda (err)
        (if (s3-manager--head-object-absent-p err)
-           (s3-manager--upload-later
-            origin
-            (lambda () (s3-manager--upload-start source uri key prefix)))
+           (s3-manager--prompt-later origin on-absent)
          ;; Not absence: the check itself failed.  Real AWS answers 403
          ;; rather than 404 for a missing key when the caller lacks
-         ;; s3:ListBucket, so refusing outright would make upload useless
-         ;; under a tight policy -- but proceeding silently would be an
-         ;; unannounced overwrite.  Report it, then ask.
+         ;; s3:ListBucket, so refusing outright would make this useless under
+         ;; a tight policy -- but proceeding silently would be an unannounced
+         ;; overwrite.  Report it, then let the caller ask.
          (s3-manager--report-error err "head-object")
-         (s3-manager--upload-later
-          origin
-          (lambda ()
-            (unless (y-or-n-p
-                     (format "Could not check whether %s exists.  Upload anyway? "
-                             uri))
-              (user-error "Upload aborted"))
-            (s3-manager--upload-start source uri key prefix))))))))
+         (s3-manager--prompt-later origin on-unknown))))))
+
+(defun s3-manager--upload-probe (source uri key prefix)
+  "Check whether KEY exists, then upload SOURCE to URI.
+
+`aws s3 cp' overwrites without a word, so `s3api head-object' is the
+only way to ask first.  The CLI grew a `--no-overwrite' flag, but it
+skips silently rather than asking, and its availability at the AWS CLI
+version this package requires is not established."
+  (message "S3: checking %s..." uri)
+  (let ((start (lambda () (s3-manager--upload-start source uri key prefix))))
+    (s3-manager--head-object
+     s3-manager--bucket key
+     (lambda (response)
+       (s3-manager--confirm-overwrite response uri)
+       (funcall start))
+     start
+     (lambda ()
+       (unless (y-or-n-p
+                (format "Could not check whether %s exists.  Upload anyway? "
+                        uri))
+         (user-error "Upload aborted"))
+       (funcall start)))))
 
 (defun s3-manager-upload ()
   "Upload a local file or directory into the prefix being shown.
@@ -466,8 +493,10 @@ reproducible, and the probes are dwarfed by the transfer that follows."
       (funcall done (nreverse existing) (nreverse unchecked))
     (let ((key (car keys)) (rest (cdr keys)))
       (s3-manager--aws-async
-       (list "s3api" "head-object" "--bucket" s3-manager--bucket
-             "--key" key "--output" "json")
+       ;; The argv helper, deliberately not `s3-manager--head-object': these
+       ;; callbacks classify and chain, never prompt, and its timer hop would
+       ;; defer every step of the batch for no reason.
+       (s3-manager--head-object-args s3-manager--bucket key)
        :profile s3-manager--profile
        :buffer (current-buffer)
        :name "s3-head-object"
@@ -577,7 +606,7 @@ but a prompt per file is not."
         (s3-manager--upload-probe-each
          keys nil nil
          (lambda (existing unchecked)
-           (s3-manager--upload-later
+           (s3-manager--prompt-later
             origin
             (lambda ()
               (let ((question

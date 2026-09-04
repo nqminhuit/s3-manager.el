@@ -3431,12 +3431,58 @@ transfer is `s3', where they mean partial success."
     (cl-letf (((symbol-function 'y-or-n-p)
                (lambda (p) (setq prompt p) nil)))
       (should-error
-       (s3-manager--upload-confirm-overwrite
+       (s3-manager--confirm-overwrite
         (s3-manager-test--json "head-object.json") "s3://media/README.md")
        :type 'user-error))
     (should (string-match-p "s3://media/README.md" prompt))
     (should (string-match-p "12 MiB" prompt))
     (should (string-match-p "2026-09-01" prompt))))
+
+(ert-deftest s3-manager-test-confirm-overwrite-names-the-operation ()
+  "Copy and move must not report themselves as an aborted upload."
+  (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+    (should-error (s3-manager--confirm-overwrite
+                   (s3-manager-test--json "head-object.json") "s3://b/k")
+                  :type 'user-error)
+    ;; The message is the argument, so a caller can say which verb it was.
+    (should (equal (cadr (should-error
+                          (s3-manager--confirm-overwrite
+                           (s3-manager-test--json "head-object.json")
+                           "s3://b/k" "Move aborted")
+                          :type 'user-error))
+                   "Move aborted"))))
+
+(ert-deftest s3-manager-test-head-object-args-name-the-bucket ()
+  "A copy probes its destination, which need not be this buffer's bucket."
+  (should (equal (s3-manager--head-object-args "backup" "a/b.txt")
+                 '("s3api" "head-object" "--bucket" "backup"
+                   "--key" "a/b.txt" "--output" "json"))))
+
+(ert-deftest s3-manager-test-head-object-probes-the-bucket-it-was-given ()
+  "The whole point of the extraction: probe the destination, not the source.
+
+Probing this buffer's bucket for a cross-bucket copy would report the
+size and date of the *source* while describing the destination, and
+would miss an existing destination entirely."
+  (let ((argv-file (make-temp-file "s3-head-argv"))
+        (branch nil))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer      ; bucket is "media"
+          (should (equal s3-manager--bucket "media"))
+          (s3-manager-test--with-fake-aws
+              (:head-exit 254 :head-stderr s3-manager-test--head-404
+               :argv-file argv-file)
+            (s3-manager--head-object
+             "backup" "a.txt"
+             (lambda (_) (setq branch 'present))
+             (lambda () (setq branch 'absent))
+             (lambda () (setq branch 'unknown)))
+            (should (s3-manager-test--wait (lambda () branch))))
+          (should (eq branch 'absent))
+          (let ((argv (car (s3-manager-test--argv-records argv-file))))
+            (should (member "backup" argv))
+            (should-not (member "media" argv))))
+      (delete-file argv-file))))
 
 (ert-deftest s3-manager-test-upload-refusal-transfers-nothing ()
   "Declining the overwrite must leave the object untouched."
