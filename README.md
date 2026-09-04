@@ -46,7 +46,7 @@ From GitHub:
 | `^` | up one level |
 | `+` | fetch the next page of a truncated listing |
 | `g` / `C-u g` | refresh; with `C-u`, drop every cached listing for the bucket |
-| `C` | copy to the other window — Dired downloads, an S3 listing copies server-side |
+| `C` | copy toward the other window — download, or a server-side copy into another listing |
 | `c` | copy to another S3 location, server-side |
 | `r` | rename, or move elsewhere in S3 |
 | `P` | upload a local file, or a directory recursively |
@@ -56,15 +56,11 @@ From GitHub:
 | `!` | show the accumulated error reports |
 | `n` / `p` / `q` | next line / previous line / bury |
 
-**`C` is the download key.** With nothing in the other window it prompts for a
-path, exactly as a dedicated download key would; with Dired there it uses that
-directory. So `s3-manager-get` and `s3-manager-get-recursive` have no binding of
-their own — reach them with `M-x` on the rare occasion you want a download
-*while* a second S3 listing is on screen, where `C` would copy server-side
-instead. Leaving `G` unbound also hands it back to Evil for end-of-buffer.
+**`C` downloads.** With nothing in the other window it prompts for a path; with
+Dired there it uses that directory, honouring `dired-dwim-target`. A prefix
+comes down recursively.
 
-Also `M-x`: `s3-manager-get`, `s3-manager-get-recursive`,
-`s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
+Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
 `s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
 `s3-manager-clear-cache`, `s3-manager-forget-profiles`,
 `s3-manager-list-profiles`.
@@ -91,8 +87,8 @@ recursive move into "copy every object onto itself, then delete it".
 
 With a Dired buffer beside a listing, `C` copies toward the other window in
 both directions. With a *second S3 listing* there instead, `C` copies into its
-prefix, server-side. `C` and `P` default their path there too, honouring
-`dired-dwim-target`. For the Dired half, bind it yourself:
+prefix, server-side. `P` defaults its path there too. For the Dired half, bind
+it yourself:
 
 ```elisp
 (keymap-set dired-mode-map "C" #'s3-manager-dired-do-copy)
