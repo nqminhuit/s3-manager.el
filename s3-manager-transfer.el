@@ -112,14 +112,14 @@ set up in advance."
            (if (file-directory-p chosen)
                (expand-file-name name chosen)
              chosen)))
-    ;; `aws s3 cp' overwrites without asking, so this is the only chance.
-    (when (and (file-exists-p destination)
-               (not (y-or-n-p (format "%s exists.  Overwrite? " destination))))
-      (user-error "Download aborted"))
-    (let ((parent (file-name-directory destination)))
-      (unless (file-directory-p parent)
-        (make-directory parent t)))
-    destination)))
+      ;; `aws s3 cp' overwrites without asking, so this is the only chance.
+      (when (and (file-exists-p destination)
+                 (not (y-or-n-p (format "%s exists.  Overwrite? " destination))))
+        (user-error "Download aborted"))
+      (let ((parent (file-name-directory destination)))
+        (unless (file-directory-p parent)
+          (make-directory parent t)))
+      destination)))
 
 (defun s3-manager-get ()
   "Download the object at point."
@@ -138,6 +138,18 @@ set up in advance."
        (list "s3" "cp" (s3-manager--s3-uri key) destination
              "--progress-frequency" "1")
        (format "downloading %s to %s" key (abbreviate-file-name destination))))))
+
+(defun s3-manager-copy ()
+  "Copy the entry at point to the directory in the other window.
+An object downloads, a prefix downloads recursively; both prompt with
+the Dired window pre-filled, as `dired-do-copy\=' does.  The mirror of
+`s3-manager-dired-do-copy\=', so `C\=' means the same thing on both sides."
+  (interactive)
+  (unless s3-manager--bucket
+    (user-error "Not an object listing"))
+  (if (eq (s3-manager-entry-type (s3-manager--entry-at-point)) 'directory)
+      (s3-manager-get-recursive)
+    (s3-manager-get)))
 
 (defun s3-manager-get-recursive ()
   "Download every object under the prefix at point."
@@ -410,13 +422,21 @@ recursively, after a typed confirmation."
 
 (declare-function dired-get-marked-files "dired"
                   (&optional localp arg filter distinguish-one-marked error))
+(declare-function dired-do-copy "dired-aux" (&optional arg))
+
+(defun s3-manager--visible-listing ()
+  "Return an S3 object listing shown in another window, or nil.
+The selected window is excluded, so this answers \"what is in the other
+window\" from either side of the pair."
+  (seq-find (lambda (buffer)
+              (buffer-local-value 's3-manager--bucket buffer))
+            (mapcar #'window-buffer
+                    (delq (selected-window) (window-list)))))
 
 (defun s3-manager--dired-target ()
   "Return an S3 object-listing buffer to upload into.
 A visible one wins, so the window layout picks the destination."
-  (let ((visible (seq-find (lambda (buffer)
-                             (buffer-local-value 's3-manager--bucket buffer))
-                           (mapcar #'window-buffer (window-list))))
+  (let ((visible (s3-manager--visible-listing))
         (live (seq-filter (lambda (buffer)
                             (buffer-local-value 's3-manager--bucket buffer))
                           (buffer-list))))
@@ -579,6 +599,21 @@ but a prompt per file is not."
                           (y-or-n-p question))
                   (user-error "Upload aborted"))
                 (s3-manager--upload-batch sources prefix))))))))))
+
+;;;###autoload
+(defun s3-manager-dired-do-copy (&optional arg)
+  "Upload the marked files to a visible S3 listing, else `dired-do-copy'.
+
+Bound to `C' in Dired, this makes one key mean \"copy to the other
+window\" in both directions.  Falls back on the window layout rather
+than on whether a listing merely exists: a buried S3 buffer must not
+turn an ordinary copy into an upload to a bucket the user cannot see.
+
+ARG is passed through untouched."
+  (interactive "P" dired-mode)
+  (if (s3-manager--visible-listing)
+      (s3-manager-dired-upload)
+    (dired-do-copy arg)))
 
 (defun s3-manager-upload-dry-run ()
   "Show what uploading a local file or directory would write, without writing.

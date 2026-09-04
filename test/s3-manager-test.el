@@ -2909,6 +2909,107 @@ download directory when there is no Dired buffer to borrow from."
       (delete-file source))))
 
 
+;;;; C copies to the other window
+
+(ert-deftest s3-manager-test-copy-key-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "C") #'s3-manager-copy)))
+
+(ert-deftest s3-manager-test-copy-dispatches-on-the-entry-type ()
+  "`C' means copy, and the entry decides whether that is recursive.
+Choosing between `G' and `R' by hand is the thing this removes."
+  (let ((called nil))
+    (cl-letf (((symbol-function 's3-manager-get)
+               (lambda () (setq called 'get)))
+              ((symbol-function 's3-manager-get-recursive)
+               (lambda () (setq called 'recursive))))
+      (s3-manager-test--in-object-buffer
+        (s3-manager-test--goto-object)
+        (s3-manager-copy)
+        (should (eq called 'get))
+        (s3-manager-test--goto-directory)
+        (s3-manager-copy)
+        (should (eq called 'recursive))))))
+
+(ert-deftest s3-manager-test-copy-refuses-in-the-bucket-list ()
+  (let ((called nil))
+    (cl-letf (((symbol-function 's3-manager-get)
+               (lambda () (setq called t))))
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--bucket nil)
+        (should-error (s3-manager-copy) :type 'user-error)
+        (should (null called))))))
+
+(ert-deftest s3-manager-test-visible-listing-excludes-the-selected-window ()
+  "Asked from the S3 buffer itself, the answer is the *other* window."
+  (s3-manager-test--in-object-buffer
+    (let ((self (current-buffer)))
+      (cl-letf (((symbol-function 'window-list)
+                 (lambda (&rest _) (list 'w)))
+                ((symbol-function 'selected-window) (lambda () 'w))
+                ((symbol-function 'window-buffer) (lambda (_) self)))
+        (should (null (s3-manager--visible-listing)))))))
+
+(ert-deftest s3-manager-test-dired-copy-uploads-when-a-listing-is-visible ()
+  "`C' in Dired uploads when an S3 listing is on screen."
+  (skip-unless (require 'dired nil t))
+  (let ((uploaded nil) (copied nil))
+    (cl-letf (((symbol-function 's3-manager--visible-listing)
+               (lambda () (get-buffer-create "*fake s3*")))
+              ((symbol-function 's3-manager-dired-upload)
+               (lambda () (setq uploaded t)))
+              ((symbol-function 'dired-do-copy)
+               (lambda (&optional _) (setq copied t))))
+      (with-temp-buffer
+        (dired-mode)
+        (s3-manager-dired-do-copy)
+        (should uploaded)
+        (should (null copied))))))
+
+(ert-deftest s3-manager-test-dired-copy-falls-back-to-dired ()
+  "With no listing on screen it is exactly `dired-do-copy', prefix and all."
+  (skip-unless (require 'dired nil t))
+  (let ((uploaded nil) (copied 'no))
+    (cl-letf (((symbol-function 's3-manager--visible-listing) (lambda () nil))
+              ((symbol-function 's3-manager-dired-upload)
+               (lambda () (setq uploaded t)))
+              ((symbol-function 'dired-do-copy)
+               (lambda (&optional arg) (setq copied arg))))
+      (with-temp-buffer
+        (dired-mode)
+        (s3-manager-dired-do-copy 3)
+        (should (null uploaded))
+        ;; The numeric argument reaches `dired-do-copy' untouched, or `C-u 3 C'
+        ;; would silently copy one file instead of three.
+        (should (equal copied 3))))))
+
+(ert-deftest s3-manager-test-dired-copy-ignores-a-buried-listing ()
+  "An S3 buffer that exists but is in no window must not hijack `C'.
+Otherwise an ordinary copy becomes an upload to a bucket the user
+cannot see -- which is why the rule is the window layout, not
+`buffer-list'."
+  (skip-unless (require 'dired nil t))
+  (let ((uploaded nil) (copied nil)
+        (buried (get-buffer-create "*s3: buried/bucket*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buried
+            (s3-manager-mode)
+            (setq s3-manager--bucket "bucket"))
+          (cl-letf (((symbol-function 's3-manager-dired-upload)
+                     (lambda () (setq uploaded t)))
+                    ((symbol-function 'dired-do-copy)
+                     (lambda (&optional _) (setq copied t))))
+            (with-temp-buffer
+              (dired-mode)
+              ;; The buffer is live but displayed nowhere.
+              (should (null (s3-manager--visible-listing)))
+              (s3-manager-dired-do-copy)
+              (should (null uploaded))
+              (should copied))))
+      (kill-buffer buried))))
+
+
 ;;;; Dired batch upload
 
 (defmacro s3-manager-test--with-dired (var files &rest body)
@@ -4170,7 +4271,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g" "+" "G" "R" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g" "+" "G" "R" "C" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.

@@ -1362,8 +1362,27 @@ Two windows, both directions.
 window, via `dired-dwim-target-directory`. The user's `dired-dwim-target`
 decides; nil there turns it off.
 
-`M-x s3-manager-dired-upload` goes the other way: the marked files, or the file
-at point when none are marked, into the S3 listing in the other window.
+**`C` is the key, in both buffers.** In an S3 listing it copies the entry at
+point to the Dired window, dispatching on the entry type as `RET` and `D`
+already do: an object downloads, a prefix downloads recursively. In a Dired
+buffer, `s3-manager-dired-do-copy` uploads the marked files to a visible S3
+listing and otherwise calls `dired-do-copy` unchanged, prefix argument
+included.
+
+**The fallback rule is the window layout, not `buffer-list`.** A listing that
+exists but is displayed nowhere must not turn an ordinary `C` into an upload to
+a bucket the user cannot see. `dired-dwim-target-directories` uses the same
+rule in the other direction, considering only windows whose buffer is in
+`dired-mode`.
+
+The package does not modify `dired-mode-map`; the binding is the user's. This
+also leaves room for §17's "copy between S3 locations": `C` reads as *copy to
+whatever is in the other window*, so a second S3 listing there is an addition
+rather than a redefinition.
+
+`M-x s3-manager-dired-upload` goes the other way explicitly: the marked files,
+or the file at point when none are marked, into the S3 listing in the other
+window.
 
 - **One confirmation for the batch**, naming the keys that already exist. A
   probe per file is bounded and cheap beside the transfer; a prompt per file is

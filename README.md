@@ -68,6 +68,7 @@ bucket opens it; `RET` on a prefix descends into it.
 | `+` | fetch the next page of a truncated listing |
 | `g` | refresh, bypassing the cache |
 | `C-u g` | refresh, dropping every cached listing for this bucket |
+| `C` | copy to the directory in the other window (download) |
 | `P` | upload a local file, or a directory recursively |
 | `G` | download the object at point |
 | `R` | download everything under the prefix at point |
@@ -148,15 +149,26 @@ its directory instead of `s3-manager-download-directory` — the same thing
 `dired-dwim-target` does between two Dired buffers, and it is honoured, so
 setting it to nil turns this off too.
 
-Going the other way, `M-x s3-manager-dired-upload` in a Dired buffer uploads
-its marked files (or the file at point, as Dired itself does) into the S3
-listing in the other window. One confirmation covers the batch, naming any keys
-it would overwrite; the listing refreshes once when the last transfer lands.
+`C` is the one key for both directions, as it is in Dired. In an S3 listing it
+copies the entry at point to the Dired window — an object downloads, a prefix
+downloads recursively — prompting with that directory pre-filled. In a Dired
+buffer, `s3-manager-dired-do-copy` uploads the marked files (or the file at
+point, as Dired does) into the S3 listing, with one confirmation for the batch
+and one refresh at the end.
+
 The package does not touch `dired-mode-map`, so bind it yourself:
 
 ```elisp
-(keymap-set dired-mode-map "U" #'s3-manager-dired-upload)
+(keymap-set dired-mode-map "C" #'s3-manager-dired-do-copy)
 ```
+
+That binding is safe: with no S3 listing **visible in another window** it calls
+`dired-do-copy` unchanged, prefix argument and all. The rule is the window
+layout, not whether a listing merely exists — a buried S3 buffer must not turn
+an ordinary copy into an upload to a bucket you cannot see.
+
+`M-x s3-manager-dired-upload` is still there if you would rather have a
+separate key for uploading.
 
 ### When something fails
 

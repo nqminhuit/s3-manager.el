@@ -3,6 +3,16 @@
 All notable changes to `s3-manager.el`. Dates are the release date; the design
 document is `doc/SPEC.md`.
 
+## Unreleased
+
+### Added
+
+- **`C` copies to the other window, in both directions** — one key, as in
+  Dired. In an S3 listing it downloads the entry at point to the Dired window
+  (recursively for a prefix); bind `s3-manager-dired-do-copy` to `C` in Dired
+  and it uploads the marked files to a *visible* S3 listing, falling back to
+  `dired-do-copy` unchanged when there is none.
+
 ## 0.2.0 — 2026-09-04
 
 ### Added

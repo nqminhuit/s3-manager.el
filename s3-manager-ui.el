@@ -28,6 +28,7 @@
 ;; one -- they operate on the buffer this file defines, so the dependency runs
 ;; that way round and cannot be reversed.  Declared rather than reordered
 ;; because a keymap is the one place a lower layer must name its callers.
+(declare-function s3-manager-copy "s3-manager-transfer" ())
 (declare-function s3-manager-get "s3-manager-transfer" ())
 (declare-function s3-manager-get-recursive "s3-manager-transfer" ())
 (declare-function s3-manager-upload "s3-manager-transfer" ())
@@ -99,6 +100,7 @@
   ;; whole-bucket purge.  `revert-buffer-function' still works for M-x.
   "g" #'s3-manager-refresh
   "+" #'s3-manager-load-more
+  "C" #'s3-manager-copy
   "G" #'s3-manager-get
   "R" #'s3-manager-get-recursive
   "d" #'s3-manager-mark-delete
