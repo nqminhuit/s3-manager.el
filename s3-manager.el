@@ -48,6 +48,7 @@
 (require 's3-manager-transfer)
 (require 's3-manager-view)
 (require 's3-manager-delete)
+(require 's3-manager-copy)
 
 ;;;###autoload
 (defun s3-manager (&optional reread-profiles)

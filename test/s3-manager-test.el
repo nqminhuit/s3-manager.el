@@ -4470,7 +4470,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g" "+" "G" "R" "C" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g" "+" "G" "R" "C" "c" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.
@@ -4522,3 +4522,156 @@ changed, personal configuration would silently stop taking effect."
 (provide 's3-manager-test)
 
 ;;; s3-manager-test.el ends here
+
+;;;; Copy between S3 locations
+
+(defmacro s3-manager-test--copying-to (uri &rest body)
+  "Run BODY with the destination prompt answered with URI."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'read-string) (lambda (&rest _) ,uri)))
+     ,@body))
+
+(ert-deftest s3-manager-test-copy-to-key-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "c") #'s3-manager-copy-to))
+  ;; `C' still means "copy to the other window"; the two are different keys.
+  (should (eq (keymap-lookup s3-manager-mode-map "C") #'s3-manager-copy)))
+
+(ert-deftest s3-manager-test-copy-to-argv ()
+  "A server-side copy is `s3 cp' between two URIs; no bytes come here."
+  (let ((argv-file (make-temp-file "s3-copy-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/backup/README.md"
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :argv-file argv-file
+                 :head-exit 254 :head-stderr s3-manager-test--head-404)
+              (s3-manager-copy-to)
+              ;; Not `(zerop s3-manager--transfers)': the probe and its timer
+              ;; hop run first, so that is already true before anything has
+              ;; started.  Wait for the two invocations themselves.
+              (s3-manager-test--wait-for-argv argv-file 2)))
+          (let ((transfer (nth 1 (s3-manager-test--argv-records argv-file))))
+            (should (equal transfer
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "cp"
+                                 "s3://media/README.md"
+                                 "s3://media/backup/README.md"
+                                 "--progress-frequency" "1")))
+            ;; Both suppress the progress the mode line needs.
+            (should-not (member "--quiet" transfer))
+            (should-not (member "--only-show-errors" transfer))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-probes-the-destination ()
+  "The probe must ask the destination's bucket, not the source's."
+  (let ((argv-file (make-temp-file "s3-copy-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://backup/README.md"
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :argv-file argv-file
+                 :head-exit 254 :head-stderr s3-manager-test--head-404)
+              (s3-manager-copy-to)
+              (s3-manager-test--wait-for-argv argv-file 2)))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (= 2 (length records)))
+            (let ((probe (nth 0 records)))
+              (should (member "head-object" probe))
+              (should (equal "backup" (nth (1+ (seq-position probe "--bucket"))
+                                           probe)))
+              (should-not (member "media" probe)))
+            (should (member "s3://backup/README.md" (nth 1 records)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-declining-the-overwrite-copies-nothing ()
+  "The existing object must survive a declined confirmation."
+  (let ((argv-file (make-temp-file "s3-copy-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/backup/README.md"
+            (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 0
+                   :head-stdout (json-serialize
+                                 '((ContentLength . 10)
+                                   (LastModified . "2026-09-01T00:00:00+00:00"))))
+                (s3-manager-copy-to)
+                (s3-manager-test--wait #'ignore 0.3))))
+          ;; The probe ran and the transfer did not.  Counting records is
+          ;; not enough: skipping the probe altogether also leaves exactly
+          ;; one, so name which invocation it has to be.
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (= 1 (length records)))
+            (should (member "head-object" (car records)))
+            (should-not (member "cp" (car records)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-refuses-a-self-copy ()
+  "`s3 cp SRC SRC' exits 0 having done nothing visible, so we refuse first."
+  (let ((argv-file (make-temp-file "s3-copy-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/README.md"
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (should-error (s3-manager-copy-to) :type 'user-error)))
+          ;; Not even the probe ran.
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-refuses-in-the-bucket-list ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--profile "production" s3-manager--bucket nil)
+    (should-error (s3-manager-copy-to) :type 'user-error)))
+
+(ert-deftest s3-manager-test-after-copy-invalidates-every-ancestor ()
+  "A new key can bring several prefix rows into existence at once."
+  (let ((s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (dolist (prefix '("" "a/" "a/b/" "untouched/"))
+      (s3-manager--cache-put (s3-manager--cache-key-for "p" "bk" prefix)
+                             nil nil nil))
+    (s3-manager--after-copy
+     (s3-manager-copy-job--create
+      :profile "p" :source-bucket "src" :source-key "x.txt"
+      :bucket "bk" :key "a/b/c.txt" :recursive nil))
+    (dolist (prefix '("" "a/" "a/b/"))
+      (should-not (s3-manager--cache-get
+                   (s3-manager--cache-key-for "p" "bk" prefix))))
+    ;; A sibling prefix is not touched.
+    (should (s3-manager--cache-get
+             (s3-manager--cache-key-for "p" "bk" "untouched/")))))
+
+(ert-deftest s3-manager-test-refresh-listing-matches-what-a-buffer-shows ()
+  "Matched by content, not by `s3-manager--buffer-name'.
+
+A name lookup is right for every buffer this package creates and wrong
+for any other -- including the one that started the copy.  Caught live:
+the destination never refreshed, because the buffer holding the listing
+was not the one the derived name pointed at."
+  (let ((reloaded nil))
+    (with-temp-buffer                   ; deliberately not the canonical name
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "bk"
+            s3-manager--prefix "a/")
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (&optional _target key) (setq reloaded (or key t)))))
+        (s3-manager--refresh-listing "p" "bk" "a/" "a/new.txt")
+        (should (equal reloaded "a/new.txt"))
+        ;; A different prefix, bucket or profile is left alone.
+        (setq reloaded nil)
+        (s3-manager--refresh-listing "p" "bk" "other/" "other/x")
+        (s3-manager--refresh-listing "p" "elsewhere" "a/" "a/x")
+        (s3-manager--refresh-listing "other" "bk" "a/" "a/x")
+        (should-not reloaded)))))
+

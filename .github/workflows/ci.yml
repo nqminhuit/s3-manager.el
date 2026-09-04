@@ -60,7 +60,7 @@ jobs:
                 -f batch-byte-compile \
                 s3-manager-core.el s3-manager-process.el s3-manager-model.el \
                 s3-manager-ui.el s3-manager-transfer.el s3-manager-view.el \
-                s3-manager-delete.el s3-manager.el
+                s3-manager-delete.el s3-manager-copy.el s3-manager.el
 
       - name: Test the byte-compiled package
         # This is what users actually load, and `-L .` prefers the .elc.
