@@ -45,7 +45,8 @@ function of this struct."
   profile
   source-bucket source-key
   bucket key                            ; the destination
-  recursive)                            ; the source is a prefix
+  recursive                             ; the source is a prefix
+  move)                                 ; `s3 mv': the source is deleted
 
 (defun s3-manager--job-source-uri (job)
   "Return JOB's source as an s3:// URI."
@@ -59,10 +60,22 @@ function of this struct."
 (defun s3-manager--job-describe (job)
   "Return a gerund clause naming JOB.
 `s3-manager--transfer' reads it as \"S3: %s...\" and \"S3: %s -- done\"."
-  (format "copying %s to %s"
+  (format "%s %s to %s"
+          (if (s3-manager-job-move job) "moving" "copying")
           (s3-manager--job-source-uri job) (s3-manager--job-uri job)))
 
 ;;;; Prompting
+
+(defun s3-manager--job-verb (job &optional capitalized)
+  "Return \"copy\" or \"move\" for JOB, CAPITALIZED when asked."
+  (let ((verb (if (s3-manager-job-move job) "move" "copy")))
+    (if capitalized (capitalize verb) verb)))
+
+(defun s3-manager--job-aborted (job)
+  "Return the abort message for JOB.
+A declined copy must not report itself as an aborted upload, nor a
+declined move as a copy."
+  (format "%s aborted" (s3-manager--job-verb job t)))
 
 (defvar s3-manager--destination-history nil
   "Minibuffer history of s3:// destinations.")
@@ -83,29 +96,25 @@ space is far commoner than a key that really ends in one."
 
 ;;;; Refreshing both ends
 
-(defun s3-manager--refresh-ancestors (profile bucket key)
-  "Drop and re-read PROFILE's listings above KEY in BUCKET.
+(defun s3-manager--ancestor-steps (key)
+  "Return (PREFIX . CHILD) from KEY's own parent up to the bucket root.
+CHILD is what appears in, or vanishes from, PREFIX at that level.
 
 Every level, not merely the immediate parent.  S3 has no directories, so
-a key names whatever prefixes it happens to contain and writing one can
-bring a row into existence at each level above it: copying to
-a/b/c.txt adds the row `c.txt' to a/b/, the row `b/' to a/, and the row
-`a/' to the bucket root.
+a key names whatever prefixes it happens to contain, and writing one can
+bring a row into existence at each level above it: a/b/c.txt adds
+`c.txt' to a/b/, `b/' to a/, and `a/' to the bucket root.
 
-Caught live -- a recursive copy into backup/src/ left the listing of the
-prefix above it showing no `backup/' at all, because only backup/'s own
-listing was re-read and nothing was displaying that."
-  (let ((child key) (done nil))
+Caught live -- a recursive copy into backup/src/ left the listing that
+was actually on screen, the prefix above backup/, showing no `backup/'
+at all."
+  (let ((child key) (steps nil) (done nil))
     (while (not done)
       (let ((prefix (s3-manager--parent-prefix child)))
-        (s3-manager--cache-invalidate
-         (s3-manager--cache-key-for profile bucket prefix))
-        ;; CHILD is what appeared in PREFIX, so point lands on it at every
-        ;; level; `s3-manager--goto-key' leaves point alone when it is not
-        ;; there, which is what happens for a prefix that already existed.
-        (s3-manager--refresh-listing profile bucket prefix child)
+        (push (cons prefix child) steps)
         (setq done (string-empty-p prefix)
-              child prefix)))))
+              child prefix)))
+    (nreverse steps)))
 
 (defun s3-manager--refresh-listing (profile bucket prefix key)
   "Re-read any listing of PREFIX in BUCKET under PROFILE, point on KEY.
@@ -127,18 +136,46 @@ copy, if a caller ever holds a listing in a buffer of its own."
         (s3-manager--reload nil key)))))
 
 (defun s3-manager--after-copy (job)
-  "Refresh JOB's destination, whether it succeeded or failed part-way.
-Caches go first and the reload second, or the reload would re-cache a
+  "Refresh both of JOB's ends, whether it succeeded or failed part-way.
+A move empties the source as well as filling the destination, and `aws
+s3' exits 1 or 2 having done part of the work, so the listings have
+changed either way.
+
+Caches go first and the reloads second, or a reload would re-cache a
 listing that is about to be dropped."
-  (let ((profile (s3-manager-job-profile job))
-        (bucket (s3-manager-job-bucket job))
-        (key (s3-manager-job-key job)))
-    ;; The subtree first: a recursive copy writes below the destination, and
-    ;; a reload must not re-cache a listing that is about to be dropped.
-    (when (s3-manager-job-recursive job)
-      (s3-manager--cache-purge profile (s3-manager--endpoint-for profile)
-                               bucket key))
-    (s3-manager--refresh-ancestors profile bucket key)))
+  (let* ((profile (s3-manager-job-profile job))
+         (endpoint (s3-manager--endpoint-for profile))
+         (bucket (s3-manager-job-bucket job))
+         (key (s3-manager-job-key job))
+         (move (s3-manager-job-move job))
+         (recursive (s3-manager-job-recursive job))
+         (source-bucket (s3-manager-job-source-bucket job))
+         (source-key (s3-manager-job-source-key job))
+         (targets nil))
+    ;; Subtrees first: a recursive transfer writes, and a move empties,
+    ;; below the prefix as well as at it.
+    (when recursive
+      (s3-manager--cache-purge profile endpoint bucket key)
+      (when move
+        (s3-manager--cache-purge profile endpoint source-bucket source-key)))
+    ;; The destination is collected first, so that when a rename in place
+    ;; makes both ends the same listing, point lands on what arrived rather
+    ;; than on what left.
+    (dolist (step (s3-manager--ancestor-steps key))
+      (push (list bucket (car step) (cdr step)) targets))
+    (when move
+      (dolist (step (s3-manager--ancestor-steps source-key))
+        (push (list source-bucket (car step) (cdr step)) targets)))
+    (setq targets (nreverse targets))
+    (let ((seen nil))
+      (dolist (target targets)
+        (let ((where (cons (nth 0 target) (nth 1 target))))
+          (unless (member where seen)
+            (push where seen)
+            (s3-manager--cache-invalidate
+             (s3-manager--cache-key-for profile (nth 0 target) (nth 1 target)))
+            (s3-manager--refresh-listing profile (nth 0 target) (nth 1 target)
+                                         (nth 2 target))))))))
 
 ;;;; Running
 
@@ -151,7 +188,7 @@ so a preview cannot describe something other than what it previews.
 `--copy-props' is not passed: its default already copies tags and the
 metadata directive, which is what copying an object means, and naming
 the default would only pin us to it."
-  (append (list "s3" "cp"
+  (append (list "s3" (if (s3-manager-job-move job) "mv" "cp")
                 (s3-manager--job-source-uri job) (s3-manager--job-uri job))
           (when (s3-manager-job-recursive job) '("--recursive"))
           (if dry-run
@@ -161,16 +198,30 @@ the default would only pin us to it."
             '("--progress-frequency" "1"))))
 
 (defun s3-manager--copy-start (job)
-  "Run JOB, refreshing its destination when it stops, either way."
-  (let ((finish (lambda ()
-                  ;; Also on failure: `aws s3' exits 1 or 2 having done part
-                  ;; of the work, exactly as in `s3-manager--delete-prefix',
-                  ;; so the listing has changed even though the command
-                  ;; failed.
-                  (s3-manager--after-copy job))))
-    (s3-manager--transfer (s3-manager--copy-args job)
-                          (s3-manager--job-describe job)
-                          finish finish)))
+  "Run JOB, refreshing both ends when it stops, either way."
+  (s3-manager--transfer
+   (s3-manager--copy-args job)
+   (s3-manager--job-describe job)
+   (lambda () (s3-manager--after-copy job))
+   (lambda ()
+     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
+     ;; exactly as in `s3-manager--delete-prefix', so both listings have
+     ;; changed even though the command failed.
+     (s3-manager--after-copy job)
+     ;; `s3-manager--transfer' has already reported the CLI's own stderr
+     ;; verbatim.  This says what state the two ends are left in, which the
+     ;; stderr does not, and names the report again because this `message'
+     ;; overwrites the summary that named it.
+     (message
+      "S3: %s stopped part-way -- %s; see %s"
+      (s3-manager--job-describe job)
+      (if (s3-manager-job-move job)
+          ;; `aws s3 mv' copies and deletes one object at a time -- the CLI's
+          ;; own wording -- so a key it did not reach is untouched at the
+          ;; source and re-running finishes the job.
+          "anything not moved is still at the source"
+        "some objects were copied")
+      s3-manager--error-buffer))))
 
 (defun s3-manager--copy-confirm (job)
   "Confirm JOB, then run it.
@@ -185,10 +236,13 @@ putting them in backup/videos/ means saying so at the prompt."
   (if (s3-manager-job-recursive job)
       (progn
         (unless (yes-or-no-p
-                 (format "Recursively copy everything under %s to %s? "
+                 (format "Recursively %s everything under %s to %s%s? "
+                         (s3-manager--job-verb job)
                          (s3-manager--job-source-uri job)
-                         (s3-manager--job-uri job)))
-          (user-error "Copy aborted"))
+                         (s3-manager--job-uri job)
+                         (if (s3-manager-job-move job)
+                             ", deleting the originals" "")))
+          (user-error "%s" (s3-manager--job-aborted job)))
         (s3-manager--copy-start job))
     (s3-manager--copy-probe job)))
 
@@ -203,20 +257,22 @@ on screen."
     (s3-manager--head-object
      (s3-manager-job-bucket job) (s3-manager-job-key job)
      (lambda (response)
-       (s3-manager--confirm-overwrite response uri "Copy aborted")
+       (s3-manager--confirm-overwrite response uri
+                                      (s3-manager--job-aborted job))
        (s3-manager--copy-start job))
      (lambda () (s3-manager--copy-start job))
      (lambda ()
        (unless (y-or-n-p
-                (format "Could not check whether %s exists.  Copy anyway? "
-                        uri))
-         (user-error "Copy aborted"))
+                (format "Could not check whether %s exists.  %s anyway? "
+                        uri (s3-manager--job-verb job t)))
+         (user-error "%s" (s3-manager--job-aborted job)))
        (s3-manager--copy-start job)))))
 
 ;;;; The command
 
-(defun s3-manager--copy-job (entry bucket typed)
+(defun s3-manager--copy-job (entry bucket typed &optional move)
   "Return the job copying ENTRY to TYPED in BUCKET, or signal.
+With MOVE the source is deleted afterwards, by `s3 mv'.
 TYPED is the destination key as the user gave it; the guards run on the
 normalised form, which is what makes them complete."
   (let* ((directory (eq (s3-manager-entry-type entry) 'directory))
@@ -231,7 +287,8 @@ normalised form, which is what makes them complete."
      :source-bucket s3-manager--bucket
      :source-key (s3-manager-entry-key entry)
      :bucket bucket :key key
-     :recursive directory)))
+     :recursive directory
+     :move move)))
 
 ;;;###autoload
 (defun s3-manager-copy-to ()
@@ -246,20 +303,40 @@ A prefix is copied recursively after a typed `yes', and its destination
 is taken literally rather than gaining the source's own name -- see
 `s3-manager--copy-confirm'."
   (interactive)
+  (s3-manager--copy-command nil))
+
+;;;###autoload
+(defun s3-manager-rename ()
+  "Rename the entry at point, or move it elsewhere in S3.
+
+Its own key is offered for editing, so changing the last segment renames
+it and changing the rest moves it.
+
+The source is deleted only after it has been copied, one object at a
+time -- that is `aws s3 mv' own description -- so a failure part-way
+leaves anything it did not reach untouched at the source, and re-running
+finishes the job."
+  (interactive)
+  (s3-manager--copy-command t))
+
+(defun s3-manager--copy-command (move)
+  "Copy the entry at point, or with MOVE, move it."
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
   (let ((entry (s3-manager--entry-at-point)))
     (unless (s3-manager-entry-p entry)
-      (user-error "Copying buckets is not supported"))
+      (user-error "%s buckets is not supported"
+                  (if move "Renaming" "Copying")))
     (let* ((destination
             (s3-manager--read-destination
-             (format "Copy %s to: " (s3-manager-entry-display-name entry))
+             (format "%s %s to: " (if move "Move" "Copy")
+                     (s3-manager-entry-display-name entry))
              (s3-manager--uri s3-manager--bucket
                               (s3-manager--key-into
                                s3-manager--prefix
                                (s3-manager-entry-display-name entry)))))
            (job (s3-manager--copy-job entry (car destination)
-                                      (cdr destination))))
+                                      (cdr destination) move)))
       (s3-manager--copy-confirm job))))
 
 (provide 's3-manager-copy)

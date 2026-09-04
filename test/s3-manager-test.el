@@ -4470,7 +4470,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g" "+" "G" "R" "C" "c" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g" "+" "G" "R" "C" "c" "r" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.
@@ -4779,4 +4779,122 @@ at all, because only backup/'s own listing was re-read."
         ;; Point lands on what appeared at this level: `self/backup/', the
         ;; child on the path, not the full destination key.
         (should (equal reloaded '("self/backup/")))))))
+
+;;;; Rename and move
+
+(ert-deftest s3-manager-test-rename-key-is-bound ()
+  (should (eq (keymap-lookup s3-manager-mode-map "r") #'s3-manager-rename)))
+
+(ert-deftest s3-manager-test-rename-argv-uses-mv ()
+  "`s3 mv' copies and deletes per object, so nothing is lost part-way."
+  (let ((argv-file (make-temp-file "s3-mv-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/renamed.md"
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :argv-file argv-file
+                 :head-exit 254 :head-stderr s3-manager-test--head-404)
+              (s3-manager-rename)
+              (s3-manager-test--wait-for-argv argv-file 2)))
+          (let ((transfer (seq-find (lambda (r) (member "mv" r))
+                                    (s3-manager-test--argv-records argv-file))))
+            (should (equal transfer
+                           (list "--profile" "production"
+                                 "--no-cli-pager" "--no-cli-auto-prompt"
+                                 "s3" "mv"
+                                 "s3://media/README.md"
+                                 "s3://media/renamed.md"
+                                 "--progress-frequency" "1")))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-rename-offers-the-key-for-editing ()
+  "The initial input is the object's own URI: edit the leaf to rename."
+  (let ((initial nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-object)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (_prompt &optional init &rest _)
+                   (setq initial init)
+                   ;; Accepting it unchanged is a self-move, and refused.
+                   init)))
+        (should-error (s3-manager-rename) :type 'user-error)))
+    (should (equal initial "s3://media/README.md"))))
+
+(ert-deftest s3-manager-test-rename-refuses-an-unedited-key ()
+  "Accepting the pre-filled destination is a self-move.
+
+`s3 mv' would catch this exact spelling itself, with exit 252, but only
+this spelling -- dropping the trailing slash on a prefix walks past it."
+  (let ((argv-file (make-temp-file "s3-mv-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--copying-to "s3://media/README.md"
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (should-error (s3-manager-rename) :type 'user-error)))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-rename-a-prefix-says-the-originals-go ()
+  "The typed confirmation must say that a move deletes, not just writes."
+  (let ((asked nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--goto-directory)
+      (s3-manager-test--copying-to "s3://media/archive/"
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (p) (setq asked p) nil)))
+          (should-error (s3-manager-rename) :type 'user-error))))
+    (should (string-match-p "move" asked))
+    (should (string-match-p "deleting the originals" asked))))
+
+(ert-deftest s3-manager-test-after-move-refreshes-both-ends ()
+  "A move empties the source as well as filling the destination."
+  (let ((s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (dolist (prefix '("" "from/" "to/" "untouched/"))
+      (s3-manager--cache-put (s3-manager--cache-key-for "p" "bk" prefix)
+                             nil nil nil))
+    (s3-manager--after-copy
+     (s3-manager-copy-job--create
+      :profile "p" :source-bucket "bk" :source-key "from/a.txt"
+      :bucket "bk" :key "to/a.txt" :recursive nil :move t))
+    (should-not (s3-manager--cache-get (s3-manager--cache-key-for "p" "bk" "to/")))
+    (should-not (s3-manager--cache-get (s3-manager--cache-key-for "p" "bk" "from/")))
+    (should (s3-manager--cache-get
+             (s3-manager--cache-key-for "p" "bk" "untouched/")))))
+
+(ert-deftest s3-manager-test-after-copy-leaves-the-source-alone ()
+  "A copy changes nothing at the source, so its listing must survive."
+  (let ((s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (s3-manager--cache-put (s3-manager--cache-key-for "p" "bk" "from/")
+                           nil nil nil)
+    (s3-manager--after-copy
+     (s3-manager-copy-job--create
+      :profile "p" :source-bucket "bk" :source-key "from/a.txt"
+      :bucket "bk" :key "to/a.txt" :recursive nil :move nil))
+    (should (s3-manager--cache-get (s3-manager--cache-key-for "p" "bk" "from/")))))
+
+(ert-deftest s3-manager-test-a-rename-in-place-reloads-once ()
+  "Both ends are one listing; point belongs on what arrived."
+  (let ((reloaded nil)
+        (s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "bk"
+            s3-manager--prefix "")
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (&optional _t key) (push key reloaded))))
+        (s3-manager--after-copy
+         (s3-manager-copy-job--create
+          :profile "p" :source-bucket "bk" :source-key "old.txt"
+          :bucket "bk" :key "new.txt" :recursive nil :move t))
+        (should (equal reloaded '("new.txt")))))))
 

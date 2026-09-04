@@ -30,6 +30,7 @@
 ;; because a keymap is the one place a lower layer must name its callers.
 (declare-function s3-manager-copy "s3-manager-transfer" ())
 (declare-function s3-manager-copy-to "s3-manager-copy" ())
+(declare-function s3-manager-rename "s3-manager-copy" ())
 (declare-function s3-manager-get "s3-manager-transfer" ())
 (declare-function s3-manager-get-recursive "s3-manager-transfer" ())
 (declare-function s3-manager-upload "s3-manager-transfer" ())
@@ -103,6 +104,7 @@
   "+" #'s3-manager-load-more
   "C" #'s3-manager-copy
   "c" #'s3-manager-copy-to
+  "r" #'s3-manager-rename
   "G" #'s3-manager-get
   "R" #'s3-manager-get-recursive
   "d" #'s3-manager-mark-delete
