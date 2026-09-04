@@ -275,6 +275,28 @@ nil rather than as a sentinel."
   (should (string-match-p "s3-manager bug" (s3-manager--exit-code-gloss 252)))
   (should (equal "" (s3-manager--exit-code-gloss 0))))
 
+(ert-deftest s3-manager-test-exit-252-is-not-always-our-bug ()
+  "The CLI refusing a self-move exits 252 too.  Measured, verbatim stderr."
+  (let ((refusal "\nCannot mv a file onto itself: s3://b/a.png - s3://b/a.png"))
+    (should (string-match-p "refused" (s3-manager--exit-code-gloss 252 refusal)))
+    (should-not (string-match-p "s3-manager bug"
+                                (s3-manager--exit-code-gloss 252 refusal))))
+  ;; A 252 we do not recognise still points at this package, which builds the
+  ;; argv the CLI rejected.
+  (should (string-match-p "s3-manager bug"
+                          (s3-manager--exit-code-gloss 252 "Unknown options: --nope"))))
+
+(ert-deftest s3-manager-test-error-report-glosses-the-mv-refusal ()
+  "The report buffer must not contradict the stderr printed above it."
+  (s3-manager-test--with-fresh-error-buffer
+    (s3-manager--record-error
+     (list 's3-manager-cli-error "aws s3 mv ..." 252
+           "\nCannot mv a file onto itself: s3://b/a.png - s3://b/a.png")
+     "s3 mv")
+    (let ((text (s3-manager-test--error-text)))
+      (should (string-match-p "refused" text))
+      (should-not (string-match-p "s3-manager bug" text)))))
+
 (ert-deftest s3-manager-test-summarize-s3api-error ()
   "The useful line names the service error code and the operation."
   (should (equal

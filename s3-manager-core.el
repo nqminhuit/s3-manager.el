@@ -185,14 +185,23 @@ configuration, which is the preferred arrangement."
 (defconst s3-manager--error-buffer "*S3 Manager Error*"
   "Name of the buffer accumulating AWS CLI failure reports.")
 
-(defun s3-manager--exit-code-gloss (code)
-  "Return a short parenthetical explanation of exit CODE."
+(defun s3-manager--exit-code-gloss (code &optional detail)
+  "Return a short parenthetical explanation of exit CODE.
+DETAIL is the CLI's stderr, for a code that reads two ways on its own."
   (pcase code
     (0 "")
     (1 " (aws s3: one or more transfers failed)")
     (2 " (aws s3: one or more objects skipped)")
     (130 " (interrupted)")
-    (252 " (invalid command line -- likely an s3-manager bug)")
+    (252
+     ;; 252 is "the CLI rejected the command line", which covers both an argv
+     ;; this package built wrongly and the CLI refusing an operation it
+     ;; considers unsafe.  Measured: `s3 mv' onto the same key is the second,
+     ;; and glossing it as the first sends the user to file a bug here rather
+     ;; than read the line printed directly above it.
+     (if (and detail (string-match-p "Cannot mv a file onto itself" detail))
+         " (aws s3 mv refused: source and destination are the same)"
+       " (invalid command line -- likely an s3-manager bug)"))
     (253 " (invalid environment or configuration)")
     (254 " (service returned an error)")
     (255 " (general error -- often a bad profile or unreachable endpoint)")
@@ -239,7 +248,7 @@ of someone else's error message is a guess."
       (insert (format "condition : %s\n" (nth 0 err)))
       (insert (format "command   : %s\n" (nth 1 err)))
       (insert (format "exit code : %s%s\n" (nth 2 err)
-                      (s3-manager--exit-code-gloss (nth 2 err))))
+                      (s3-manager--exit-code-gloss (nth 2 err) (nth 3 err))))
       (insert "stderr    :\n")
       (dolist (line (split-string (or (nth 3 err) "(none)") "\n"))
         (insert "  " line "\n")))
