@@ -466,6 +466,90 @@ detour."
         (match-string 1 trimmed)
       trimmed)))
 
+(defun s3-manager--copy-key (typed leaf directory)
+  "Return the destination key for TYPED, an S3 destination the user gave.
+LEAF is the source's own last segment, DIRECTORY non-nil when the source
+is a prefix rather than an object.
+
+TYPED is honoured: what the prompt showed is what happens.  Only two
+things are normalised, and neither can change a key that was meant.
+
+An object aimed at a prefix -- empty, or ending in a slash -- goes into
+it under its own name, since an object key ending in a slash is a
+directory marker the listing drops as a phantom.  A prefix keeps its own
+name only if TYPED already carries it, which is why
+`s3-manager--key-into' writes it into what the user is offered rather
+than this appending it afterwards: a rename means TYPED exactly, and
+appending there would turn share/ -> archive/ into archive/share/.
+
+A prefix destination is always given a trailing slash.  That is
+load-bearing for `--recursive' -- measured, `s3 cp s3://a/share/
+s3://b/tree/ --recursive' maps share/README.md onto tree/README.md,
+dropping share's own name, the flattening `s3-manager--upload-key'
+compensates for -- and it is also what closes a measured hole in
+`s3 mv'.  Its refusal to move a key onto itself compares the two URIs as
+typed, so `s3 mv s3://b/share/ s3://b/share --recursive' walks past it
+and then maps every object onto itself.  Coercing here, before
+`s3-manager--check-destination' compares, is what makes that
+unreachable."
+  (cond
+   (directory
+    (cond ((string-empty-p typed) typed) ; the bucket root, deliberately
+          ((string-suffix-p "/" typed) typed)
+          (t (concat typed "/"))))
+   ((or (string-empty-p typed) (string-suffix-p "/" typed))
+    (concat typed leaf))
+   (t typed)))
+
+(defun s3-manager--key-into (prefix leaf)
+  "Return the key placing LEAF inside PREFIX.
+The rule for \"copy this into that\", named once because two callers need
+it and they must not disagree: `C', which takes the other window's
+prefix without prompting, and the destination `c' offers for editing.
+`s3-manager--copy-key' deliberately does not do it -- a rename means the
+key as typed."
+  (concat prefix leaf))
+
+(defun s3-manager--plain-bucket-p (bucket)
+  "Return non-nil when BUCKET is a plain bucket name.
+An access point ARN or alias can resolve to the same underlying bucket
+under a different name, which no comparison of two strings can see --
+the CLI's own `s3 mv' documentation warns that a move between two such
+names can delete the object.  Refusing them is cheap and costs no API
+call; `--validate-same-s3-paths' is the alternative, and its availability
+at the AWS CLI 2.13.0 this package requires is not established."
+  (and (not (string-empty-p bucket))
+       (not (string-search ":" bucket))
+       (not (string-suffix-p "-s3alias" bucket))
+       (not (string-suffix-p "--op-s3" bucket))))
+
+(defun s3-manager--check-destination (source-bucket source-key bucket key
+                                                    directory)
+  "Signal unless KEY in BUCKET is a sane destination for SOURCE-KEY.
+SOURCE-BUCKET holds the source; DIRECTORY is non-nil for a recursive
+operation.  KEY has already been through `s3-manager--copy-key', which
+is what makes the comparison meaningful.
+
+Ours rather than the CLI's, in both directions: `s3 cp' onto its own
+source exits 0 having done nothing visible, and `s3 mv' exits 252 only
+for the spellings its string comparison happens to catch."
+  (unless (s3-manager--plain-bucket-p bucket)
+    (user-error "Refusing an access point or ARN as a destination: %s" bucket))
+  (when (equal bucket source-bucket)
+    (when (equal key source-key)
+      (user-error "Source and destination are the same: %s"
+                  (s3-manager--uri bucket key)))
+    ;; Only prefixes can overlap; two object keys either match or do not.
+    (when directory
+      (when (string-prefix-p source-key key)
+        (user-error "Destination %s is inside the source %s"
+                    (s3-manager--uri bucket key)
+                    (s3-manager--uri source-bucket source-key)))
+      (when (string-prefix-p key source-key)
+        (user-error "Source %s is inside the destination %s"
+                    (s3-manager--uri source-bucket source-key)
+                    (s3-manager--uri bucket key))))))
+
 (provide 's3-manager-core)
 
 ;;; s3-manager-core.el ends here

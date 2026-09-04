@@ -2214,6 +2214,71 @@ and no Emacs file browser behaves that way."
   (dolist (bad '("/tmp/x" "s3:/b/k" "" "s3://" "s3:// b/k"))
     (should-error (s3-manager--parse-uri bad) :type 'user-error)))
 
+(ert-deftest s3-manager-test-copy-key-normalises-a-typed-destination ()
+  "What the prompt showed is what happens; only two things are coerced."
+  ;; An object aimed at a prefix goes into it under its own name.
+  (should (equal (s3-manager--copy-key "backup/" "a.png" nil) "backup/a.png"))
+  (should (equal (s3-manager--copy-key "" "a.png" nil) "a.png"))
+  ;; An object aimed at a key keeps that key -- this is a rename.
+  (should (equal (s3-manager--copy-key "backup/b.png" "a.png" nil) "backup/b.png"))
+  ;; A prefix always ends in a slash, however it was typed.
+  (should (equal (s3-manager--copy-key "backup" "share/" t) "backup/"))
+  (should (equal (s3-manager--copy-key "backup/" "share/" t) "backup/"))
+  ;; A prefix is NOT given the source's name here; see `s3-manager--key-into'.
+  (should (equal (s3-manager--copy-key "archive/" "share/" t) "archive/")))
+
+(ert-deftest s3-manager-test-copy-key-closes-the-measured-mv-bypass ()
+  "`s3 mv' compares the URIs as typed, so one dropped slash defeats it.
+
+Measured against aws-cli/2.33.30:
+  aws s3 mv s3://b/share/ s3://b/share --recursive --dryrun
+exits 0 and maps every object under share/ onto itself, which for a
+move means copying each onto itself and then deleting it.  Normalising
+before comparing is what makes that unreachable."
+  (let ((destination (s3-manager--copy-key "share" "share/" t)))
+    (should (equal destination "share/"))
+    (should-error (s3-manager--check-destination "b" "share/" "b" destination t)
+                  :type 'user-error)))
+
+(ert-deftest s3-manager-test-key-into-keeps-the-source-name ()
+  "The rule `C' uses, and the destination `c' offers for editing."
+  (should (equal (s3-manager--key-into "backup/" "share/") "backup/share/"))
+  (should (equal (s3-manager--key-into "backup/" "a.png") "backup/a.png"))
+  (should (equal (s3-manager--key-into "" "share/") "share/")))
+
+(ert-deftest s3-manager-test-check-destination-refuses-itself ()
+  (should-error (s3-manager--check-destination "b" "a.png" "b" "a.png" nil)
+                :type 'user-error)
+  (should-error (s3-manager--check-destination "b" "share/" "b" "share/" t)
+                :type 'user-error)
+  ;; The same key in another bucket is a different object.
+  (should-not (s3-manager--check-destination "b" "a.png" "other" "a.png" nil)))
+
+(ert-deftest s3-manager-test-check-destination-refuses-an-overlap ()
+  "Objects under an overlapping prefix are both source and destination.
+The CLI allows it and exits 0, but which of its worker threads reaches
+such an object first is a race, so this is refused rather than asked
+about."
+  ;; Destination inside source.
+  (should-error (s3-manager--check-destination "b" "share/" "b" "share/sub/" t)
+                :type 'user-error)
+  ;; Source inside destination.
+  (should-error (s3-manager--check-destination "b" "share/sub/" "b" "share/" t)
+                :type 'user-error)
+  ;; Siblings are fine, and so is the same spelling across buckets.
+  (should-not (s3-manager--check-destination "b" "share/" "b" "backup/" t))
+  (should-not (s3-manager--check-destination "b" "share/" "other" "share/sub/" t)))
+
+(ert-deftest s3-manager-test-check-destination-refuses-an-access-point ()
+  "Two names for one bucket defeat any comparison of two strings.
+The CLI's own `s3 mv' documentation warns that a move between them can
+delete the object."
+  (dolist (bucket '("arn:aws:s3:us-east-1:1:accesspoint/ap" "my-ap-s3alias"
+                    "my-ap--op-s3" ""))
+    (should-error (s3-manager--check-destination "b" "a.png" bucket "a.png" nil)
+                  :type 'user-error))
+  (should-not (s3-manager--check-destination "b" "a.png" "plain-bucket" "a.png" nil)))
+
 (ert-deftest s3-manager-test-key-leaf ()
   (should (equal (s3-manager--key-leaf "a/b/c.txt") "c.txt"))
   (should (equal (s3-manager--key-leaf "c.txt") "c.txt"))
