@@ -20,14 +20,14 @@ An Emacs interface for browsing and managing objects on AWS S3 and
 S3-compatible services (MinIO, Cloudflare R2, Wasabi, LocalStack), implemented
 as a thin, **non-blocking** wrapper over the `aws` CLI.
 
-Two properties are non-negotiable in v0.1.0, because retrofitting either is a
+Two properties are non-negotiable, because retrofitting either is a
 rewrite rather than a patch:
 
 1. **Emacs never blocks.** No operation, however slow, freezes the editor.
 2. **No unbounded work.** No code path can be made to load an entire bucket
    into memory by a user who navigates into the wrong prefix.
 
-### 1.2 In scope for v0.1.0
+### 1.2 In scope
 
 - Discover and select AWS CLI profiles.
 - Per-profile endpoint support for S3-compatible services.
@@ -98,7 +98,7 @@ inside a sentinel:
 Do not write a `json.el` fallback: it is far slower, and it would mean
 maintaining two parsers for a configuration Emacs 30 has already eliminated.
 
-No third-party dependencies (`dash`, `s`, `transient`, `magit`) in v0.1.0.
+No third-party dependencies (`dash`, `s`, `transient`, `magit`).
 
 ### 2.2 Startup checks
 
@@ -1064,15 +1064,24 @@ and preserved CRs *look* stripped.
 | `^` | `s3-manager-up` | parent prefix, or back to bucket list |
 | `g` | `s3-manager-refresh` | invalidate cache for this prefix and re-list |
 | `+` | `s3-manager-load-more` | fetch the next page |
+| `C` | `s3-manager-copy` | copy to the other window: object → `G`, prefix → `R` (§11.9) |
 | `G` | `s3-manager-get` | download object to a prompted path |
 | `R` | `s3-manager-get-recursive` | download prefix recursively |
+| `P` | `s3-manager-upload` | upload a local file, or a directory recursively (§11.8) |
 | `d` | `s3-manager-mark-delete` | mark for deletion, move down |
 | `u` | `s3-manager-unmark` | unmark, move down |
 | `U` | `s3-manager-unmark-all` | clear all marks |
 | `x` | `s3-manager-execute` | execute marked deletions |
 | `D` | `s3-manager-delete` | delete entry at point immediately (confirm) |
 | `n` / `p` | next / previous line | |
+| `!` | `s3-manager-show-errors` | display the accumulated failure reports (§12) |
 | `q` | `quit-window` | |
+
+Unbound, `M-x` only: `s3-manager-upload-dry-run`,
+`s3-manager-delete-recursive-dry-run`, `s3-manager-dired-upload`,
+`s3-manager-dired-do-copy` (meant for `C` in `dired-mode-map`),
+`s3-manager-switch-profile`, `s3-manager-clear-cache`,
+`s3-manager-forget-profiles`, `s3-manager-list-profiles`.
 
 `RET` on an object **views** it; it does not download. Binding both `RET` and
 `G` to "get object" would spend the most valuable key on the map duplicating
@@ -1082,6 +1091,10 @@ footgun.
 The `d`/`x` split follows Dired: `d` marks, `x` executes. Making `d` delete
 immediately would put the destructive action on one of the most easily mistyped
 keys in the map.
+
+`C` duplicates `G`/`R` deliberately, and that is the point: it is Dired's copy
+key, so one key means "copy to the other window" on both sides of the pair
+(§11.9). `G` and `R` remain as the explicit forms.
 
 ---
 
@@ -1271,8 +1284,9 @@ Confirmation uses `yes-or-no-p` — the full typed word — never `y-or-n-p`:
 Recursively delete ALL objects under s3://media/videos/ ? (yes or no)
 ```
 
-This is the one operation in v0.1.0 that can destroy an unbounded amount of
-data; it must never be reachable by a single keystroke. `s3 rm --recursive` is also correct here; enumerating and deleting
+This can destroy an unbounded amount of data and must never be reachable
+by a single keystroke.  Recursive upload (§11.8) asks the same way, since
+it can overwrite just as many objects. `s3 rm --recursive` is also correct here; enumerating and deleting
 one key at a time would be orders of magnitude slower.
 
 `s3-manager-delete-recursive-dry-run` (no default binding) runs the same command
@@ -1616,7 +1630,7 @@ so the suite is never blocked on the tool.
 
 ### 14.2 Quality bar
 
-Per the project decision, v0.1.0 targets **clean personal-use quality, not MELPA
+Per the project decision, this targets **clean personal-use quality, not MELPA
 submission**: docstrings on every public symbol, a clean byte-compile with
 `byte-compile-error-on-warn`, and consistent `s3-manager-` / `s3-manager--`
 prefixing. `package-lint` and full `checkdoc` conformance are explicitly *not*

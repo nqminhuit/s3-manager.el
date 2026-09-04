@@ -142,9 +142,9 @@ input."
 
 (defun s3-manager--delete-prefix (prefix)
   "Delete every object under PREFIX, after emphatic confirmation."
-  ;; `yes-or-no-p', not `y-or-n-p': this is the one operation in v0.1.0 that
-  ;; can destroy an unbounded amount of data, and it must not be reachable by
-  ;; a single keystroke.
+  ;; `yes-or-no-p', not `y-or-n-p': unbounded destruction must not be
+  ;; reachable by a single keystroke.  Recursive upload asks the same way, for
+  ;; the same reason -- it can overwrite just as many objects.
   (unless (yes-or-no-p
            (format "Recursively delete ALL objects under %s? "
                    (s3-manager--s3-uri prefix)))
