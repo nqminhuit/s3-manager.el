@@ -467,8 +467,10 @@ out loud.  It is still not a failure report: nothing went wrong."
                                           (string-match-p "interrupted" m))
                                         echoed))
                    5))))
-      ;; Announced, but neither callback ran and nothing was reported.
-      (should (null called))
+      ;; Announced, and delivered to the failure path so the caller can
+      ;; release whatever it set up.  Nothing is written to the report: the
+      ;; caller's own handler decides, and this one does not.
+      (should (eq called 'error))
       (should (null (s3-manager-test--error-text))))))
 
 (ert-deftest s3-manager-test-callback-failure-survives-in-the-report ()
@@ -809,20 +811,44 @@ It must be surfaced, and it must not prevent resource cleanup."
                       messages))
     (should (= before (length (s3-manager-test--scratch-buffers))))))
 
-(ert-deftest s3-manager-test-transport-interrupt-runs-no-callbacks ()
-  "Exit 130 must not surface as an error, nor run either callback.
-It is announced in the echo area -- see
-`s3-manager-test-interruption-is-announced' -- but an interruption is
-not a failure, so nothing is reported and nothing downstream runs."
+(ert-deftest s3-manager-test-interrupt-delivers-a-failure ()
+  "Exit 130 must run the failure path, not vanish.
+
+[CORRECTED] This test previously asserted that neither callback ran,
+which is what the code did -- and the leak that followed: the caller's
+bookkeeping is on the failure path, so a transfer stayed counted
+forever and a listing stayed on \"loading\".  An interruption is a
+failure of the command, even though nothing went wrong."
   (let ((fired nil))
     (s3-manager-test--with-fake-aws (:exit 130)
       (let ((proc (s3-manager--aws-async
                    '("s3api" "list-buckets")
                    :on-success (lambda (_) (setq fired 'success))
-                   :on-error (lambda (_) (setq fired 'error)))))
+                   :on-error (lambda (err) (setq fired err)))))
         (s3-manager-test--wait (lambda () (not (process-live-p proc))))
-        (s3-manager-test--wait #'ignore 0.3)))
-    (should (null fired))))
+        (s3-manager-test--wait (lambda () fired))))
+    (should (consp fired))
+    (should (eq (nth 0 fired) 's3-manager-cli-error))
+    (should (eql (nth 2 fired) 130))))
+
+(ert-deftest s3-manager-test-interrupt-releases-a-transfer ()
+  "The mode line must not show a transfer that has been interrupted.
+Reproduced before the fix: `s3-manager--transfers' stuck at 1 and the
+status stuck at \"starting\", for the life of the buffer."
+  (let ((failed nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "production" s3-manager--bucket "media")
+      (cl-letf (((symbol-function 'message) #'ignore)
+                ((symbol-function 's3-manager--report-error) #'ignore))
+        (s3-manager-test--with-fake-aws (:exit 130)
+          (s3-manager--transfer '("s3" "cp" "/tmp/x" "s3://media/x")
+                                "interrupted transfer"
+                                nil (lambda () (setq failed t)))
+          (should (s3-manager-test--wait
+                   (lambda () (zerop s3-manager--transfers))))))
+      (should failed)
+      (should (null s3-manager--transfer-status)))))
 
 (ert-deftest s3-manager-test-transport-invalid-json-is-an-error ()
   (let ((result 'pending))
@@ -2681,6 +2707,153 @@ was gone from S3, yet the row was still on screen."
   (should (eq (keymap-lookup s3-manager-mode-map "U") #'s3-manager-unmark-all))
   (should (eq (keymap-lookup s3-manager-mode-map "x") #'s3-manager-execute))
   (should (eq (keymap-lookup s3-manager-mode-map "D") #'s3-manager-delete)))
+
+
+;;;; Batch robustness
+
+(ert-deftest s3-manager-test-dired-upload-refuses-duplicate-names ()
+  "Two marked files with the same name would race on one key.
+Keys come from the leaf, so /a/x.txt and /b/x.txt both write
+PREFIX/x.txt.  The overwrite probe cannot see it -- neither key exists
+yet -- so it has to be refused up front."
+  (skip-unless (require 'dired nil t))
+  (s3-manager-test--in-object-buffer
+    (let ((s3-buffer (current-buffer))
+          (a (make-temp-file "s3-dup-a" t))
+          (b (make-temp-file "s3-dup-b" t)))
+      (unwind-protect
+          (progn
+            (write-region "1\n" nil (expand-file-name "x.txt" a) nil 'silent)
+            (write-region "2\n" nil (expand-file-name "x.txt" b) nil 'silent)
+            (with-temp-buffer
+              (dired-mode)
+              (cl-letf (((symbol-function 'dired-get-marked-files)
+                         (lambda (&rest _)
+                           (list (expand-file-name "x.txt" a)
+                                 (expand-file-name "x.txt" b))))
+                        ((symbol-function 's3-manager--dired-target)
+                         (lambda () s3-buffer)))
+                (should-error (s3-manager-dired-upload) :type 'user-error))))
+        (delete-directory a t)
+        (delete-directory b t)))))
+
+(ert-deftest s3-manager-test-upload-batch-survives-an-unreadable-source ()
+  "One vanished file must not abandon the rest of the batch.
+`s3-manager--upload-start' signals for an unreadable source, and from
+inside the loop that unwound it: the later files were never attempted,
+no refresh ran, and no summary was printed."
+  (let ((present (make-temp-file "s3-batch" nil ".txt" "x\n"))
+        (gone (make-temp-file "s3-batch-gone" nil ".txt" "x\n"))
+        (also (make-temp-file "s3-batch-also" nil ".txt" "x\n"))
+        (said nil))
+    (delete-file gone)
+    (unwind-protect
+        (s3-manager-test--with-fresh-error-buffer
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) said))))
+              (s3-manager-test--with-fake-aws (:stdout "")
+                ;; The vanished one is in the middle.
+                (s3-manager--upload-batch (list present gone also) "")
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (seq-find (lambda (m)
+                                       (string-match-p "uploaded" m))
+                                     said)))))))
+          ;; Both survivors were attempted, and the summary is honest.
+          (should (seq-find (lambda (m)
+                              (string-match-p "uploaded 2, 1 failed" m))
+                            said))
+          (should (string-match-p "No longer readable"
+                                  (s3-manager-test--error-text))))
+      (delete-file present)
+      (delete-file also))))
+
+(ert-deftest s3-manager-test-upload-batch-is-sequential ()
+  "One `aws' process at a time.  A Dired buffer can hand this hundreds of
+marked files, and each transfer holds a process, a pipe and two buffers."
+  (let ((sources (mapcar (lambda (n)
+                           (make-temp-file (format "s3-seq-%d-" n) nil ".txt"
+                                           "x\n"))
+                         '(1 2 3)))
+        (peak 0))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (cl-letf (((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws (:stdout "" :delay "0.2")
+              (s3-manager--upload-batch sources "")
+              ;; Sample while they run; the predicate never holds, so this
+              ;; is a bounded poll rather than an assertion.
+              (s3-manager-test--wait
+               (lambda ()
+                 (setq peak (max peak s3-manager--transfers))
+                 nil)
+               1.0)
+              (should (s3-manager-test--wait
+                       (lambda () (zerop s3-manager--transfers)) 10))))
+          (should (= 1 peak)))
+      (mapc #'delete-file sources))))
+
+(ert-deftest s3-manager-test-remote-paths-are-refused-both-ways ()
+  "TRAMP paths reach neither the upload nor the download prompt's result.
+`aws' cannot read or write one, and the download path would create a
+directory on the remote host before failing."
+  (cl-letf (((symbol-function 'read-file-name)
+             (lambda (&rest _) "/ssh:host:/tmp/thing.txt"))
+            ((symbol-function 'file-remote-p)
+             (lambda (name &rest _) (string-prefix-p "/ssh:" name))))
+    (should-error (s3-manager--upload-source) :type 'user-error)
+    (should-error (s3-manager--read-destination-file "thing.txt")
+                  :type 'user-error)))
+
+
+;;;; Deadlines on unbounded commands
+
+(ert-deftest s3-manager-test-unbounded-commands-take-the-transfer-timeout ()
+  "Anything whose duration is set by the data, not by the service, must
+use `s3-manager-transfer-timeout'.  A recursive delete and either dry
+run can all outlast `s3-manager-timeout', and being killed mid-delete
+and told \"No response after 120 seconds\" is the worst of both."
+  (let ((seen nil))
+    (cl-letf (((symbol-function 's3-manager--aws-async)
+               (lambda (args &rest plist)
+                 (push (cons (nth 1 args)
+                             (list (plist-member plist :timeout)
+                                   (plist-get plist :timeout)))
+                       seen)
+                 nil))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'message) #'ignore))
+      (s3-manager-test--in-object-buffer
+        (s3-manager-test--goto-directory)
+        (s3-manager--delete-prefix "images/")
+        (s3-manager-delete-recursive-dry-run))
+      (s3-manager-test--with-upload-source source
+        (s3-manager-test--in-object-buffer
+          (cl-letf (((symbol-function 'read-file-name)
+                     (lambda (&rest _) source)))
+            (s3-manager-upload-dry-run)))))
+    (should (= 3 (length seen)))
+    (dolist (entry seen)
+      ;; Present, and nil -- inheriting the default by omission is the bug.
+      (should (nth 1 entry))
+      (should (null (nth 2 entry))))))
+
+(ert-deftest s3-manager-test-mode-line-quotes-percent-in-progress ()
+  "Progress text is re-read as a mode-line construct, so a `%' in an
+object key must not be expanded.  `s3-manager--quote-percent' exists for
+this and the header line already used it; this path did not."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq s3-manager--transfers 1
+          s3-manager--transfer-status "upload: sale-50%-off.png")
+    ;; `format-mode-line' needs a live window and returns "" in batch, so
+    ;; assert the contract directly: the `%' is doubled on the way out.
+    (let ((fragment (s3-manager--mode-line-status)))
+      (should (string-match-p "sale-50%%-off\\.png" fragment))
+      (should-not (string-match-p "50%-off" fragment)))))
 
 
 ;;;; Dired interoperability

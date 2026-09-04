@@ -160,6 +160,10 @@ input."
    :profile s3-manager--profile
    :buffer (current-buffer)
    :parse nil
+   ;; Unbounded, like a transfer: `s3-manager-timeout' is measured from the
+   ;; start, so a large prefix was killed mid-delete and reported as a
+   ;; timeout for an operation that was working.
+   :timeout s3-manager-transfer-timeout
    :name "s3-rm-recursive"
    :on-success (lambda (_output)
                  (message "S3: deleted everything under %s"
@@ -199,6 +203,8 @@ input."
        :profile s3-manager--profile
        :buffer (current-buffer)
        :parse nil
+       ;; Enumerates every object under the prefix; no fixed deadline fits.
+       :timeout s3-manager-transfer-timeout
        :name "s3-rm-dryrun"
        :on-success
        (lambda (output)

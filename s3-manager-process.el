@@ -361,9 +361,17 @@ TIMEOUT is seconds, or nil to wait indefinitely."
                               nil))
                     ((eql exit-code 130)
                      ;; The CLI's SIGINT status.  Not our own cancel, which
-                     ;; detaches sentinels before killing -- so this is a real
-                     ;; interruption, and silence would hide it.
-                     (message "S3: interrupted (%s)" (car args)))
+                     ;; detaches sentinels before killing, so this is a real
+                     ;; interruption from outside.  Delivered as a failure
+                     ;; rather than swallowed: callers release their state on
+                     ;; that path, and returning here without it left
+                     ;; transfers counted forever and listings stuck loading.
+                     (message "S3: interrupted (%s)" (car args))
+                     (deliver (list 's3-manager-cli-error command exit-code
+                                    (if (string-empty-p stderr)
+                                        "Interrupted"
+                                      stderr))
+                              nil))
                     ((eql exit-code 0)
                      (condition-case parse-err
                          (deliver nil (if parse

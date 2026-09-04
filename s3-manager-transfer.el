@@ -98,14 +98,20 @@ set up in advance."
 
 (defun s3-manager--read-destination-file (name)
   "Read a local destination for an object called NAME."
-  (let* ((directory (s3-manager--local-default-directory))
-         (chosen (expand-file-name
-                  (read-file-name (format "Download %s to: " name)
-                                  directory nil nil name)))
-         ;; Naming a directory means "into it, under the object's own name".
-         (destination (if (file-directory-p chosen)
-                          (expand-file-name name chosen)
-                        chosen)))
+  (let ((chosen (expand-file-name
+                 (read-file-name (format "Download %s to: " name)
+                                 (s3-manager--local-default-directory)
+                                 nil nil name))))
+    ;; First, before any predicate that would touch it: `file-directory-p' on
+    ;; a TRAMP path opens a connection, so the check has to precede the one
+    ;; below.  `aws' cannot write there in any case.
+    (when (file-remote-p chosen)
+      (user-error "%s is remote; aws cannot write there" chosen))
+    (let ((destination
+           ;; Naming a directory means "into it, under the object's own name".
+           (if (file-directory-p chosen)
+               (expand-file-name name chosen)
+             chosen)))
     ;; `aws s3 cp' overwrites without asking, so this is the only chance.
     (when (and (file-exists-p destination)
                (not (y-or-n-p (format "%s exists.  Overwrite? " destination))))
@@ -113,7 +119,7 @@ set up in advance."
     (let ((parent (file-name-directory destination)))
       (unless (file-directory-p parent)
         (make-directory parent t)))
-    destination))
+    destination)))
 
 (defun s3-manager-get ()
   "Download the object at point."
@@ -195,6 +201,11 @@ Writing the leaf into the destination is what keeps it."
     ;; ignoring it all reach here -- and these checks also narrow the window
     ;; between this prompt and the transfer, which for a single file spans a
     ;; round trip and an unbounded confirmation.
+    ;; Refused for the same reason `s3-manager--dired-sources' refuses it:
+    ;; `aws' cannot read a TRAMP path, and `default-directory' is pinned to a
+    ;; local one, so the CLI's own failure would be mystifying.
+    (when (file-remote-p source)
+      (user-error "%s is remote; aws cannot read it" source))
     (unless (file-exists-p source)
       (user-error "%s does not exist" source))
     (unless (file-readable-p source)
@@ -452,40 +463,61 @@ reproducible, and the probes are dwarfed by the transfer that follows."
                                           done)))))))
 
 (defun s3-manager--upload-batch (sources prefix)
-  "Upload SOURCES into PREFIX, refreshing once when the last one lands.
+  "Upload SOURCES into PREFIX one at a time, refreshing when the last lands.
+
+Sequential, like the probes above and for a stronger reason: each
+transfer is an `aws' process holding a pipe and two buffers, and a Dired
+buffer can hand this hundreds of marked files.  A queue with a width is
+§17\='s work, not this.
+
 A batch is not atomic, so failures are counted and named rather than
 folded into a total."
   (let* ((total (length sources))
-         (pending total)
          (failed 0)
          (directories (seq-filter #'file-directory-p sources))
          (finish
           (lambda ()
-            (setq pending (1- pending))
-            (when (zerop pending)
-              (s3-manager--after-upload prefix nil)
-              ;; Each uploaded directory created keys beneath its own prefix.
-              (dolist (directory directories)
-                (s3-manager--cache-purge
-                 s3-manager--profile
-                 (s3-manager--endpoint-for s3-manager--profile)
-                 s3-manager--bucket
-                 (s3-manager--upload-key directory prefix)))
-              (if (zerop failed)
-                  (message "S3: uploaded %d file%s" total
-                           (if (= total 1) "" "s"))
-                (message "S3: uploaded %d, %d failed -- see %s"
-                         (- total failed) failed
-                         s3-manager--error-buffer))))))
-    (dolist (source sources)
-      (let* ((recursive (file-directory-p source))
-             (key (s3-manager--upload-key source prefix))
-             (uri (s3-manager--s3-uri key)))
-        (s3-manager--upload-start
-         source uri key prefix recursive
-         (lambda (ok)
-           (unless ok (setq failed (1+ failed)))
-           (funcall finish)))))))
+            (s3-manager--after-upload prefix nil)
+            ;; Each uploaded directory created keys beneath its own prefix.
+            (dolist (directory directories)
+              (s3-manager--cache-purge
+               s3-manager--profile
+               (s3-manager--endpoint-for s3-manager--profile)
+               s3-manager--bucket
+               (s3-manager--upload-key directory prefix)))
+            (if (zerop failed)
+                (message "S3: uploaded %d file%s" total
+                         (if (= total 1) "" "s"))
+              (message "S3: uploaded %d, %d failed -- see %s"
+                       (- total failed) failed s3-manager--error-buffer))))
+         (step nil))
+    (setq step
+          (lambda (remaining)
+            (if (null remaining)
+                (funcall finish)
+              (let* ((source (car remaining))
+                     (rest (cdr remaining))
+                     (recursive (file-directory-p source))
+                     (key (s3-manager--upload-key source prefix))
+                     (uri (s3-manager--s3-uri key)))
+                ;; Guarded here rather than left to `s3-manager--upload-start',
+                ;; whose `user-error' would unwind the whole batch and leave
+                ;; the rest unattempted with no summary.
+                (if (not (file-readable-p source))
+                    (progn
+                      (s3-manager--record-error
+                       (s3-manager--local-error
+                        (format "upload %s" source)
+                        "No longer readable")
+                       "upload")
+                      (setq failed (1+ failed))
+                      (funcall step rest))
+                  (s3-manager--upload-start
+                   source uri key prefix recursive
+                   (lambda (ok)
+                     (unless ok (setq failed (1+ failed)))
+                     (funcall step rest))))))))
+    (funcall step sources)))
 
 ;;;###autoload
 (defun s3-manager-dired-upload ()
@@ -499,7 +531,21 @@ but a prompt per file is not."
     (user-error "Not a Dired buffer"))
   (let* ((sources (s3-manager--dired-sources))
          (target (s3-manager--dired-target))
-         (recursive (seq-some #'file-directory-p sources)))
+         (recursive (seq-some #'file-directory-p sources))
+         (leaves (mapcar #'s3-manager--upload-key-name sources)))
+    ;; Keys come from the leaf, so /a/x.txt and /b/x.txt would both write
+    ;; PREFIX/x.txt: two transfers racing, one object, and nothing to say
+    ;; which won.  The probe cannot see it -- neither key exists yet.
+    (when (/= (length leaves) (length (seq-uniq leaves)))
+      (user-error "Marked files share a name: %s"
+                  (string-join
+                   (seq-uniq (seq-filter (lambda (leaf)
+                                           (> (seq-count (lambda (o)
+                                                           (equal o leaf))
+                                                         leaves)
+                                              1))
+                                         leaves))
+                   ", ")))
     (with-current-buffer target
       (let* ((prefix s3-manager--prefix)
              (keys (mapcar (lambda (source)
@@ -559,6 +605,9 @@ file."
      :profile s3-manager--profile
      :buffer (current-buffer)
      :parse nil
+     ;; Enumerates the whole tree; the README recommends it for exactly the
+     ;; large ones a fixed deadline would kill.
+     :timeout s3-manager-transfer-timeout
      :name "s3-cp-dryrun"
      :on-success
      (lambda (output)

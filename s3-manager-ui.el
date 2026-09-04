@@ -47,7 +47,10 @@
              (if (> s3-manager--transfers 1)
                  (format "%d: " s3-manager--transfers)
                "")
-             s3-manager--transfer-status))))
+             ;; `mode-line-process' re-reads a string from :eval as a
+             ;; construct, and progress lines carry object keys: an upload of
+             ;; "sale-50%-off.png" would render `%-' as padding.
+             (s3-manager--quote-percent s3-manager--transfer-status)))))
 
 (defun s3-manager--update-header-line ()
   "Refresh the header line from this buffer's state."
