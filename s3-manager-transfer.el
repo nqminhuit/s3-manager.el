@@ -58,6 +58,42 @@ follows their setting rather than imposing one."
     (setq s3-manager--transfer-status nil))
   (force-mode-line-update))
 
+(defun s3-manager--large-transfer-p (size)
+  "Return non-nil when a transfer of SIZE should offer its command.
+SIZE is a byte count, or the symbol `unbounded' for a recursive
+transfer, whose extent nothing here can know."
+  (and s3-manager-large-transfer-size
+       (or (eq size 'unbounded)
+           (and (integerp size) (> size s3-manager-large-transfer-size)))))
+
+(defun s3-manager--offer-command (args description size)
+  "Ask whether to run ARGS here, or hand over the command line.
+
+Returns non-nil to run it, nil when the command was handed over instead,
+and signals a `user-error' when the answer is quit, so a caller can
+write `(when (s3-manager--offer-command ...) (s3-manager--transfer ...))'.
+
+DESCRIPTION names the operation and SIZE decides whether to ask at all
+-- see `s3-manager--large-transfer-p'.  The command shown is built by
+`s3-manager--full-argv', the same function the transport builds its own
+vector with, so what is offered is what would have run."
+  (if (not (s3-manager--large-transfer-p size))
+      t
+    (pcase (car (read-multiple-choice
+                 (format "%s (%s)" description
+                         (if (eq size 'unbounded)
+                             "recursive, size unknown"
+                           (s3-manager--format-size size)))
+                 '((?r "run here" "Transfer it from Emacs, as usual")
+                   (?c "copy command"
+                       "Put the aws command in the kill ring instead")
+                   (?q "quit" "Do nothing"))))
+      (?r t)
+      (?c (s3-manager--show-command
+           (s3-manager--full-argv s3-manager--profile args))
+          nil)
+      (_ (user-error "Aborted")))))
+
 (defun s3-manager--transfer (args description &optional on-done on-failure)
   "Run the transfer ARGS, reporting progress in the current buffer.
 DESCRIPTION names the operation in messages and error reports.
@@ -148,9 +184,12 @@ option."
     (let* ((key (s3-manager-entry-key entry))
            (destination (s3-manager--read-destination-file
                          (s3-manager-entry-display-name entry))))
-      (s3-manager--transfer
-       (s3-manager--get-args (s3-manager--s3-uri key) destination)
-       (format "downloading %s to %s" key (abbreviate-file-name destination))))))
+      (let ((args (s3-manager--get-args (s3-manager--s3-uri key) destination))
+            (description (format "downloading %s to %s"
+                                 key (abbreviate-file-name destination))))
+        (when (s3-manager--offer-command args description
+                                         (s3-manager-entry-size entry))
+          (s3-manager--transfer args description))))))
 
 (defun s3-manager-get-recursive ()
   "Download every object under the prefix at point."
@@ -175,10 +214,12 @@ option."
         (unless (y-or-n-p (format "Create %s? " destination))
           (user-error "Download aborted"))
         (make-directory destination t))
-      (s3-manager--transfer
-       (s3-manager--get-args (s3-manager--s3-uri prefix) destination t)
-       (format "downloading %s to %s"
-               prefix (abbreviate-file-name destination))))))
+      (let ((args (s3-manager--get-args
+                   (s3-manager--s3-uri prefix) destination t))
+            (description (format "downloading %s to %s"
+                                 prefix (abbreviate-file-name destination))))
+        (when (s3-manager--offer-command args description 'unbounded)
+          (s3-manager--transfer args description))))))
 
 (defun s3-manager--upload-key-name (source)
   "Return the S3 leaf name for local SOURCE.
@@ -290,13 +331,27 @@ called on failure too."
                   (if done
                       (funcall done ok)
                     (s3-manager--after-upload prefix key recursive)))))
-    (s3-manager--transfer
-     (s3-manager--upload-args source uri recursive)
-     (format "uploading %s to %s" (abbreviate-file-name source) uri)
-     (lambda () (funcall finish t))
-     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
-     ;; exactly as in `s3-manager--delete-prefix'.
-     (lambda () (funcall finish nil)))))
+    (let ((args (s3-manager--upload-args source uri recursive))
+          (description (format "uploading %s to %s"
+                               (abbreviate-file-name source) uri)))
+      ;; Not in a batch: DONE means the Dired batch is driving, which must
+      ;; not ask per file and whose callback has to fire either way or the
+      ;; remaining files never start.
+      ;;
+      ;; Not for a recursive upload either, which has already demanded a
+      ;; typed `yes'.  Two questions for one action is worse than not
+      ;; offering, and the typed `yes' is the one that must not go: it is
+      ;; there because the operation is unbounded.
+      (when (or done recursive
+                (s3-manager--offer-command
+                 args description
+                 (or (file-attribute-size (file-attributes source)) 0)))
+        (s3-manager--transfer
+         args description
+         (lambda () (funcall finish t))
+         ;; Also on failure: `aws s3' exits 1 or 2 having done part of the
+         ;; work, exactly as in `s3-manager--delete-prefix'.
+         (lambda () (funcall finish nil)))))))
 
 (defun s3-manager--prompt-later (buffer thunk &optional context)
   "Run THUNK in BUFFER from a zero-second timer.

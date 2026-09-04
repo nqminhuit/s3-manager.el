@@ -158,12 +158,7 @@ that differed from the run one would be worse than showing none."
 The package never executes this string.  It is quoted anyway, because it
 is shown to the user in `s3-manager--error-buffer' and the natural next
 step is to paste it into a shell to reproduce the failure."
-  (s3-manager--redact
-   (mapconcat (lambda (a)
-                (if (string-match-p "\\`[A-Za-z0-9_@%+=:,./-]+\\'" a)
-                    a
-                  (shell-quote-argument a)))
-              argv " ")))
+  (s3-manager--redact (s3-manager--quote-argv argv)))
 
 
 ;;;; Output parsing

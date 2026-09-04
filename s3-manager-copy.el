@@ -46,7 +46,8 @@ function of this struct."
   source-bucket source-key
   bucket key                            ; the destination
   recursive                             ; the source is a prefix
-  move)                                 ; `s3 mv': the source is deleted
+  move                                  ; `s3 mv': the source is deleted
+  size)                                 ; source bytes, nil for a prefix
 
 (defun s3-manager--job-source-uri (job)
   "Return JOB's source as an s3:// URI."
@@ -222,8 +223,23 @@ the default would only pin us to it."
 
 (defun s3-manager--copy-start (job)
   "Run JOB, refreshing both ends when it stops, either way."
+  (let ((args (s3-manager--copy-args job)))
+    ;; Nil for a recursive job, which has already demanded a typed `yes':
+    ;; two questions for one action is worse than not offering.
+    ;;
+    ;; The bytes never cross this machine either way, so what the offer buys
+    ;; here is duration rather than bandwidth -- a long copy outlives an
+    ;; Emacs session more often than it saturates anything.
+    (when (s3-manager--offer-command
+           args (s3-manager--job-describe job)
+           (and (not (s3-manager-job-recursive job))
+                (s3-manager-job-size job)))
+      (s3-manager--copy-run job args))))
+
+(defun s3-manager--copy-run (job args)
+  "Run ARGS as JOB, refreshing both ends when it stops, either way."
   (s3-manager--transfer
-   (s3-manager--copy-args job)
+   args
    (s3-manager--job-describe job)
    (lambda () (s3-manager--after-copy job))
    (lambda ()
@@ -311,7 +327,8 @@ normalised form, which is what makes them complete."
      :source-key (s3-manager-entry-key entry)
      :bucket bucket :key key
      :recursive directory
-     :move move)))
+     :move move
+     :size (s3-manager-entry-size entry))))
 
 (defun s3-manager-copy-to ()
   "Copy the entry at point to another S3 location.

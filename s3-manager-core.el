@@ -70,6 +70,20 @@ be an unbounded operation.  Anything larger is refused with its size and
 a pointer at `s3-manager-get'."
   :type 'integer)
 
+(defcustom s3-manager-large-transfer-size (* 100 1024 1024)
+  "Transfers above this many bytes offer the command instead of running.
+
+Moving gigabytes is not something to start inside an editor you might
+quit, so above this size the transfer asks first, and one of the answers
+is the `aws' command line to paste into a terminal.
+
+A recursive transfer always asks, whatever this is: nothing here knows
+how much sits under a prefix, and a delimited listing cannot say.  Nil
+turns the whole offer off, recursive included -- it is the switch for
+someone who never wants the question."
+  :type '(choice (integer :tag "Bytes")
+                 (const :tag "Never offer" nil)))
+
 (defcustom s3-manager-cache-max-entries 200
   "Maximum number of listings held in the cache.
 Bounds what a deep tree walk can retain.  Nothing expires on a timer;
@@ -184,6 +198,17 @@ configuration, which is the preferred arrangement."
 
 (defconst s3-manager--error-buffer "*S3 Manager Error*"
   "Name of the buffer accumulating AWS CLI failure reports.")
+
+(defun s3-manager--quote-argv (argv)
+  "Render ARGV as a shell command line, quoting only what needs it.
+Separate from `s3-manager--command-string' so that a caller can tell
+whether redaction changed anything: a masked command is not one the user
+can paste, and saying so beats handing over a plausible wrong one."
+  (mapconcat (lambda (a)
+               (if (string-match-p "\\`[A-Za-z0-9_@%+=:,./-]+\\'" a)
+                   a
+                 (shell-quote-argument a)))
+             argv " "))
 
 (defun s3-manager--exit-code-gloss (code &optional detail)
   "Return a short parenthetical explanation of exit CODE.
@@ -401,6 +426,34 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
 
 (defconst s3-manager--dry-run-buffer "*S3 Manager Dry Run*"
   "Name of the buffer showing what an operation would do.")
+
+(defconst s3-manager--command-buffer "*S3 Manager Command*"
+  "Name of the buffer showing a command to run in a terminal.")
+
+(defun s3-manager--show-command (argv)
+  "Put ARGV's command line in the kill ring, and display it.
+
+Both, deliberately: the kill ring is what makes pasting into a terminal
+one step, and it says nothing about what was copied, so the buffer is
+what lets the user read the command before running it.
+
+A masked command is flagged rather than handed over quietly.  Nothing
+this package puts on a command line is a credential -- only a profile
+name and possibly an endpoint URL -- but an endpoint carrying
+`user:pass@host' is one, and a key shaped like an access-key id trips
+the same rules.  Either way the string is no longer the command, and
+saying so beats a plausible wrong one."
+  (let* ((command (s3-manager--quote-argv argv))
+         (masked (s3-manager--redact command)))
+    (kill-new masked)
+    (s3-manager--show-report
+     s3-manager--command-buffer
+     "Run this in a terminal:"
+     (concat masked "\n"
+             (unless (equal command masked)
+               (concat "\nCredential-shaped text was masked above, so this"
+                       " is no longer\nthe command that would have run.\n"))))
+    (message "S3: command copied to the kill ring")))
 
 (defun s3-manager--show-report (buffer heading body)
   "Display BODY under HEADING in BUFFER, replacing what was there.

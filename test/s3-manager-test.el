@@ -95,6 +95,10 @@ one exit code for both cannot express it."
   (declare (indent 1))
   `(let* ((s3-manager-aws-program s3-manager-test--fake-aws)
           (s3-manager-timeout 10)
+          ;; No large-transfer offer unless a test asks for one: it prompts,
+          ;; and `read-multiple-choice' in batch blocks on stdin.  A test
+          ;; that wants the offer binds this itself.
+          (s3-manager-large-transfer-size nil)
           ;; The listing cache is global: without a fresh one per test, a
           ;; listing cached by an earlier test silently satisfies this
           ;; test's fetch and the request under test never happens.
@@ -5364,4 +5368,187 @@ point on a row every command refuses."
                (lambda (buffer heading body) (setq seen (list buffer heading body)))))
       (s3-manager--show-dry-run "Would delete:" "x\n"))
     (should (equal seen (list s3-manager--dry-run-buffer "Would delete:" "x\n")))))
+
+;;;; Handing over the command for a large transfer
+
+(defmacro s3-manager-test--answering-offer (answer &rest body)
+  "Run BODY with the large-transfer offer answered with ANSWER.
+ANSWER is one of ?r, ?c or ?q.  Records the prompt in `offered'."
+  (declare (indent 1))
+  `(let ((offered nil))
+     (cl-letf (((symbol-function 'read-multiple-choice)
+                (lambda (prompt &rest _)
+                  (setq offered prompt)
+                  (list ,answer "" ""))))
+       ,@body)))
+
+(ert-deftest s3-manager-test-large-transfer-p ()
+  "A byte count over the threshold, or anything recursive."
+  (let ((s3-manager-large-transfer-size 100))
+    (should (s3-manager--large-transfer-p 101))
+    (should (s3-manager--large-transfer-p 'unbounded))
+    (should-not (s3-manager--large-transfer-p 100))
+    (should-not (s3-manager--large-transfer-p 1))
+    ;; An object whose size the listing did not carry is not "large".
+    (should-not (s3-manager--large-transfer-p nil)))
+  ;; Nil is the switch for someone who never wants the question, and it
+  ;; turns off the recursive case too.
+  (let ((s3-manager-large-transfer-size nil))
+    (should-not (s3-manager--large-transfer-p 'unbounded))
+    (should-not (s3-manager--large-transfer-p (* 1024 1024 1024)))))
+
+(ert-deftest s3-manager-test-below-the-threshold-just-runs ()
+  "The common case must not have grown a prompt."
+  (let ((argv-file (make-temp-file "s3-offer-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)          ; README.md, 1234 bytes
+          (cl-letf (((symbol-function 'read-multiple-choice)
+                     (lambda (&rest _) (error "Must not ask"))))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (let ((s3-manager-large-transfer-size (* 100 1024 1024))
+                    (destination (make-temp-name "/tmp/s3out")))
+                (cl-letf (((symbol-function 'read-file-name)
+                           (lambda (&rest _) destination)))
+                  (s3-manager-get)
+                  (s3-manager-test--wait-for-argv argv-file 1)))))
+          (should (= 1 (length (s3-manager-test--argv-records argv-file)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-above-the-threshold-asks-and-can-still-run ()
+  (let ((argv-file (make-temp-file "s3-offer-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-test--answering-offer ?r
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (let ((s3-manager-large-transfer-size 100)   ; README.md is 1234
+                    (destination (make-temp-name "/tmp/s3out")))
+                (cl-letf (((symbol-function 'read-file-name)
+                           (lambda (&rest _) destination)))
+                  (s3-manager-get)
+                  (s3-manager-test--wait-for-argv argv-file 1))))
+            ;; The question names the size, which is what makes it a warning
+            ;; rather than an interruption.
+            (should (string-match-p "1.2 KiB" offered))
+            (should (string-match-p "downloading" offered)))
+          (should (= 1 (length (s3-manager-test--argv-records argv-file)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copying-the-command-runs-nothing ()
+  "Answering `c' must start no process at all."
+  (let ((argv-file (make-temp-file "s3-offer-argv"))
+        (kill-ring nil))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--answering-offer ?c
+            (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--goto-object)
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (let ((s3-manager-large-transfer-size 100))
+                  (cl-letf (((symbol-function 'read-file-name)
+                             (lambda (&rest _) "/tmp/s3out")))
+                    (s3-manager-get)
+                    (s3-manager-test--wait #'ignore 0.3))))))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copied-command-reaches-the-kill-ring ()
+  "And it is the command that would have run, program and flags included."
+  (let ((kill-ring nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--answering-offer ?c
+        (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-test--goto-object)
+          (let ((s3-manager-large-transfer-size 100)
+                (s3-manager-endpoint-url nil)
+                (s3-manager-endpoint-alist nil))
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _) "/tmp/s3out")))
+              (s3-manager-get)))))
+      (let ((copied (current-kill 0)))
+        (should (equal copied
+                       (s3-manager--command-string
+                        (s3-manager--full-argv
+                         "production"
+                         (s3-manager--get-args "s3://media/README.md"
+                                               "/tmp/s3out")))))
+        ;; Self-contained: the profile has to travel with it.
+        (should (string-match-p "--profile production" copied))
+        (should (string-prefix-p "aws " copied))
+        ;; And it is in the buffer too, since the kill ring says nothing.
+        (with-current-buffer s3-manager--command-buffer
+          (should (string-match-p "Run this in a terminal" (buffer-string)))
+          (should (string-match-p "s3://media/README.md" (buffer-string))))))))
+
+(ert-deftest s3-manager-test-quitting-the-offer-signals ()
+  (s3-manager-test--in-object-buffer
+    (s3-manager-test--goto-object)
+    (s3-manager-test--answering-offer ?q
+      (let ((s3-manager-large-transfer-size 100))
+        (cl-letf (((symbol-function 'read-file-name)
+                   (lambda (&rest _) "/tmp/s3out")))
+          (should-error (s3-manager-get) :type 'user-error))))))
+
+(ert-deftest s3-manager-test-recursive-download-always-offers ()
+  "Nothing here knows how much sits under a prefix, so it always asks."
+  (let ((argv-file (make-temp-file "s3-offer-argv")))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer
+          (s3-manager-test--goto-directory)
+          (s3-manager-test--answering-offer ?r
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              ;; A threshold far above anything, and it asks regardless.
+              (let ((s3-manager-large-transfer-size (* 1024 1024 1024 1024)))
+                (cl-letf (((symbol-function 'read-directory-name)
+                           (lambda (&rest _) temporary-file-directory)))
+                  (s3-manager-get-recursive)
+                  (s3-manager-test--wait-for-argv argv-file 1))))
+            (should (string-match-p "recursive, size unknown" offered))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-a-recursive-upload-does-not-ask-twice ()
+  "It already demands a typed `yes'; two questions for one action is worse.
+
+The typed `yes' is the one that cannot go -- it is there because the
+operation is unbounded -- so the offer stands aside rather than stacking
+on top of it."
+  (s3-manager-test--with-upload-tree tree
+    (let ((argv-file (make-temp-file "s3-offer-argv")))
+      (unwind-protect
+          (s3-manager-test--in-object-buffer
+            (cl-letf (((symbol-function 'read-multiple-choice)
+                       (lambda (&rest _) (error "Must not ask twice")))
+                      ((symbol-function 'read-file-name) (lambda (&rest _) tree))
+                      ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (let ((s3-manager-large-transfer-size 1))
+                  (s3-manager-upload)
+                  (s3-manager-test--wait-for-argv argv-file 1))))
+            (should (member "--recursive"
+                            (car (s3-manager-test--argv-records argv-file)))))
+        (delete-file argv-file)))))
+
+(ert-deftest s3-manager-test-a-masked-command-is-flagged ()
+  "A redacted command is not the command; say so rather than hand it over."
+  (let ((kill-ring nil))
+    (cl-letf (((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      ;; An endpoint carrying credentials is the case redaction exists for.
+      (s3-manager--show-command
+       '("aws" "--endpoint-url" "https://user:hunter2@minio.example.com"
+         "s3" "cp" "s3://b/k" "/tmp/o"))
+      (with-current-buffer s3-manager--command-buffer
+        (should (string-match-p "no longer" (buffer-string)))
+        (should-not (string-match-p "hunter2" (buffer-string))))
+      (should-not (string-match-p "hunter2" (current-kill 0)))
+      ;; An ordinary command carries no such warning.
+      (s3-manager--show-command '("aws" "s3" "cp" "s3://b/k" "/tmp/o"))
+      (with-current-buffer s3-manager--command-buffer
+        (should-not (string-match-p "no longer" (buffer-string)))))))
 
