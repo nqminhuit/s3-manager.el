@@ -1068,7 +1068,8 @@ and preserved CRs *look* stripped.
 |-----|---------|--------|
 | `RET` | `s3-manager-open` | directory → descend; object → **view** (§11.7) |
 | `^` | `s3-manager-up` | parent prefix, or back to bucket list |
-| `g` | `s3-manager-refresh` | invalidate cache for this prefix and re-list |
+| `g r` | `s3-manager-refresh` | invalidate cache for this prefix and re-list |
+| `g g` | `s3-manager-beginning-of-listing` | first row, skipping the column header |
 | `+` | `s3-manager-load-more` | fetch the next page |
 | `C` | `s3-manager-copy` | copy to the other window: Dired, or nothing there, → download; an S3 listing → server-side (§11.10) |
 | `c` | `s3-manager-copy-to` | copy to a prompted S3 location (§11.10) |
@@ -1094,6 +1095,16 @@ Unbound, `M-x` only: `s3-manager-upload-dry-run`,
 `RET` on an object **views** it; it does not download. A `RET` that silently
 starts a multi-gigabyte download is a footgun, and spending the most valuable
 key on the map to duplicate `C` would waste it.
+
+**`g` is a prefix, not a command.** `evil-collection` gives Dired that shape --
+`gr` reverts, `gg` is left to Evil -- and binding `g` itself would swallow
+`gg`, since this map is registered as overriding and anything it resolves beats
+Evil, an inherited `g` from `special-mode` included. `gg` is bound rather than
+left to Evil so that it works without Evil too, and it is
+`s3-manager-beginning-of-listing` rather than `beginning-of-buffer`: this mode
+sets `tabulated-list-use-header-line` to nil, spending the header line on the
+profile and prefix, so the column names are a real line in the buffer with no
+entry behind them and every command refuses it.
 
 The `d`/`x` split follows Dired: `d` marks, `x` executes. Making `d` delete
 immediately would put the destructive action on one of the most easily mistyped

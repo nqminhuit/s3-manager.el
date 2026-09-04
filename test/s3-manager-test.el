@@ -2206,7 +2206,12 @@ and no Emacs file browser behaves that way."
 
 (ert-deftest s3-manager-test-load-more-is-bound ()
   (should (eq (keymap-lookup s3-manager-mode-map "+") #'s3-manager-load-more))
-  (should (eq (keymap-lookup s3-manager-mode-map "g") #'s3-manager-refresh)))
+  (should (eq (keymap-lookup s3-manager-mode-map "g r") #'s3-manager-refresh))
+  ;; `g' is a prefix, so `gg' can reach the top of the buffer the way Evil
+  ;; and `evil-collection''s Dired both spell it.
+  (should-not (commandp (keymap-lookup s3-manager-mode-map "g")))
+  (should (eq (keymap-lookup s3-manager-mode-map "g g")
+              #'s3-manager-beginning-of-listing)))
 
 
 ;;;; Transfers
@@ -4547,7 +4552,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g" "+" "C" "c" "r" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g r" "g g" "+" "C" "c" "r" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.
@@ -5253,4 +5258,24 @@ that new object a deletion mark the user never set."
         :profile "p" :source-bucket "bk" :source-key "README.md"
         :bucket "bk" :key "copied.md" :recursive nil :move nil)))
     (should (gethash "README.md" s3-manager--marks))))
+
+(ert-deftest s3-manager-test-gg-lands-on-an-entry-not-the-header ()
+  "The column names are a real line in the buffer, with no entry behind them.
+
+`tabulated-list-use-header-line' is nil here -- the header line carries
+the profile and prefix instead -- so `beginning-of-buffer' would leave
+point on a row every command refuses."
+  (s3-manager-test--in-object-buffer
+    (goto-char (point-max))
+    (s3-manager-beginning-of-listing)
+    (let ((id (tabulated-list-get-id)))
+      (should id)
+      (should (s3-manager-entry-p id))
+      ;; The first row of this fixture, in listing order.
+      (should (equal (s3-manager-entry-key id) "images/")))
+    ;; And it is genuinely the first entry, not merely some entry.
+    (should (eq (point) (save-excursion
+                          (goto-char (point-min))
+                          (while (null (tabulated-list-get-id)) (forward-line 1))
+                          (point))))))
 

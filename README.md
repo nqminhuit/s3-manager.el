@@ -45,7 +45,8 @@ From GitHub:
 | `RET` | enter a bucket or prefix; open a small object read-only |
 | `^` | up one level |
 | `+` | fetch the next page of a truncated listing |
-| `g` / `C-u g` | refresh; with `C-u`, drop every cached listing for the bucket |
+| `g r` / `C-u g r` | refresh; with `C-u`, drop every cached listing for the bucket |
+| `g g` | first row of the listing |
 | `C` | copy toward the other window — download, or a server-side copy into another listing |
 | `c` | copy to another S3 location, server-side |
 | `r` | rename, or move elsewhere in S3 |

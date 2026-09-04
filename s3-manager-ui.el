@@ -93,8 +93,7 @@
 (defvar-keymap s3-manager-mode-map
   :doc "Keymap for `s3-manager-mode'."
   :parent tabulated-list-mode-map
-  ;; `g' and `q' arrive from `special-mode' via the replaced
-  ;; `revert-buffer-function', so they are deliberately not rebound here.
+  ;; `q' arrives from `special-mode', so it is deliberately not rebound here.
   ;;
   ;; `s3-manager-get' and `s3-manager-get-recursive' are deliberately not
   ;; bound either.  `C' already falls back to them when no other window holds
@@ -103,10 +102,18 @@
   ;; end-of-buffer.  Both remain available as `M-x'.
   "RET" #'s3-manager-open
   "^" #'s3-manager-up
-  ;; `g' is bound explicitly, not left to `special-mode' -> `revert-buffer',
-  ;; whose first argument is IGNORE-AUTO -- so `C-u g' could never reach the
+  ;; `g' is a prefix, not a command, which is the shape `evil-collection'
+  ;; gives Dired: `gr' reverts there and `gg' is left to Evil.  Binding `g'
+  ;; itself would swallow `gg' -- this map is registered as overriding, so
+  ;; anything it resolves beats Evil, and an inherited `g' from
+  ;; `special-mode' does too.  `gg' is bound rather than left to Evil so that
+  ;; it also works without it.
+  ;;
+  ;; Refresh is not left to `special-mode' -> `revert-buffer' either, whose
+  ;; first argument is IGNORE-AUTO, so `C-u' could never reach the
   ;; whole-bucket purge.  `revert-buffer-function' still works for M-x.
-  "g" #'s3-manager-refresh
+  "g g" #'s3-manager-beginning-of-listing
+  "g r" #'s3-manager-refresh
   "+" #'s3-manager-load-more
   "C" #'s3-manager-copy
   "c" #'s3-manager-copy-to
@@ -496,6 +503,19 @@ TARGET, when given, is the entry to put point on once the listing lands."
       (s3-manager--reload))
      (t
       (s3-manager-view)))))
+
+(defun s3-manager-beginning-of-listing ()
+  "Move to the first row of the listing.
+
+`beginning-of-buffer' would land on the column header: this mode sets
+`tabulated-list-use-header-line' to nil, because the header line is
+spent on the profile and prefix, so those column names are a real line
+in the buffer with no entry behind them.  Every command here refuses a
+row without one, so `gg' has to skip it."
+  (interactive)
+  (goto-char (point-min))
+  (while (and (not (eobp)) (null (tabulated-list-get-id)))
+    (forward-line 1)))
 
 (defun s3-manager-up ()
   "Move to the parent prefix, or back to the bucket list."
