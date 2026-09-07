@@ -5640,3 +5640,69 @@ never started -- the batch would stall with no summary."
     ;; Both files went, and the batch reported its summary.
     (should (seq-find (lambda (m) (string-match-p "uploaded 2 files" m)) said))))
 
+;;;; The sequential batch driver
+
+(ert-deftest s3-manager-test-run-sequentially-visits-every-item-in-order ()
+  (let (seen (failures 'unset))
+    (s3-manager--run-sequentially
+     '(a b c)
+     (lambda (item done) (push item seen) (funcall done t))
+     (lambda (failed) (setq failures failed)))
+    (should (equal (nreverse seen) '(a b c)))
+    (should (equal failures 0))))
+
+(ert-deftest s3-manager-test-run-sequentially-counts-failures ()
+  "A batch is not atomic: failures are counted, not folded into a total."
+  (let ((failures 'unset))
+    (s3-manager--run-sequentially
+     '(ok bad ok bad)
+     (lambda (item done) (funcall done (eq item 'ok)))
+     (lambda (failed) (setq failures failed)))
+    (should (equal failures 2))))
+
+(ert-deftest s3-manager-test-run-sequentially-never-overlaps ()
+  "One process at a time is the whole point: a listing can hand it hundreds.
+
+Asserted by having START refuse to begin while another item is still
+open, which is what a parallel driver would trip."
+  (let ((live 0) (peak 0) (order nil) (pending nil))
+    (s3-manager--run-sequentially
+     '(1 2 3)
+     (lambda (item done)
+       (setq live (1+ live)
+             peak (max peak live))
+       (push item order)
+       ;; Finish asynchronously, as a real transfer does.
+       (push (lambda () (setq live (1- live)) (funcall done t)) pending))
+     #'ignore)
+    ;; Drain the continuations in the order they were created.
+    (while pending
+      (let ((next (car (last pending))))
+        (setq pending (butlast pending))
+        (funcall next)))
+    (should (= peak 1))
+    (should (equal (nreverse order) '(1 2 3)))))
+
+(ert-deftest s3-manager-test-run-sequentially-on-nothing ()
+  "An empty batch still reports, or the caller never hears back."
+  (let ((failures 'unset) (started nil))
+    (s3-manager--run-sequentially
+     nil
+     (lambda (&rest _) (setq started t))
+     (lambda (failed) (setq failures failed)))
+    (should-not started)
+    (should (equal failures 0))))
+
+(ert-deftest s3-manager-test-batch-summary-wording ()
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+      (s3-manager--batch-summary "uploaded" "file" 1 0)
+      (should (equal said "S3: uploaded 1 file"))
+      (s3-manager--batch-summary "uploaded" "file" 3 0)
+      (should (equal said "S3: uploaded 3 files"))
+      ;; A failure names the count and the buffer holding the reasons.
+      (s3-manager--batch-summary "copied" "object" 3 2)
+      (should (string-match-p "copied 1, 2 failed" said))
+      (should (string-match-p (regexp-quote s3-manager--error-buffer) said)))))
+

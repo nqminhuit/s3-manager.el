@@ -564,62 +564,71 @@ reproducible, and the probes are dwarfed by the transfer that follows."
            (s3-manager--upload-probe-each rest existing (cons key unchecked)
                                           done)))))))
 
-(defun s3-manager--upload-batch (sources prefix)
-  "Upload SOURCES into PREFIX one at a time, refreshing when the last lands.
+(defun s3-manager--run-sequentially (items start finish)
+  "Run START on each of ITEMS in turn, then call FINISH with the failures.
 
-Sequential, like the probes above and for a stronger reason: each
-transfer is an `aws' process holding a pipe and two buffers, and a Dired
-buffer can hand this hundreds of marked files.  A queue with a width is
-§17's work, not this.
+START receives one item and a continuation, and must call that
+continuation exactly once -- with non-nil for success -- on both paths,
+or the batch stops there with the rest unattempted and no summary.
+FINISH receives how many failed.
 
-A batch is not atomic, so failures are counted and named rather than
-folded into a total."
-  (let* ((total (length sources))
-         (failed 0)
-         (directories (seq-filter #'file-directory-p sources))
-         (finish
-          (lambda ()
-            (s3-manager--after-upload prefix nil)
-            ;; Each uploaded directory created keys beneath its own prefix.
-            (dolist (directory directories)
-              (s3-manager--cache-purge
-               s3-manager--profile
-               (s3-manager--endpoint-for s3-manager--profile)
-               s3-manager--bucket
-               (s3-manager--upload-key directory prefix)))
-            (if (zerop failed)
-                (message "S3: uploaded %d file%s" total
-                         (if (= total 1) "" "s"))
-              (message "S3: uploaded %d, %d failed -- see %s"
-                       (- total failed) failed s3-manager--error-buffer))))
-         (step nil))
+Sequential rather than parallel: each transfer is an `aws' process
+holding a pipe and two buffers, and one listing can hand this hundreds
+of marked objects.  A queue with a width is §17's work, not this."
+  (let ((failed 0) (step nil))
     (setq step
           (lambda (remaining)
             (if (null remaining)
-                (funcall finish)
-              (let* ((source (car remaining))
-                     (rest (cdr remaining))
-                     (recursive (file-directory-p source))
-                     (key (s3-manager--upload-key source prefix))
-                     (uri (s3-manager--s3-uri key)))
-                ;; Guarded here rather than left to `s3-manager--upload-start',
-                ;; whose `user-error' would unwind the whole batch and leave
-                ;; the rest unattempted with no summary.
-                (if (not (file-readable-p source))
-                    (progn
-                      (s3-manager--record-error
-                       (s3-manager--local-error
-                        (format "upload %s" source)
-                        "No longer readable")
-                       "upload")
-                      (setq failed (1+ failed))
-                      (funcall step rest))
-                  (s3-manager--upload-start
-                   source uri key prefix recursive
-                   (lambda (ok)
-                     (unless ok (setq failed (1+ failed)))
-                     (funcall step rest))))))))
-    (funcall step sources)))
+                (funcall finish failed)
+              (funcall start (car remaining)
+                       (lambda (ok)
+                         (unless ok (setq failed (1+ failed)))
+                         (funcall step (cdr remaining)))))))
+    (funcall step items)))
+
+(defun s3-manager--batch-summary (verb noun total failed)
+  "Say how a batch of TOTAL ended, FAILED of them having not run.
+VERB is the past tense naming what happened; NOUN names one item.
+
+A batch is not atomic, so failures are counted and named rather than
+folded into a total, and the report buffer is named because the
+per-item errors are already in it."
+  (if (zerop failed)
+      (message "S3: %s %d %s%s" verb total noun (if (= total 1) "" "s"))
+    (message "S3: %s %d, %d failed -- see %s"
+             verb (- total failed) failed s3-manager--error-buffer)))
+
+(defun s3-manager--upload-batch (sources prefix)
+  "Upload SOURCES into PREFIX one at a time, refreshing when the last lands."
+  (let ((total (length sources))
+        (directories (seq-filter #'file-directory-p sources)))
+    (s3-manager--run-sequentially
+     sources
+     (lambda (source done)
+       (let* ((recursive (file-directory-p source))
+              (key (s3-manager--upload-key source prefix))
+              (uri (s3-manager--s3-uri key)))
+         ;; Guarded here rather than left to `s3-manager--upload-start', whose
+         ;; `user-error' would unwind the whole batch and leave the rest
+         ;; unattempted with no summary.
+         (if (not (file-readable-p source))
+             (progn
+               (s3-manager--record-error
+                (s3-manager--local-error (format "upload %s" source)
+                                         "No longer readable")
+                "upload")
+               (funcall done nil))
+           (s3-manager--upload-start source uri key prefix recursive done))))
+     (lambda (failed)
+       (s3-manager--after-upload prefix nil)
+       ;; Each uploaded directory created keys beneath its own prefix.
+       (dolist (directory directories)
+         (s3-manager--cache-purge
+          s3-manager--profile
+          (s3-manager--endpoint-for s3-manager--profile)
+          s3-manager--bucket
+          (s3-manager--upload-key directory prefix)))
+       (s3-manager--batch-summary "uploaded" "file" total failed)))))
 
 ;;;###autoload
 (defun s3-manager-dired-upload ()
