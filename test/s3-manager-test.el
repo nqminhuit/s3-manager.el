@@ -6671,3 +6671,164 @@ the next job announced itself and then overwritten."
     (should (zerop refreshed))
     (should-not (seq-find (lambda (m) (string-match-p "stopped part-way" m))
                           said))))
+
+
+;;;; `c' and `r' take a destination prefix for a batch
+
+(ert-deftest s3-manager-test-as-prefix ()
+  "A batch destination names a place, so the slash is supplied.
+One dropped slash is what `s3 mv' own guard walks past -- measured."
+  (should (equal (s3-manager--as-prefix "archive") "archive/"))
+  (should (equal (s3-manager--as-prefix "a/b") "a/b/"))
+  ;; Already a prefix, and the bucket root, are left exactly as they are.
+  (should (equal (s3-manager--as-prefix "archive/") "archive/"))
+  (should (equal (s3-manager--as-prefix "") "")))
+
+(ert-deftest s3-manager-test-copy-to-many-reads-a-prefix ()
+  "Several marked objects go into a prefix, each keeping its own name."
+  (let ((argv-file (make-temp-file "s3-c-argv"))
+        (prompt nil)
+        (asked nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (p &rest _) (setq prompt p) "s3://media/archive"))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (push p asked) t))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-copy-to)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 2 (length (s3-manager-test--cp-records
+                                         argv-file)))))))))
+          ;; A prefix is asked for, not a key.
+          (should (equal prompt "Copy 2 objects to prefix: "))
+          (should (equal (mapcar #'s3-manager-test--cp-pair
+                                 (s3-manager-test--cp-records argv-file))
+                         '(("s3://media/a.txt" . "s3://media/archive/a.txt")
+                           ("s3://media/b.txt" . "s3://media/archive/b.txt"))))
+          ;; The typed prefix had no trailing slash; nothing was flattened
+          ;; onto "archivea.txt".
+          (should (= 1 (length asked)))
+          (should (string-match-p "Copy 2 objects to s3://media/archive/"
+                                  (car asked))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-one-still-reads-a-key ()
+  "With nothing marked, `c' still offers the object's own key for editing.
+That is what makes a rename possible, and it is the whole difference
+between one and several."
+  (let ((prompt nil) (initial nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "b.txt")
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (p i &rest _)
+                   (setq prompt p initial i)
+                   (user-error "stop here")))
+                ((symbol-function 'message) #'ignore))
+        (should-error (s3-manager-copy-to) :type 'user-error)))
+    (should (equal prompt "Copy b.txt to: "))
+    (should (equal initial "s3://media/b.txt"))))
+
+(ert-deftest s3-manager-test-rename-many-moves-into-a-prefix ()
+  "`r' over a batch can only move: renaming is one key becoming another."
+  (let ((argv-file (make-temp-file "s3-r-argv"))
+        (prompt nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (p &rest _) (setq prompt p) "s3://media/moved/"))
+                      ((symbol-function 'y-or-n-p) (lambda (_) t))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-rename)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 2 (length
+                                 (seq-filter (lambda (r) (member "mv" r))
+                                             (s3-manager-test--argv-records
+                                              argv-file))))))))))
+          (let ((moves (seq-filter (lambda (r) (member "mv" r))
+                                   (s3-manager-test--argv-records argv-file))))
+            (should (equal prompt "Move 2 objects to prefix: "))
+            (should (equal (mapcar (lambda (r)
+                                     (let ((at (seq-position r "mv")))
+                                       (cons (nth (+ 1 at) r)
+                                             (nth (+ 2 at) r))))
+                                   moves)
+                           '(("s3://media/a.txt" . "s3://media/moved/a.txt")
+                             ("s3://media/b.txt" . "s3://media/moved/b.txt"))))
+            ;; Nothing in a batch is ever recursive: a prefix cannot be marked.
+            (dolist (move moves)
+              (should-not (member "--recursive" move)))
+            ;; And no `cp' sneaked in beside the moves.
+            (should (null (s3-manager-test--cp-records argv-file)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-a-batch-move-forgets-its-marks ()
+  "The sources are gone, so their marks must not outlive them.
+A mark keyed by a name that later belongs to something else would
+quietly enlarge the next batch, or be acted on by `x'."
+  (let ((argv-file (make-temp-file "s3-r-argv")))
+    (unwind-protect
+        (s3-manager-test--marking-two
+          (cl-letf (((symbol-function 'read-string)
+                     (lambda (&rest _) "s3://media/moved/"))
+                    ((symbol-function 'y-or-n-p) (lambda (_) t))
+                    ((symbol-function 's3-manager--refresh-listing) #'ignore)
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :argv-file argv-file
+                 :head-exit 254 :head-stderr s3-manager-test--head-404)
+              (s3-manager-rename)
+              (should (s3-manager-test--wait
+                       (lambda () (zerop (hash-table-count
+                                          s3-manager--marks)))))))
+          (should (zerop (hash-table-count s3-manager--marks))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-to-many-refuses-its-own-prefix ()
+  "Answering with this listing's own prefix writes nothing at all.
+Every job is built before any runs, so the guard covers the batch rather
+than stopping it half-way through."
+  (let ((argv-file (make-temp-file "s3-c-argv")))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest _) "s3://media/"))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (error "Asked to confirm: %s" p)))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-copy-to) :type 'user-error))))
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-a-batch-move-says-it-moved ()
+  "A batch of moves reported as \"copied\" would say the sources survived."
+  (let ((said nil))
+    (s3-manager-test--marking-two
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) "s3://media/moved/"))
+                ((symbol-function 'y-or-n-p) (lambda (_) t))
+                ((symbol-function 's3-manager--refresh-listing) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) said))))
+        (s3-manager-test--with-fake-aws
+            (:stdout "" :head-exit 254 :head-stderr s3-manager-test--head-404)
+          (s3-manager-rename)
+          (should (s3-manager-test--wait
+                   (lambda ()
+                     (seq-find (lambda (m) (string-match-p "objects" m))
+                               said)))))))
+    (should (seq-find (lambda (m) (equal m "S3: moved 2 objects")) said))
+    (should-not (seq-find (lambda (m) (string-match-p "copied" m)) said))))

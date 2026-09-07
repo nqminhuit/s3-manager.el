@@ -95,6 +95,18 @@ space is far commoner than a key that really ends in one."
    (string-trim
     (read-string prompt initial 's3-manager--destination-history))))
 
+(defun s3-manager--as-prefix (typed)
+  "Return TYPED as a prefix: empty, or ending in a slash.
+
+A batch destination names a place rather than a key -- N objects cannot
+share one key -- so the slash is supplied rather than demanded.  The
+coercion `s3-manager--copy-key' already makes for a prefix source, and
+load-bearing for the same measured reason: `s3 mv' compares the two URIs
+as typed, so one dropped slash walks straight past its own guard."
+  (if (or (string-empty-p typed) (string-suffix-p "/" typed))
+      typed
+    (concat typed "/")))
+
 ;;;; Refreshing both ends
 
 (defun s3-manager--ancestor-steps (key)
@@ -138,12 +150,14 @@ copy, if a caller ever holds a listing in a buffer of its own."
         (s3-manager--reload nil key)))))
 
 (defun s3-manager--forget-mark (profile bucket prefix key)
-  "Drop KEY's deletion mark in any listing of PREFIX in BUCKET under PROFILE.
+  "Drop KEY's mark in any listing of PREFIX in BUCKET under PROFILE.
+Either kind: the general mark as well as the deletion flag.
 
 A moved object is gone, but its mark is keyed by name and outlives it:
 marks are only cleared wholesale when the prefix changes, so renaming a
 marked object and later creating something at the old key would give
-that new object a mark the user never set, which `x' would act on.
+that new object a mark the user never set -- one `x' would act on, or
+one that would quietly enlarge the next batch.
 `s3-manager--delete-finished' clears marks for the same reason."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
@@ -231,6 +245,12 @@ reloads it, so ten objects copied into one prefix would be ten real
 re-fetches of that prefix -- and each reload would re-cache what the
 next invalidation was about to drop.  Unioning the targets first is why
 `s3-manager--copy-targets' is separate from the refreshing at all."
+  ;; Every job, including one that failed.  A move that stopped part-way
+  ;; leaves its source in place and its mark is dropped anyway, which is
+  ;; the single-job behaviour `s3-manager--after-copy' has always had: the
+  ;; refresh that follows shows what is really still there.  Forgetting
+  ;; only the ones that landed would need `s3-manager--run-sequentially' to
+  ;; report which those were, and that driver is shared with the uploads.
   (dolist (job jobs)
     (s3-manager--purge-subtrees job)
     (s3-manager--forget-source-mark job))
@@ -294,6 +314,44 @@ already carries, for the same reason."
           "some objects were copied")
         s3-manager--error-buffer)))))
 
+(defun s3-manager--copy-batch (jobs lead)
+  "Offer, probe, confirm and then run JOBS.  LEAD names the operation.
+
+Every job shares one destination bucket by construction -- `C' takes the
+other window's, `c' and `r' take the one typed once -- which is what
+lets a single `s3-manager--probe-each' cover all of them.
+
+Order is the one 0.4.0 settled, now over a list: offer, then probe, then
+confirm, then run."
+  (let ((total (length jobs))
+        (origin (current-buffer)))
+    (when (s3-manager--offer-commands
+           (mapcar #'s3-manager--copy-args jobs) lead
+           ;; The total, not the largest: the bytes never cross this machine
+           ;; either way, so what the offer buys is duration, and duration
+           ;; adds up.
+           (seq-reduce (lambda (sum job)
+                         (+ sum (or (s3-manager-job-size job) 0)))
+                       jobs 0))
+      (message "S3: checking %d destination%s..." total (if (= total 1) "" "s"))
+      (s3-manager--probe-each
+       (s3-manager-job-bucket (car jobs)) (mapcar #'s3-manager-job-key jobs)
+       nil nil
+       (lambda (existing unchecked)
+         (s3-manager--prompt-later
+          origin
+          (lambda ()
+            ;; One question for the batch: a probe per object is bounded, a
+            ;; prompt per object is not.  `y-or-n-p' even for a move, as `x'
+            ;; asks for N flagged objects: the destruction is bounded and
+            ;; counted, and `yes-or-no-p' is reserved for the recursive
+            ;; forms, whose extent nothing knows.
+            (unless (y-or-n-p
+                     (s3-manager--batch-question lead existing unchecked))
+              (user-error "%s" (s3-manager--job-aborted (car jobs))))
+            (s3-manager--run-copies jobs))
+          (s3-manager--job-verb (car jobs) t)))))))
+
 (defun s3-manager--run-copies (jobs)
   "Run JOBS one at a time, refreshing what they touched once at the end.
 
@@ -306,7 +364,11 @@ this every object it shows."
      (lambda (job done) (s3-manager--copy-start job done))
      (lambda (failed)
        (s3-manager--after-copies jobs)
-       (s3-manager--batch-summary "copied" "object" total failed)))))
+       ;; The jobs' own verb: a batch of moves reported as "copied 3
+       ;; objects" would say the sources are still there.
+       (s3-manager--batch-summary
+        (if (s3-manager-job-move (car jobs)) "moved" "copied")
+        "object" total failed)))))
 
 (defun s3-manager--copy-confirm (job)
   "Confirm JOB, then run it.
@@ -391,24 +453,32 @@ normalised form, which is what makes them complete."
      :size (s3-manager-entry-size entry))))
 
 (defun s3-manager-copy-to ()
-  "Copy the entry at point to another S3 location.
+  "Copy the marked objects, or the entry at point, to another S3 location.
 
-The service copies it: the bytes never reach this machine.  The
+The service copies them: the bytes never reach this machine.  The
 destination is offered for editing, so what the prompt shows is what
 happens, and an existing object there is named with its size and date
 before it is replaced.
 
+One object is copied to a key, so it can be renamed on the way; several
+are copied into a prefix, keeping their own names, behind one
+confirmation.
+
 A prefix is copied recursively after a typed `yes', and its destination
 is taken literally rather than gaining the source's own name -- see
-`s3-manager--copy-confirm'."
+`s3-manager--copy-confirm'.  Only the entry at point can be one: a
+prefix cannot be marked."
   (interactive)
   (s3-manager--copy-command nil))
 
 (defun s3-manager-rename ()
-  "Rename the entry at point, or move it elsewhere in S3.
+  "Rename the entry at point, or move it -- or the marked objects -- in S3.
 
-Its own key is offered for editing, so changing the last segment renames
-it and changing the rest moves it.
+With nothing marked, the entry's own key is offered for editing, so
+changing the last segment renames it and changing the rest moves it.
+With several marked there is no rename to offer -- renaming is one key
+becoming another -- so what is read is a destination prefix and each
+object keeps its own name.
 
 The source is deleted only after it has been copied, one object at a
 time -- that is `aws s3 mv' own description -- so a failure part-way
@@ -417,25 +487,65 @@ finishes the job."
   (interactive)
   (s3-manager--copy-command t))
 
+(defun s3-manager--copy-one (entry move)
+  "Copy ENTRY to a key read from the minibuffer, or with MOVE, move it."
+  (unless (s3-manager-entry-p entry)
+    (user-error "%s buckets is not supported"
+                (if move "Renaming" "Copying")))
+  (let* ((destination
+          (s3-manager--read-destination
+           (format "%s %s to: " (if move "Move" "Copy")
+                   (s3-manager-entry-display-name entry))
+           (s3-manager--uri s3-manager--bucket
+                            (s3-manager--key-into
+                             s3-manager--prefix
+                             (s3-manager-entry-display-name entry)))))
+         (job (s3-manager--copy-job entry (car destination)
+                                    (cdr destination) move)))
+    (s3-manager--copy-confirm job)))
+
+(defun s3-manager--copy-many (entries move)
+  "Copy ENTRIES into one destination prefix, or with MOVE, move them.
+
+A prefix, not a key: N objects cannot share one key, so what is read
+here names a place and each object keeps its own last segment.  That
+also means `r' over a batch can only move, never rename -- renaming is
+one key becoming another, and there is no such thing for several.
+
+The prompt opens on this listing's own prefix, which every job would
+then refuse as its own source.  That is the same starting point `c'
+offers for one object, and it is the useful one: the edit is a segment
+changed in the middle, not a URI typed from nothing."
+  (let* ((verb (if move "Move" "Copy"))
+         (total (length entries))
+         (destination (s3-manager--read-destination
+                       (format "%s %d objects to prefix: " verb total)
+                       (s3-manager--uri s3-manager--bucket
+                                        s3-manager--prefix)))
+         (bucket (car destination))
+         (prefix (s3-manager--as-prefix (cdr destination))))
+    (s3-manager--copy-batch
+     ;; Every job is built before any of them runs, so a destination
+     ;; `s3-manager--check-destination' refuses stops the batch with nothing
+     ;; written rather than part-way through.
+     (mapcar (lambda (entry)
+               (s3-manager--copy-job
+                entry bucket
+                (s3-manager--key-into
+                 prefix (s3-manager-entry-display-name entry))
+                move))
+             entries)
+     (format "%s %d objects to %s" verb total
+             (s3-manager--uri bucket prefix)))))
+
 (defun s3-manager--copy-command (move)
-  "Copy the entry at point, or with MOVE, move it."
+  "Copy the marked objects, or the entry at point, or with MOVE, move them."
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
-  (let ((entry (s3-manager--entry-at-point)))
-    (unless (s3-manager-entry-p entry)
-      (user-error "%s buckets is not supported"
-                  (if move "Renaming" "Copying")))
-    (let* ((destination
-            (s3-manager--read-destination
-             (format "%s %s to: " (if move "Move" "Copy")
-                     (s3-manager-entry-display-name entry))
-             (s3-manager--uri s3-manager--bucket
-                              (s3-manager--key-into
-                               s3-manager--prefix
-                               (s3-manager-entry-display-name entry)))))
-           (job (s3-manager--copy-job entry (car destination)
-                                      (cdr destination) move)))
-      (s3-manager--copy-confirm job))))
+  (let ((entries (s3-manager--marked-entries)))
+    (if (cdr entries)
+        (s3-manager--copy-many entries move)
+      (s3-manager--copy-one (car entries) move))))
 
 (defun s3-manager--same-profile-p (buffer)
   "Return non-nil when BUFFER speaks to the same account as this one.
@@ -510,37 +620,11 @@ No job here is ever recursive: a prefix cannot be marked, and the mark
 reader filters for objects besides.  That is what keeps the typed `yes',
 the `unbounded' sizing and the recursive cache purge on the at-point
 path where they belong."
-  (let* ((bucket (buffer-local-value 's3-manager--bucket target))
-         (prefix (buffer-local-value 's3-manager--prefix target))
-         (jobs (mapcar (lambda (entry)
-                         (s3-manager--copy-into-job entry target))
-                       entries))
-         (total (length jobs))
-         (lead (format "Copy %d objects to %s" total
-                       (s3-manager--uri bucket prefix)))
-         (origin (current-buffer)))
-    (when (s3-manager--offer-commands
-           (mapcar #'s3-manager--copy-args jobs) lead
-           ;; The total, not the largest: the bytes never cross this machine
-           ;; either way, so what the offer buys is duration, and duration
-           ;; adds up.
-           (seq-reduce (lambda (sum job)
-                         (+ sum (or (s3-manager-job-size job) 0)))
-                       jobs 0))
-      (message "S3: checking %d destination%s..." total (if (= total 1) "" "s"))
-      (s3-manager--probe-each
-       bucket (mapcar #'s3-manager-job-key jobs) nil nil
-       (lambda (existing unchecked)
-         (s3-manager--prompt-later
-          origin
-          (lambda ()
-            ;; One question for the batch: a probe per object is bounded, a
-            ;; prompt per object is not.
-            (unless (y-or-n-p
-                     (s3-manager--batch-question lead existing unchecked))
-              (user-error "Copy aborted"))
-            (s3-manager--run-copies jobs))
-          "Copy"))))))
+  (s3-manager--copy-batch
+   (mapcar (lambda (entry) (s3-manager--copy-into-job entry target)) entries)
+   (format "Copy %d objects to %s" (length entries)
+           (s3-manager--uri (buffer-local-value 's3-manager--bucket target)
+                            (buffer-local-value 's3-manager--prefix target)))))
 
 (defun s3-manager--copy-into (target)
   "Copy into the listing TARGET is showing.
