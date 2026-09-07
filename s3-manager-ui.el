@@ -118,6 +118,7 @@
   "C" #'s3-manager-copy
   "c" #'s3-manager-copy-to
   "r" #'s3-manager-rename
+  "m" #'s3-manager-mark
   "d" #'s3-manager-mark-delete
   "u" #'s3-manager-unmark
   "U" #'s3-manager-unmark-all
@@ -579,9 +580,23 @@ object whose key ends in a slash appears in `Contents' as well as in
               s3-manager--entries))
 
 (defun s3-manager--marked-keys ()
-  "Return the S3 keys flagged for deletion, in listing order."
+  "Return the S3 keys flagged for deletion, in listing order.
+
+No fallback to the entry at point, unlike `s3-manager--marked-entries':
+`x' commits to what was flagged, so an unflagged listing must refuse
+rather than delete the row the cursor happens to be on."
   (mapcar #'s3-manager-entry-key
           (s3-manager--entries-marked s3-manager--delete-char)))
+
+(defun s3-manager--marked-entries ()
+  "Return the marked objects, or the entry at point when none are marked.
+
+The fallback is the one `dired-get-marked-files' takes, and it is what
+lets one key mean both \"act on these\" and \"act on this\".  It returns whatever
+is at point, a prefix included, so the at-point behaviour of every
+caller is unchanged."
+  (or (s3-manager--entries-marked s3-manager--mark-char)
+      (list (s3-manager--entry-at-point))))
 
 (defun s3-manager--apply-marks ()
   "Re-apply marks to the buffer after a repaint."
@@ -617,7 +632,7 @@ nonetheless act on."
     (unless (eq (s3-manager-entry-type entry) 'object)
       (user-error
        "%s" (substitute-command-keys
-             "Prefixes cannot be marked; \\[s3-manager-delete] deletes one recursively")))
+             "Prefixes cannot be marked; commands act on the prefix at point")))
     entry))
 
 (defun s3-manager--mark (mark)
@@ -626,13 +641,19 @@ nonetheless act on."
     (puthash (s3-manager-entry-key entry) mark s3-manager--marks)
     (s3-manager--put-tag mark t)))
 
+(defun s3-manager-mark ()
+  "Mark the object at point, then move down.
+The transfer commands act on this mark; `s3-manager-execute' does not."
+  (interactive)
+  (s3-manager--mark s3-manager--mark-char))
+
 (defun s3-manager-mark-delete ()
   "Flag the object at point for deletion, then move down."
   (interactive)
   (s3-manager--mark s3-manager--delete-char))
 
 (defun s3-manager-unmark ()
-  "Remove the mark from the object at point, then move down."
+  "Remove whichever mark the object at point carries, then move down."
   (interactive)
   (let ((entry (s3-manager--entry-at-point)))
     (when (s3-manager-entry-p entry)

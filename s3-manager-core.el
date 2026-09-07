@@ -353,8 +353,19 @@ progress of another still going.")
 (defvar-local s3-manager--transfer-status nil
   "Most recent progress line from a running transfer, or nil.")
 
+(defconst s3-manager--mark-char ?*
+  "The general mark: what the transfer commands act on.
+Dired's character, for Dired's reason -- it selects, it does not
+commit.")
+
 (defconst s3-manager--delete-char ?D
-  "The deletion flag: the mark `s3-manager-execute' acts on, and nothing else.")
+  "The deletion flag: the mark `s3-manager-execute' acts on, and nothing else.
+
+Deliberately not the same character as `s3-manager--mark-char'.  A mark
+is a noun and nothing in the table records a verb, so \"execute the
+marks\" has no referent: flagging is a deferred commitment to destroy,
+while marking is a selection for an operation named afterwards.  Conflate
+them and `x' deletes the objects someone selected in order to copy.")
 
 (defvar-local s3-manager--marks nil
   "Hash table mapping an S3 key to the mark character it carries.

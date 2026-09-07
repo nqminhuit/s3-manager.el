@@ -4534,6 +4534,30 @@ regression it exists to catch."
                     (or (locate-library "s3-manager") ""))))
     (directory-files dir t "\\`s3-manager\\(-[a-z]+\\)?\\.el\\'")))
 
+(ert-deftest s3-manager-test-no-broken-docstring-escapes ()
+  "No source file may write \\= in a string literal.
+
+`\\=' is a docstring escape but not a string-literal one: the reader
+drops the backslash, so `foo\\=' in the source becomes `foo=' in the
+string and renders as ‘foo=’.  Writing it takes a doubled backslash,
+which is easy to forget and impossible to see when reading the source --
+this has been introduced and fixed four separate times here.
+
+The convention is a plain apostrophe, so the sequence should never
+appear at all."
+  (let ((files (s3-manager-test--source-files)))
+    (should files)
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        ;; Compared as a pair so a failure names the file, rather than
+        ;; reporting a bare nil for whichever of nine it was.
+        (should (equal (list (file-name-nondirectory file) nil)
+                       (list (file-name-nondirectory file)
+                             (and (search-forward "\\=" nil t)
+                                  (line-number-at-pos)))))))))
+
 (ert-deftest s3-manager-test-no-accidental-file-local-variables ()
   "No source file may mention the file-local variables marker near its end.
 
@@ -5949,4 +5973,101 @@ carry the same key."
       (dolist (line lines)
         (should (string-match-p "--profile production" line))
         (should (string-prefix-p "aws " line))))))
+
+;;;; `m' marks, and `x' still acts only on the flag
+
+(ert-deftest s3-manager-test-execute-ignores-a-general-mark ()
+  "The property the two characters exist for.
+
+A mark is a noun and nothing in the table records a verb, so \"execute
+the marks\" has no referent.  Conflate the two and `x' deletes the
+objects someone selected in order to copy them -- a data-loss bug
+designed in rather than introduced."
+  (let ((argv-file (make-temp-file "s3-execute-argv")))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager-test--goto-object)
+          (s3-manager-mark)                     ; `*', not `D'
+          (s3-manager-test--with-fake-aws (:stdout "{}" :argv-file argv-file)
+            ;; Nothing is flagged, so `x' must refuse rather than act on `*'.
+            (should-error (s3-manager-execute) :type 'user-error))
+          (should (equal "" (with-temp-buffer
+                              (insert-file-contents argv-file)
+                              (buffer-string))))
+          ;; And the mark is still there: refusing must not have cleared it.
+          (should (= 1 (hash-table-count s3-manager--marks))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-marked-entries-ignores-the-delete-flag ()
+  "The converse: a transfer must not act on what was flagged for deletion."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (s3-manager-mark-delete)                    ; `D', not `*'
+    ;; No `*' anywhere, so the fallback applies and it is the row at point.
+    (goto-char (point-max))
+    (forward-line -1)
+    (let ((entries (s3-manager--marked-entries)))
+      (should (= 1 (length entries)))
+      (should (equal (s3-manager-entry-key (car entries))
+                     (s3-manager-entry-key (tabulated-list-get-id)))))))
+
+(ert-deftest s3-manager-test-mark-key-is-bound-and-tags ()
+  (should (eq (keymap-lookup s3-manager-mode-map "m") #'s3-manager-mark))
+  (should (eq (keymap-lookup s3-manager-mode-map "d") #'s3-manager-mark-delete))
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (let ((line (line-number-at-pos)))
+      (s3-manager-mark)
+      ;; Tagged with `*', and point moved down as `d' does.
+      (save-excursion
+        (goto-char (point-min))
+        (forward-line (1- line))
+        (should (equal "*" (buffer-substring (line-beginning-position)
+                                             (1+ (line-beginning-position))))))
+      (should (= (1+ line) (line-number-at-pos))))))
+
+(ert-deftest s3-manager-test-both-marks-coexist ()
+  "Different rows may carry different marks, and each renders its own."
+  (s3-manager-test--in-many-buffer
+    (let ((objects (seq-filter (lambda (e) (eq (s3-manager-entry-type e) 'object))
+                               s3-manager--entries)))
+      (should (> (length objects) 1))
+      (s3-manager--goto-entry (nth 0 objects))
+      (s3-manager-mark)
+      (s3-manager--goto-entry (nth 1 objects))
+      (s3-manager-mark-delete)
+      (should (eql s3-manager--mark-char
+                   (gethash (s3-manager-entry-key (nth 0 objects))
+                            s3-manager--marks)))
+      (should (eql s3-manager--delete-char
+                   (gethash (s3-manager-entry-key (nth 1 objects))
+                            s3-manager--marks)))
+      ;; And a repaint restores both from the table, not from the buffer.
+      (s3-manager--print-list)
+      (s3-manager--goto-entry (nth 0 objects))
+      (should (equal "*" (buffer-substring (line-beginning-position)
+                                           (1+ (line-beginning-position)))))
+      (s3-manager--goto-entry (nth 1 objects))
+      (should (equal "D" (buffer-substring (line-beginning-position)
+                                           (1+ (line-beginning-position))))))))
+
+(ert-deftest s3-manager-test-unmark-removes-either-kind ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (s3-manager-mark)
+    (s3-manager-test--goto-object)
+    (s3-manager-unmark)
+    (should (zerop (hash-table-count s3-manager--marks)))
+    (s3-manager-test--goto-object)
+    (s3-manager-mark-delete)
+    (s3-manager-test--goto-object)
+    (s3-manager-unmark)
+    (should (zerop (hash-table-count s3-manager--marks)))))
+
+(ert-deftest s3-manager-test-a-prefix-cannot-be-marked-either-way ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-directory)
+    (should-error (s3-manager-mark) :type 'user-error)
+    (should-error (s3-manager-mark-delete) :type 'user-error)
+    (should (zerop (hash-table-count s3-manager--marks)))))
 
