@@ -5706,3 +5706,52 @@ open, which is what a parallel driver would trip."
       (should (string-match-p "copied 1, 2 failed" said))
       (should (string-match-p (regexp-quote s3-manager--error-buffer) said)))))
 
+;;;; The shared batch probe and its question
+
+(ert-deftest s3-manager-test-probe-each-uses-the-bucket-it-was-given ()
+  "A copy's destination need not be the bucket on screen."
+  (let ((argv-file (make-temp-file "s3-probe-argv"))
+        (done nil))
+    (unwind-protect
+        (s3-manager-test--in-object-buffer          ; bucket is "media"
+          (should (equal s3-manager--bucket "media"))
+          (s3-manager-test--with-fake-aws
+              (:head-exit 254 :head-stderr s3-manager-test--head-404
+               :argv-file argv-file)
+            (s3-manager--probe-each
+             "backup" '("a.txt" "b.txt") nil nil
+             (lambda (existing unchecked) (setq done (list existing unchecked))))
+            (should (s3-manager-test--wait (lambda () done))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (= 2 (length records)))
+            (dolist (r records)
+              (should (member "backup" r))
+              (should-not (member "media" r)))
+            ;; Both absent, so neither is reported as existing.
+            (should (equal done '(nil nil)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-probe-each-keeps-listing-order ()
+  "The ordering is what makes the confirmation reproducible."
+  (let ((done nil))
+    (s3-manager-test--in-object-buffer
+      (s3-manager-test--with-fake-aws
+          (:head-exit 0 :head-stdout (json-serialize '((ContentLength . 1))))
+        (s3-manager--probe-each
+         "media" '("one" "two" "three") nil nil
+         (lambda (existing unchecked) (setq done (list existing unchecked))))
+        (should (s3-manager-test--wait (lambda () done)))))
+    (should (equal (car done) '("one" "two" "three")))))
+
+(ert-deftest s3-manager-test-batch-question-names-what-it-found ()
+  "One question for the batch, naming the count and roughly which."
+  (should (equal (s3-manager--batch-question "Upload 2 files to s3://b/p/" nil nil)
+                 "Upload 2 files to s3://b/p/? "))
+  (let ((q (s3-manager--batch-question "Copy 5 objects to s3://b/p/"
+                                       '("a" "b" "c" "d") '("e"))))
+    (should (string-match-p "overwriting 4 (a, b, c)" q))
+    ;; Only the first three are named: a prompt that scrolls is one nobody
+    ;; reads, and the count already says how many there are.
+    (should-not (string-match-p ", d" q))
+    (should (string-match-p "1 unchecked" q))))
+

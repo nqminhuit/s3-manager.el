@@ -538,10 +538,16 @@ A visible one wins, so the window layout picks the destination."
         (user-error "%s is remote; aws cannot read it" file)))
     (mapcar #'expand-file-name files)))
 
-(defun s3-manager--upload-probe-each (keys existing unchecked done)
-  "Probe KEYS one at a time, then call DONE with EXISTING and UNCHECKED.
+(defun s3-manager--probe-each (bucket keys existing unchecked done)
+  "Probe KEYS in BUCKET one at a time, then call DONE with EXISTING and UNCHECKED.
+
+BUCKET is explicit because a copy's destination need not be the bucket
+on screen; the profile is this buffer's and must be.
+
 Sequential rather than parallel: the ordering makes the confirmation
-reproducible, and the probes are dwarfed by the transfer that follows."
+reproducible, and the probes are dwarfed by the transfer that follows.
+A probe per object is bounded; a prompt per object is not, which is why
+this collects rather than asking as it goes."
   (if (null keys)
       (funcall done (nreverse existing) (nreverse unchecked))
     (let ((key (car keys)) (rest (cdr keys)))
@@ -549,20 +555,36 @@ reproducible, and the probes are dwarfed by the transfer that follows."
        ;; The argv helper, deliberately not `s3-manager--head-object': these
        ;; callbacks classify and chain, never prompt, and its timer hop would
        ;; defer every step of the batch for no reason.
-       (s3-manager--head-object-args s3-manager--bucket key)
+       (s3-manager--head-object-args bucket key)
        :profile s3-manager--profile
        :buffer (current-buffer)
        :name "s3-head-object"
        :on-success
        (lambda (_response)
-         (s3-manager--upload-probe-each rest (cons key existing) unchecked done))
+         (s3-manager--probe-each bucket rest (cons key existing) unchecked done))
        :on-error
        (lambda (err)
          (if (s3-manager--head-object-absent-p err)
-             (s3-manager--upload-probe-each rest existing unchecked done)
+             (s3-manager--probe-each bucket rest existing unchecked done)
            (s3-manager--record-error err "head-object")
-           (s3-manager--upload-probe-each rest existing (cons key unchecked)
-                                          done)))))))
+           (s3-manager--probe-each bucket rest existing (cons key unchecked)
+                                   done)))))))
+
+(defun s3-manager--batch-question (lead existing unchecked)
+  "Return the one confirmation covering a batch.
+LEAD names the operation and its destination; EXISTING and UNCHECKED are
+what `s3-manager--probe-each' found.
+
+Only the first three overwrite victims are named: the point is to say
+that some exist and roughly which, and a prompt that scrolls is a prompt
+nobody reads."
+  (concat lead
+          (when existing
+            (format ", overwriting %d (%s)" (length existing)
+                    (string-join (seq-take existing 3) ", ")))
+          (when unchecked
+            (format ", %d unchecked" (length unchecked)))
+          "? "))
 
 (defun s3-manager--run-sequentially (items start finish)
   "Run START on each of ITEMS in turn, then call FINISH with the failures.
@@ -665,25 +687,19 @@ but a prompt per file is not."
              (origin (current-buffer)))
         (message "S3: checking %d destination%s..."
                  (length keys) (if (= (length keys) 1) "" "s"))
-        (s3-manager--upload-probe-each
-         keys nil nil
+        (s3-manager--probe-each
+         s3-manager--bucket keys nil nil
          (lambda (existing unchecked)
            (s3-manager--prompt-later
             origin
             (lambda ()
               (let ((question
-                     (concat
+                     (s3-manager--batch-question
                       (format "Upload %d file%s to %s"
                               (length sources)
                               (if (= (length sources) 1) "" "s")
                               (s3-manager--s3-uri prefix))
-                      (when existing
-                        (format ", overwriting %d (%s)"
-                                (length existing)
-                                (string-join (seq-take existing 3) ", ")))
-                      (when unchecked
-                        (format ", %d unchecked" (length unchecked)))
-                      "? ")))
+                      existing unchecked)))
                 ;; A directory makes the volume unbounded, as it does for `P'.
                 (unless (if recursive
                             (yes-or-no-p question)
