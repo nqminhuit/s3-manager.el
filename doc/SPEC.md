@@ -2506,12 +2506,34 @@ buffer in `evil-normal-state`.
 |---|---|
 | `keymap-set dired-mode-map "C"` ours, then `evil-collection-init 'dired` | `dired-do-copy` — **ours never fires**, though `keymap-lookup dired-mode-map` still reports it |
 | `evil-define-key 'normal dired-mode-map` ours, then `evil-collection-init 'dired` | `dired-do-copy` — **clobbered by ordering** |
-| `evil-collection-init 'dired`, then `evil-define-key 'normal` ours | `s3-manager-dired-do-copy` — the only arrangement that works |
+| `evil-collection-init 'dired`, then `evil-define-key 'normal` ours | `s3-manager-dired-do-copy` — works, but only by winning a race |
 
 An Evil state map outranks a major-mode map, which is the same mechanism
 §10 documents for this package's own keymap — but here the package would be on
 the losing side of it, and the winning side is a race against another package's
 lazy initialisation. Hence §11.9: the Dired binding stays the user's.
+
+**Re-measured after a user report**, one arrangement per Emacs process this
+time — the first pass ran them in sequence in one process, where each
+inherited the previous one's global state and two of the five answers were
+therefore meaningless:
+
+| Setup (`evil-collection` active) | `(key-binding "C")` in a real dired buffer |
+|---|---|
+| nothing of ours | `dired-do-copy` (the baseline) |
+| `keymap-set dired-mode-map` — **what the README recommended** | `dired-do-copy` |
+| `evil-define-key 'normal`, then `evil-collection-init` | `dired-do-copy` |
+| `with-eval-after-load 'evil-collection-dired` + `evil-define-key` | `dired-do-copy` — the file loads *before* `evil-collection-dired-setup` applies its own bindings, so this does not help either |
+| `dired-mode-hook` + `evil-local-set-key 'normal` | **`s3-manager-dired-do-copy`** — a buffer-local state map outranks the auxiliary map, so this wins whatever the load order |
+
+`evil-collection-dired.el` binds `"C" 'dired-do-copy` explicitly, which is why
+this is a clobber rather than a gap. Without `evil-collection` — plain Emacs,
+or Evil alone — `keymap-set` works, so the README now carries both forms.
+
+**The failure is silent, and that is what made it a bug report.** When the
+binding loses, `C` is just `dired-do-copy`: it asks for a directory to copy
+into, which looks like the package declining to upload rather than like a
+binding that never fired.
 
 ---
 

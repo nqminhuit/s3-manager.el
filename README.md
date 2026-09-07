@@ -156,6 +156,21 @@ yourself:
 Safe to leave bound: with no listing visible it is `dired-do-copy` unchanged.
 It uploads the marked files, with one confirmation for the batch.
 
+**Using `evil-collection`?** The line above will not fire, and neither will
+`evil-define-key` — `evil-collection`'s own dired module binds `C` to
+`dired-do-copy` in normal state, an Evil state map outranks a major-mode map,
+and it initialises after your config. Measured; see `doc/SPEC.md` §18.7. Bind
+it per buffer instead, which wins whatever the load order:
+
+```elisp
+(add-hook 'dired-mode-hook
+          (lambda ()
+            (evil-local-set-key 'normal "C" #'s3-manager-dired-do-copy)))
+```
+
+The symptom when the binding loses is not an error — `C` is simply
+`dired-do-copy`, asking for a directory to copy into.
+
 ### Worth knowing
 
 - **Uploads ask before replacing.** S3 overwrites silently, so `P` checks first
