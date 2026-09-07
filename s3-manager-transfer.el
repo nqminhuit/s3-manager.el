@@ -149,7 +149,12 @@ set up in advance."
   (let ((chosen (expand-file-name
                  (read-file-name (format "Download %s to: " name)
                                  (s3-manager--local-default-directory)
-                                 nil nil name))))
+                                 nil nil
+                                 ;; The prompt names the object; the editable
+                                 ;; default must be a name that cannot escape
+                                 ;; the directory it is joined to.  Offering
+                                 ;; "~root" here meant one RET wrote to /root.
+                                 (s3-manager--safe-leaf name)))))
     ;; First, before any predicate that would touch it: `file-directory-p' on
     ;; a TRAMP path opens a connection, so the check has to precede the one
     ;; below.  `aws' cannot write there in any case.
@@ -199,39 +204,95 @@ option."
                                      (s3-manager-entry-size entry))
       (s3-manager--transfer args description))))
 
-(defun s3-manager--download-directory (count)
-  "Read the one local directory COUNT downloaded objects should land in.
+(defun s3-manager--read-local-directory (prompt default)
+  "Read a local directory after PROMPT, offering DEFAULT.
 
-Created after confirmation when it is absent, exactly as
-`s3-manager-get-recursive' creates its own: `aws s3 cp' would make it
-silently, so a mistyped path is otherwise a directory nobody meant with
-the bytes already in it."
-  (let ((directory (file-name-as-directory
-                    (expand-file-name
-                     (read-directory-name
-                      (format "Download %d objects to: " count)
-                      (s3-manager--local-default-directory) nil nil)))))
-    (unless (file-directory-p directory)
-      (unless (y-or-n-p (format "Create %s? " directory))
-        (user-error "Download aborted"))
-      (make-directory directory t))
-    directory))
+Returns the path; it does **not** create it, so a caller can put the
+question of creating it after whatever else it has to ask.
+
+Refuses a remote one, as `s3-manager--read-destination-file' refuses a
+remote file, and for the same two reasons: `aws' cannot write there, and
+`file-directory-p' on a TRAMP path opens a connection -- so the check
+has to come before any predicate that would touch it.  This is not
+hypothetical for a default: `s3-manager--local-default-directory'
+honours `dired-dwim-target', so a remote Dired in the other window is
+what gets offered."
+  (let ((directory (expand-file-name (read-directory-name prompt default
+                                                          nil nil))))
+    (when (file-remote-p directory)
+      (user-error "%s is remote; aws cannot write there" directory))
+    (file-name-as-directory directory)))
+
+(defun s3-manager--ensure-local-directory (directory)
+  "Create DIRECTORY after confirmation when it is absent.
+`aws s3 cp' would make it silently, so a mistyped path is otherwise a
+directory nobody meant with the bytes already in it."
+  (unless (file-directory-p directory)
+    (unless (y-or-n-p (format "Create %s? " directory))
+      (user-error "Download aborted"))
+    (make-directory directory t)))
+
+(defun s3-manager--check-download-leaves (entries)
+  "Signal unless every entry in ENTRIES can be written under its own name.
+
+A batch names no destination out loud, so `expand-file-name' on a key
+like \"backups/~root\" would write outside the chosen directory without
+anything having shown the user where.  Measured, that key lands in
+\"/root\" and \"..\" lands in the parent -- see `s3-manager--safe-leaf-p'.
+
+The whole batch is refused rather than the offending entries skipped:
+several unsafe names cannot share one stand-in, and quietly downloading
+some of what was marked is worse than downloading none of it.  The
+single-object path still reaches them, and shows the path first."
+  (when-let* ((unsafe (seq-remove
+                       (lambda (entry)
+                         (s3-manager--safe-leaf-p
+                          (s3-manager--leaf-of
+                           (s3-manager-entry-display-name entry))))
+                       entries)))
+    (user-error "Cannot write %s under its own name; download %s singly"
+                (string-join (mapcar #'s3-manager-entry-key
+                                     (seq-take unsafe 3))
+                             ", ")
+                (if (cdr unsafe) "them" "it"))))
+
+(defun s3-manager--check-download-collisions (jobs directory)
+  "Signal when two of JOBS would write the same file in DIRECTORY.
+
+Two S3 keys in one listing are distinct by construction, and on a
+case-sensitive filesystem their leaves are too.  On a case-insensitive
+one -- macOS by default -- \"A.txt\" and \"a.txt\" are one file, and the
+batch would run two transfers at it with nothing to say which won.  That
+is the collision `s3-manager-dired-upload' refuses in the other
+direction; the difference is only that here the filesystem decides
+whether there is one."
+  (let* ((fold (file-name-case-insensitive-p directory))
+         (names (mapcar (lambda (job)
+                          (let ((leaf (file-name-nondirectory (car job))))
+                            (if fold (downcase leaf) leaf)))
+                        jobs)))
+    (when (/= (length names) (length (seq-uniq names)))
+      (user-error "Marked objects share a destination name: %s"
+                  (string-join
+                   (seq-uniq (seq-filter
+                              (lambda (n)
+                                (> (seq-count (lambda (o) (equal o n)) names)
+                                   1))
+                              names))
+                   ", ")))))
 
 (defun s3-manager--download-jobs (entries directory)
   "Return one (DESTINATION ARGS DESCRIPTION) per entry in ENTRIES.
-Each lands under its own display name in DIRECTORY.
-
-No duplicate-leaf guard, unlike `s3-manager-dired-upload', and the
-asymmetry is a fact about the two sides rather than an oversight: that
-guard exists because keys are derived from leaf names, so two marked
-files in different directories collide.  These entries come from a
-single listing, where the keys are unique and share one prefix, so the
-display names differ by construction."
+Each lands under its own display name in DIRECTORY, which
+`s3-manager--check-download-leaves' has already established is a name
+that stays inside it."
   (mapcar
    (lambda (entry)
      (let* ((key (s3-manager-entry-key entry))
             (destination (expand-file-name
-                          (s3-manager-entry-display-name entry) directory)))
+                          (s3-manager--leaf-of
+                           (s3-manager-entry-display-name entry))
+                          directory)))
        (list destination
              (s3-manager--get-args (s3-manager--s3-uri key) destination)
              (format "downloading %s to %s"
@@ -245,10 +306,16 @@ One prompt for the directory and at most one for overwriting: a probe
 per object is bounded, but a prompt per object is not, which is
 `s3-manager-dired-upload' reasoning in the other direction."
   (let* ((total (length entries))
-         (directory (s3-manager--download-directory total))
+         ;; Before the prompt: refusing after the user has chosen a directory
+         ;; would waste the answer, and nothing here depends on it.
+         (_ (s3-manager--check-download-leaves entries))
+         (directory (s3-manager--read-local-directory
+                     (format "Download %d objects to: " total)
+                     (s3-manager--local-default-directory)))
          (jobs (s3-manager--download-jobs entries directory))
          (lead (format "Download %d objects to %s"
                        total (abbreviate-file-name directory))))
+    (s3-manager--check-download-collisions jobs directory)
     (when (s3-manager--offer-commands
            (mapcar #'cadr jobs) lead
            ;; The total, not the largest: what makes a batch worth leaving
@@ -256,7 +323,10 @@ per object is bounded, but a prompt per object is not, which is
            (seq-reduce (lambda (sum entry)
                          (+ sum (or (s3-manager-entry-size entry) 0)))
                        entries 0))
-      ;; After the offer, so someone who takes the command line away is
+      ;; Only now: answering `c' or `q' at the offer must not leave behind a
+      ;; directory created for a transfer that never ran.
+      (s3-manager--ensure-local-directory directory)
+      ;; After the offer too, so someone who takes the command line away is
       ;; never asked about files Emacs is no longer going to write.  Nothing
       ;; is ever unchecked: existence here is a local question with no round
       ;; trip to fail, which is why there is no probe.
@@ -307,20 +377,17 @@ are after `dired-do-copy'."
            (leaf (directory-file-name (s3-manager-entry-display-name entry)))
            (default (expand-file-name
                      leaf (s3-manager--local-default-directory)))
-           (destination (file-name-as-directory
-                         (expand-file-name
-                          (read-directory-name
-                           (format "Download %s recursively to: " prefix)
-                           default nil nil)))))
-      (unless (file-directory-p destination)
-        (unless (y-or-n-p (format "Create %s? " destination))
-          (user-error "Download aborted"))
-        (make-directory destination t))
+           (destination (s3-manager--read-local-directory
+                         (format "Download %s recursively to: " prefix)
+                         default)))
       (let ((args (s3-manager--get-args
                    (s3-manager--s3-uri prefix) destination t))
             (description (format "downloading %s to %s"
                                  prefix (abbreviate-file-name destination))))
         (when (s3-manager--offer-command args description 'unbounded)
+          ;; After the offer, so handing the command over does not leave a
+          ;; directory behind for a transfer that never ran here.
+          (s3-manager--ensure-local-directory destination)
           (s3-manager--transfer args description))))))
 
 (defun s3-manager--upload-key-name (source)

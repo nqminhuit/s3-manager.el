@@ -383,6 +383,41 @@ character.  `tabulated-list-padding' is 2 for the same reason.")
       (substring key (length prefix))
     key))
 
+(defconst s3-manager--unsafe-leaf-names '("" "." "..")
+  "Display names that cannot be used as a local file name.
+Each of them names a directory rather than a file inside one.")
+
+(defun s3-manager--safe-leaf-p (name)
+  "Return non-nil when NAME can only name a file inside its own directory.
+
+S3 keys are arbitrary strings, so a display name may legally be \"..\" or
+begin with a tilde -- and `expand-file-name' resolves both against
+something other than the directory it was handed.  Measured:
+
+    (expand-file-name \"..\"    \"/tmp/dl\") => \"/tmp\"
+    (expand-file-name \"~root\" \"/tmp/dl\") => \"/root\"
+    (expand-file-name \"~\"     \"/tmp/dl\") => the home directory
+
+A name that does either is not a leaf, whatever it looks like in the
+listing.  A slash is refused too: the delimiter means an object display
+name cannot contain one today, and this must not become the thing that
+has to be re-checked if that ever changes."
+  (not (or (member name s3-manager--unsafe-leaf-names)
+           (string-prefix-p "~" name)
+           (string-search "/" name))))
+
+(defun s3-manager--leaf-of (display-name)
+  "Return the last segment of DISPLAY-NAME, without a trailing slash.
+A zero-byte directory-marker object can carry one."
+  (file-name-nondirectory (directory-file-name display-name)))
+
+(defun s3-manager--safe-leaf (name)
+  "Return NAME when `s3-manager--safe-leaf-p', else a fixed stand-in.
+For the callers that need *a* name rather than the right one.  A caller
+writing several files at once must refuse instead, or two unsafe names
+would collide on the stand-in."
+  (if (s3-manager--safe-leaf-p name) name "s3-object"))
+
 (defun s3-manager--parent-prefix (prefix)
   "Return the prefix one level above PREFIX, or the empty string."
   (if (string-empty-p prefix)

@@ -6928,3 +6928,314 @@ listing, so the count in that buffer has to follow."
     (s3-manager--print-list)
     (s3-manager--update-header-line)
     (should (string-match-p "1 marked" (s3-manager-test--header)))))
+
+
+;;;; A local destination cannot escape the directory it was given
+
+(defmacro s3-manager-test--in-hostile-buffer (&rest body)
+  "Run BODY in a listing holding keys that are legal in S3 and hostile locally."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (s3-manager-mode)
+     (setq s3-manager--profile "production"
+           s3-manager--bucket "media"
+           s3-manager--prefix "backups/")
+     (setq tabulated-list-format s3-manager--object-list-format)
+     (tabulated-list-init-header)
+     (let ((s3-manager--cache (make-hash-table :test #'equal)))
+       (s3-manager--render-objects
+        '((Contents . [((Key . "backups/ok.txt") (Size . 10)
+                        (LastModified . "2026-09-01T00:00:00+00:00"))
+                       ((Key . "backups/~root") (Size . 10)
+                        (LastModified . "2026-09-01T00:00:00+00:00"))
+                       ((Key . "backups/..") (Size . 10)
+                        (LastModified . "2026-09-01T00:00:00+00:00"))])
+          (Prefix . "backups/"))))
+     ,@body))
+
+(defun s3-manager-test--mark-every-object ()
+  "Mark every object row in the current listing."
+  (dolist (entry (copy-sequence s3-manager--entries))
+    (when (eq (s3-manager-entry-type entry) 'object)
+      (s3-manager--goto-entry entry)
+      (s3-manager-mark))))
+
+(ert-deftest s3-manager-test-safe-leaf-p ()
+  "`expand-file-name' resolves \"..\" and a leading tilde against something
+other than the directory it is handed, so neither is a leaf."
+  (should (s3-manager--safe-leaf-p "ok.txt"))
+  (should (s3-manager--safe-leaf-p "has space.txt"))
+  ;; A tilde that is not leading expands to nothing.
+  (should (s3-manager--safe-leaf-p "backup~"))
+  (should-not (s3-manager--safe-leaf-p ".."))
+  (should-not (s3-manager--safe-leaf-p "."))
+  (should-not (s3-manager--safe-leaf-p ""))
+  (should-not (s3-manager--safe-leaf-p "~"))
+  (should-not (s3-manager--safe-leaf-p "~root"))
+  (should-not (s3-manager--safe-leaf-p "a/b"))
+  ;; And the measured consequence the predicate exists for.
+  (should (equal (expand-file-name "~root" "/tmp/dl") "/root"))
+  (should (equal (expand-file-name ".." "/tmp/dl") "/tmp")))
+
+(ert-deftest s3-manager-test-download-batch-refuses-an-escaping-name ()
+  "A batch names no destination out loud, so an escaping leaf must not run.
+Measured: \"backups/~root\" expands to /root and \"backups/..\" to the
+parent of whatever directory was chosen."
+  (let ((argv-file (make-temp-file "s3-esc-argv"))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-hostile-buffer
+            (s3-manager-test--mark-every-object)
+            (should (= 3 (length (s3-manager--entries-marked
+                                  s3-manager--mark-char))))
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) (setq asked t) "/tmp/"))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-get) :type 'user-error))))
+          ;; Refused before the directory was even asked for, and nothing ran.
+          (should-not asked)
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-download-batch-allows-safe-names ()
+  "The guard must refuse the hostile keys and nothing else."
+  (let ((argv-file (make-temp-file "s3-esc-argv"))
+        (directory (make-temp-file "s3-esc-dir" t)))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) directory))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 2 (length (s3-manager-test--argv-records
+                                         argv-file)))))))))
+          (dolist (record (s3-manager-test--argv-records argv-file))
+            (should (seq-find (lambda (a)
+                                (string-prefix-p
+                                 (file-name-as-directory directory) a))
+                              record))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-one-offers-a-safe-default-name ()
+  "The single path shows the path, but its editable default must still be
+a name that cannot escape: offering \"~root\" meant one RET wrote /root."
+  (let ((offered 'none))
+    (s3-manager-test--in-hostile-buffer
+      (s3-manager--goto-entry
+       (car (seq-filter (lambda (e)
+                          (equal (s3-manager-entry-display-name e) "~root"))
+                        s3-manager--entries)))
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (prompt _dir _mm _mustmatch initial)
+                   (setq offered (cons prompt initial))
+                   (user-error "stop here")))
+                ((symbol-function 'message) #'ignore))
+        (should-error (s3-manager-get) :type 'user-error)))
+    ;; The prompt still names the object; only the default is made safe.
+    (should (equal (car offered) "Download ~root to: "))
+    (should (equal (cdr offered) "s3-object"))))
+
+(ert-deftest s3-manager-test-view-name-guard-is-the-shared-one ()
+  "The download paths and `s3-manager-view' face the same keys, so they
+must not have two answers.  This is what regressed: the guard existed
+here and the batch download went a release without it."
+  (should (equal (s3-manager--safe-leaf "..") "s3-object"))
+  (should (equal (s3-manager--safe-leaf "~root") "s3-object"))
+  (should (equal (s3-manager--safe-leaf "ok.txt") "ok.txt"))
+  ;; A directory-marker object carries a trailing slash into its leaf.
+  (should (equal (s3-manager--leaf-of "sub/") "sub")))
+
+(ert-deftest s3-manager-test-download-batch-refuses-a-remote-directory ()
+  "`aws' cannot write to a TRAMP path, and `file-directory-p' on one opens
+a connection -- so the check has to come before any predicate touches it."
+  (let ((touched nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (s3-manager-mark)
+      (s3-manager-mark)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (&rest _) "/ssh:host:/srv/incoming/"))
+                ((symbol-function 'file-directory-p)
+                 (lambda (d) (push d touched) t))
+                ;; Only a *remote* creation is the failure being watched for:
+                ;; `file-remote-p' autoloads TRAMP, which creates its own
+                ;; persistency directory on the way in.  A blanket stub here
+                ;; caught that instead, and reported the guard as broken when
+                ;; it was working.
+                ((symbol-function 'make-directory)
+                 (lambda (d &rest _)
+                   (when (file-remote-p d)
+                     (error "Created a remote directory"))))
+                ((symbol-function 'message) #'ignore))
+        (should-error (s3-manager-get) :type 'user-error)))
+    ;; Refused, and the remote path was never handed to a predicate that
+    ;; would have opened a connection to answer.
+    (should-not (seq-find #'file-remote-p touched))))
+
+(ert-deftest s3-manager-test-get-recursive-refuses-a-remote-directory ()
+  "The same guard, on the path that had gone without it since 0.1.0."
+  (let ((touched nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-directory)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (&rest _) "/ssh:host:/srv/incoming/"))
+                ((symbol-function 'file-directory-p)
+                 (lambda (d) (push d touched) t))
+                ;; Only a *remote* creation is the failure being watched for:
+                ;; `file-remote-p' autoloads TRAMP, which creates its own
+                ;; persistency directory on the way in.  A blanket stub here
+                ;; caught that instead, and reported the guard as broken when
+                ;; it was working.
+                ((symbol-function 'make-directory)
+                 (lambda (d &rest _)
+                   (when (file-remote-p d)
+                     (error "Created a remote directory"))))
+                ((symbol-function 'message) #'ignore))
+        (should-error (s3-manager-get-recursive) :type 'user-error)))
+    (should-not (seq-find #'file-remote-p touched))))
+
+(ert-deftest s3-manager-test-download-batch-refuses-colliding-names ()
+  "On a case-insensitive filesystem two distinct keys are one local file.
+Two transfers at one file, with nothing to say which won -- the
+collision `s3-manager-dired-upload' refuses in the other direction."
+  (let ((argv-file (make-temp-file "s3-case-argv"))
+        (directory (make-temp-file "s3-case-dir" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (s3-manager-mode)
+          (setq s3-manager--profile "production" s3-manager--bucket "media"
+                s3-manager--prefix "")
+          (setq tabulated-list-format s3-manager--object-list-format)
+          (tabulated-list-init-header)
+          (let ((s3-manager--cache (make-hash-table :test #'equal)))
+            (s3-manager--render-objects
+             '((Contents . [((Key . "A.txt") (Size . 10)
+                             (LastModified . "2026-09-01T00:00:00+00:00"))
+                            ((Key . "a.txt") (Size . 10)
+                             (LastModified . "2026-09-01T00:00:00+00:00"))])
+               (Prefix . ""))))
+          (s3-manager-test--mark-every-object)
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (&rest _) directory))
+                    ((symbol-function 'message) #'ignore))
+            ;; Case-insensitive: refused, and nothing runs.
+            (cl-letf (((symbol-function 'file-name-case-insensitive-p)
+                       (lambda (_) t)))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-get) :type 'user-error)))
+            (should (null (s3-manager-test--argv-records argv-file)))
+            ;; Case-sensitive: two distinct files, so both run.
+            (cl-letf (((symbol-function 'file-name-case-insensitive-p)
+                       (lambda (_) nil)))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 2 (length (s3-manager-test--argv-records
+                                         argv-file))))))))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-batch-creates-nothing-when-handed-over ()
+  "Answering `c' at the offer must not leave a directory behind for a
+transfer that never ran."
+  (let* ((parent (make-temp-file "s3-defer-dir" t))
+         (missing (file-name-as-directory (expand-file-name "not-yet" parent)))
+         (argv-file (make-temp-file "s3-defer-argv"))
+         (kill-ring nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) missing))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (error "Asked to create: %s" p)))
+                      ((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--answering-offer ?c
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file)
+                  (let ((s3-manager-large-transfer-size 25))
+                    (s3-manager-get))
+                  (should offered)))))
+          (should-not (file-directory-p missing))
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-directory parent t)
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-get-recursive-creates-nothing-when-handed-over ()
+  "The same deferral on the recursive path, which always offers."
+  (let* ((parent (make-temp-file "s3-defer-dir" t))
+         (missing (file-name-as-directory (expand-file-name "not-yet" parent)))
+         (argv-file (make-temp-file "s3-defer-argv"))
+         (kill-ring nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-directory)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) missing))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (error "Asked to create: %s" p)))
+                      ((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--answering-offer ?c
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file)
+                  ;; A recursive download offers regardless of size.
+                  (let ((s3-manager-large-transfer-size 100))
+                    (s3-manager-get-recursive))
+                  (should offered)))))
+          (should-not (file-directory-p missing))
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-directory parent t)
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-download-batch-writes-a-marker-as-a-file ()
+  "A zero-byte directory-marker object is an object with a slash in its
+display name.  It has to become a plain file inside the chosen
+directory, not a directory path handed to `aws s3 cp'."
+  (let ((directory (make-temp-file "s3-marker-dir" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (s3-manager-mode)
+          (setq s3-manager--profile "production" s3-manager--bucket "media"
+                s3-manager--prefix "photos/")
+          (setq tabulated-list-format s3-manager--object-list-format)
+          (tabulated-list-init-header)
+          (let ((s3-manager--cache (make-hash-table :test #'equal)))
+            (s3-manager--render-objects
+             '((Contents . [((Key . "photos/ok.txt") (Size . 10)
+                             (LastModified . "2026-09-01T00:00:00+00:00"))
+                            ((Key . "photos/marker/") (Size . 0)
+                             (LastModified . "2026-09-01T00:00:00+00:00"))])
+               (Prefix . "photos/"))))
+          (should (equal (mapcar #'s3-manager-entry-display-name
+                                 s3-manager--entries)
+                         '("ok.txt" "marker/")))
+          ;; The guard accepts it -- the leaf is "marker", which escapes
+          ;; nothing -- so the job builder is what must not pass the slash on.
+          (s3-manager--check-download-leaves s3-manager--entries)
+          (let ((destinations
+                 (mapcar #'car (s3-manager--download-jobs
+                                s3-manager--entries
+                                (file-name-as-directory directory)))))
+            (should (equal destinations
+                           (list (expand-file-name "ok.txt" directory)
+                                 (expand-file-name "marker" directory))))
+            (dolist (d destinations)
+              (should-not (string-suffix-p "/" d)))))
+      (delete-directory directory t))))

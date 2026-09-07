@@ -1354,6 +1354,42 @@ is asked for with `read-file-name`, so it can be renamed on the way down.
 Several share one `read-directory-name` and keep their own display names — the
 split Dired makes, for the same reason.
 
+**A display name is not a file name until it has been checked.** S3 keys are
+arbitrary strings, so a display name may legally be `..` or start with a
+tilde, and `expand-file-name` resolves both against something other than the
+directory it was handed — measured:
+
+```elisp
+(expand-file-name ".."    "/tmp/dl") => "/tmp"
+(expand-file-name "~root" "/tmp/dl") => "/root"
+```
+
+`s3-manager--safe-leaf-p` is the one answer, shared by `s3-manager-view`
+(§11.7), the single download's editable default, and the batch. The batch
+**refuses outright** rather than substituting a stand-in the way the other two
+do: several unsafe names cannot share one stand-in, and it is the only path
+that writes a file whose location it never showed anyone.
+
+This regressed in 0.5.0 and was caught by review rather than by a test. The
+guard already existed in `s3-manager-view.el` with three tests behind it; the
+batch download was written without it, and `backups/~root` therefore landed in
+`/root`. The lesson recorded here rather than in a commit message: **anything
+that joins a key to a local path is the same problem, and there is now one
+function to call.**
+
+**Two objects can still collide locally even when their keys cannot.**
+`A.txt` and `a.txt` are distinct S3 keys and one file on a case-insensitive
+filesystem, which is macOS by default.
+`s3-manager--check-download-collisions` asks the filesystem
+(`file-name-case-insensitive-p`) rather than assuming, so nothing is refused
+on Linux that need not be.
+
+**The destination directory is created after the offer, not before.** Handing
+the command over, or quitting, must not leave behind a directory confirmed for
+a transfer that never ran. `s3-manager--read-local-directory` therefore only
+reads; `s3-manager--ensure-local-directory` creates. Both are shared with
+§11.5, which had the same ordering.
+
 The batch carries **no duplicate-leaf guard**, unlike `s3-manager-dired-upload`
 (§11.9). The asymmetry is a fact about the two sides rather than an oversight:
 that guard exists because an upload derives its key from a leaf name, so two
@@ -1381,7 +1417,18 @@ aws --profile P [--endpoint-url U] \
 ```
 
 Only offered when point is on a directory entry. The destination directory is
-created if absent, after confirmation.
+read by `s3-manager--read-local-directory` and created if absent, after
+confirmation — and after the offer (§11.11), so a handed-over command leaves
+nothing behind.
+
+**A remote destination is refused, on both this path and the batch.** `aws`
+cannot write to a TRAMP path, and `file-directory-p` on one opens a connection,
+so the check has to precede any predicate that would touch it. Not
+hypothetical: `s3-manager--local-default-directory` honours
+`dired-dwim-target`, so a remote Dired in the other window is what gets
+*offered*. This too was found by review — the single-object path
+(`s3-manager--read-destination-file`) had carried the guard since 0.2.0 and
+neither directory path had it.
 
 ### 11.6 Delete
 
@@ -2220,6 +2267,16 @@ wrapper.
     follows a mark dropped by a move rather than by the user.
 44. A batch where one job fails → the rest still run and the summary counts
     it.
+45. An object keyed `~root` or `..` among the marks → the batch download is
+    refused outright and nothing is written; the single-object path offers a
+    default that cannot escape.  Only the `~root` half is reachable against
+    `prud` — see §18.8.
+46. A remote directory answered at either directory prompt → refused before
+    any predicate touches the path.
+47. `A.txt` and `a.txt` marked together → refused on a case-insensitive
+    filesystem, run on a case-sensitive one.
+48. `c` or `q` at the offer with the destination directory absent → it stays
+    absent.
 
 ### What has actually been run against a real endpoint
 
@@ -2228,8 +2285,8 @@ because a Definition of Done nobody has executed is a wish:
 
 | | |
 |---|---|
-| Run live | 1-9, 12-15, 17, 20-24, 26, the first clause of 25, **30**, **31**, the prompt half of **29** (it named the size; only `c` was answered, never `r`), and **37**, **38**, **39**, **40**, **43** |
-| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing), **28**, **32**, **33**, **34**, the `r` half of **29**, and **35**, **36**, **41**, **42**, **44** |
+| Run live | 1-9, 12-15, 17, 20-24, 26, the first clause of 25, **30**, **31**, the prompt half of **29** (it named the size; only `c` was answered, never `r`), **37**, **38**, **39**, **40**, **43**, **48**, and the `~root` half of **45** (the `..` half cannot be created on this endpoint — §18.8) |
+| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing), **28**, **32**, **33**, **34**, the `r` half of **29**, **35**, **36**, **41**, **42**, **44**, and **46**, **47** (both want a machine this is not: a reachable SSH host, a case-insensitive filesystem) |
 
 None of the test-only ones are hard; they want things a scratch bucket does
 not have to hand — a large object, a bucket the caller cannot write, a second
@@ -2463,6 +2520,26 @@ lazy initialisation. Hence §11.9: the Dired binding stays the user's.
 | `tabulated-list-mode` `revert-buffer-function` | set to the **synchronous** `tabulated-list-revert`; must be overridden |
 | `tabulated-list-format` `SORT` of `t` | sorts the **rendered string** — `"9 B"` sorts after `"1.8 GB"` |
 | `tabulated-list-put-tag` | no-ops silently when `tabulated-list-padding` is 0 |
+
+### 18.8 MinIO refuses `..` in a key; S3 does not
+
+Measured while trying to seed the escaping-name test against `prud`:
+
+```
+$ aws s3api put-object --bucket temp --key "s3-manager-selftest/esc/.." --body f
+An error occurred (XMinioInvalidResourceName) when calling the PutObject
+operation: Resource name contains bad components such as ".." or "."
+
+$ aws s3api put-object --bucket temp --key "s3-manager-selftest/esc/~root" --body f
+(succeeds)
+```
+
+So the `..` case is unreachable on MinIO and reachable on AWS S3, whose key
+grammar is any UTF-8 sequence up to 1024 bytes. This is why
+`s3-manager--safe-leaf-p` refuses `..` on a rule rather than on having seen
+one, and why item 45 in §16 is only half run live. It is also a reminder that
+"the endpoint rejected it" is not the same as "it cannot happen": the package
+serves both.
 
 ---
 

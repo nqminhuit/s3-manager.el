@@ -75,16 +75,11 @@ S3 keys are arbitrary strings and may legally be or contain \"..\", so
 the name is taken from the leaf only and rejected outright if it could
 name anything other than a file inside its own directory.  Building a
 path from a key directly would let one escape the temporary directory."
-  (let ((name (file-name-nondirectory
-               (directory-file-name (s3-manager-entry-display-name entry)))))
-    (if (or (member name '("" "." ".."))
-            ;; A leading tilde is the escape that matters: `expand-file-name'
-            ;; expands it, so "~" resolves to the user's home directory and
-            ;; "~root" to root's.  An object with the key "backups/~" would
-            ;; otherwise have Emacs visit $HOME itself.
-            (string-prefix-p "~" name))
-        "s3-object"
-      name)))
+  ;; `s3-manager--safe-leaf' is shared with the download paths, which face
+  ;; the same keys and the same `expand-file-name'.  It lived here first, and
+  ;; the download batch went without it for a release.
+  (s3-manager--safe-leaf
+   (s3-manager--leaf-of (s3-manager-entry-display-name entry))))
 
 (defun s3-manager--view-destination (entry)
   "Return a fresh temporary path to download ENTRY to.
