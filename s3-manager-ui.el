@@ -558,13 +558,30 @@ in this map refuses such a row, so landing there is landing nowhere."
 ;; entry struct because that struct is an entry id compared with `equal' --
 ;; mutating it would break point restoration.
 
+(defun s3-manager--put-tag (mark &optional advance)
+  "Write MARK, a character or nil, in the padding column.
+With ADVANCE, move down a line afterwards.  The one place that knows a
+mark renders as anything, so a second kind of mark needs no second
+literal."
+  (tabulated-list-put-tag (if mark (char-to-string mark) "") advance))
+
+(defun s3-manager--entries-marked (mark)
+  "Return the objects carrying MARK, in listing order.
+
+Directories are excluded rather than merely never marked: a zero-byte
+object whose key ends in a slash appears in `Contents' as well as in
+`CommonPrefixes', so the table could hold one even though
+`s3-manager--markable-entry-at-point' refuses to put it there."
+  (seq-filter (lambda (entry)
+                (and (eq (s3-manager-entry-type entry) 'object)
+                     (eql mark (gethash (s3-manager-entry-key entry)
+                                        s3-manager--marks))))
+              s3-manager--entries))
+
 (defun s3-manager--marked-keys ()
-  "Return the S3 keys marked for deletion, in listing order."
-  (let ((marked nil))
-    (dolist (entry s3-manager--entries (nreverse marked))
-      (let ((key (s3-manager-entry-key entry)))
-        (when (gethash key s3-manager--marks)
-          (push key marked))))))
+  "Return the S3 keys flagged for deletion, in listing order."
+  (mapcar #'s3-manager-entry-key
+          (s3-manager--entries-marked s3-manager--delete-char)))
 
 (defun s3-manager--apply-marks ()
   "Re-apply marks to the buffer after a repaint."
@@ -573,9 +590,10 @@ in this map refuses such a row, so landing there is landing nowhere."
       (goto-char (point-min))
       (while (not (eobp))
         (let ((id (tabulated-list-get-id)))
-          (when (and (s3-manager-entry-p id)
-                     (gethash (s3-manager-entry-key id) s3-manager--marks))
-            (tabulated-list-put-tag "D")))
+          (when (s3-manager-entry-p id)
+            (when-let* ((mark (gethash (s3-manager-entry-key id)
+                                       s3-manager--marks)))
+              (s3-manager--put-tag mark))))
         (forward-line 1)))))
 
 (defun s3-manager--clear-marks ()
@@ -602,12 +620,16 @@ nonetheless act on."
              "Prefixes cannot be marked; \\[s3-manager-delete] deletes one recursively")))
     entry))
 
-(defun s3-manager-mark-delete ()
-  "Mark the object at point for deletion, then move down."
-  (interactive)
+(defun s3-manager--mark (mark)
+  "Give the object at point MARK, then move down."
   (let ((entry (s3-manager--markable-entry-at-point)))
-    (puthash (s3-manager-entry-key entry) t s3-manager--marks)
-    (tabulated-list-put-tag "D" t)))
+    (puthash (s3-manager-entry-key entry) mark s3-manager--marks)
+    (s3-manager--put-tag mark t)))
+
+(defun s3-manager-mark-delete ()
+  "Flag the object at point for deletion, then move down."
+  (interactive)
+  (s3-manager--mark s3-manager--delete-char))
 
 (defun s3-manager-unmark ()
   "Remove the mark from the object at point, then move down."
@@ -615,7 +637,7 @@ nonetheless act on."
   (let ((entry (s3-manager--entry-at-point)))
     (when (s3-manager-entry-p entry)
       (remhash (s3-manager-entry-key entry) s3-manager--marks))
-    (tabulated-list-put-tag "" t)))
+    (s3-manager--put-tag nil t)))
 
 (defun s3-manager-unmark-all ()
   "Remove every mark in this buffer."
@@ -624,7 +646,7 @@ nonetheless act on."
   (save-excursion
     (goto-char (point-min))
     (while (not (eobp))
-      (tabulated-list-put-tag "")
+      (s3-manager--put-tag nil)
       (forward-line 1)))
   (message "S3: marks cleared"))
 

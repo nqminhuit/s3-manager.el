@@ -353,11 +353,18 @@ progress of another still going.")
 (defvar-local s3-manager--transfer-status nil
   "Most recent progress line from a running transfer, or nil.")
 
+(defconst s3-manager--delete-char ?D
+  "The deletion flag: the mark `s3-manager-execute' acts on, and nothing else.")
+
 (defvar-local s3-manager--marks nil
-  "Hash table of S3 keys marked for deletion in this buffer.
+  "Hash table mapping an S3 key to the mark character it carries.
 Authoritative: `tabulated-list-print' erases the characters in the
 buffer, and its UPDATE argument leaves stale tags behind rather than
-preserving them, so marks are re-applied from here after every repaint.")
+preserving them, so marks are re-applied from here after every repaint.
+
+The value is the character rather than a flag, so that a second kind of
+mark needs no second table and no second code path -- only a different
+character.  `tabulated-list-padding' is 2 for the same reason.")
 
 (defun s3-manager--strip-prefix (key prefix)
   "Return KEY with PREFIX removed from its front."

@@ -5277,7 +5277,7 @@ that new object a deletion mark the user never set."
   (with-temp-buffer
     (s3-manager-mode)
     (setq s3-manager--profile "p" s3-manager--bucket "bk" s3-manager--prefix "")
-    (puthash "README.md" t s3-manager--marks)
+    (puthash "README.md" s3-manager--delete-char s3-manager--marks)
     (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
       (s3-manager--after-copy
        (s3-manager-copy-job--create
@@ -5290,7 +5290,7 @@ that new object a deletion mark the user never set."
   (with-temp-buffer
     (s3-manager-mode)
     (setq s3-manager--profile "p" s3-manager--bucket "bk" s3-manager--prefix "")
-    (puthash "README.md" t s3-manager--marks)
+    (puthash "README.md" s3-manager--delete-char s3-manager--marks)
     (cl-letf (((symbol-function 's3-manager--reload) #'ignore))
       (s3-manager--after-copy
        (s3-manager-copy-job--create
@@ -5827,3 +5827,55 @@ in most listings, so a cache check cannot tell the two apart."
         :profile "p" :source-bucket "src" :source-key "from/"
         :bucket "bk" :key "to/" :recursive t :move nil))
       (should (equal purged '(("bk" . "to/")))))))
+
+;;;; The mark character is stored, not hardcoded
+
+(ert-deftest s3-manager-test-a-mark-stores-its-character ()
+  "The value is the tag, so a second kind needs no second table."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (s3-manager-mark-delete)
+    (let ((marked (hash-table-keys s3-manager--marks)))
+      (should (= 1 (length marked)))
+      (should (eql s3-manager--delete-char
+                   (gethash (car marked) s3-manager--marks))))))
+
+(ert-deftest s3-manager-test-marked-keys-reads-only-the-delete-char ()
+  "`x' acts on the flag, and will keep doing so once `*' exists."
+  (s3-manager-test--in-many-buffer
+    (let ((keys (mapcar #'s3-manager-entry-key
+                        (seq-filter (lambda (e)
+                                      (eq (s3-manager-entry-type e) 'object))
+                                    s3-manager--entries))))
+      (should (> (length keys) 1))
+      (puthash (nth 0 keys) s3-manager--delete-char s3-manager--marks)
+      ;; Any other character is not a deletion flag, whatever it means later.
+      (puthash (nth 1 keys) ?* s3-manager--marks)
+      (should (equal (s3-manager--marked-keys) (list (nth 0 keys)))))))
+
+(ert-deftest s3-manager-test-entries-marked-skips-a-directory ()
+  "A zero-byte object whose key ends in a slash is in Contents too.
+
+`s3-manager--markable-entry-at-point' refuses to mark a prefix, but the
+reader must not trust that: the table is keyed by string, and both rows
+carry the same key."
+  (s3-manager-test--in-many-buffer
+    (let ((directory (seq-find (lambda (e)
+                                 (eq (s3-manager-entry-type e) 'directory))
+                               s3-manager--entries)))
+      (should directory)
+      (puthash (s3-manager-entry-key directory) s3-manager--delete-char
+               s3-manager--marks)
+      (should-not (s3-manager--entries-marked s3-manager--delete-char))
+      (should-not (s3-manager--marked-keys)))))
+
+(ert-deftest s3-manager-test-put-tag-renders-and-clears ()
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-object)
+    (s3-manager--put-tag ?D)
+    (should (equal "D" (buffer-substring (line-beginning-position)
+                                         (1+ (line-beginning-position)))))
+    (s3-manager--put-tag nil)
+    (should (equal " " (buffer-substring (line-beginning-position)
+                                         (1+ (line-beginning-position)))))))
+
