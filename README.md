@@ -51,8 +51,9 @@ From GitHub:
 | `c` | copy to another S3 location, server-side |
 | `r` | rename, or move elsewhere in S3 |
 | `P` | upload a local file, or a directory recursively |
-| `d` / `x` | mark for deletion; delete everything marked |
-| `u` / `U` | unmark at point / unmark everything |
+| `m` | mark, for `C` / `c` / `r` and the downloads |
+| `d` / `x` | flag for deletion; delete everything flagged |
+| `u` / `U` | unmark at point / unmark everything, either kind |
 | `D` | delete the object, or the prefix recursively |
 | `!` | show the accumulated error reports |
 | `n` / `p` / `q` | next line / previous line / bury |
@@ -60,6 +61,9 @@ From GitHub:
 **`C` downloads.** With nothing in the other window it prompts for a path; with
 Dired there it uses that directory, honouring `dired-dwim-target`. A prefix
 comes down recursively.
+
+`C`, `c`, `r` and the downloads act on the marked objects, or on the entry at
+point when nothing is marked — see [Marks](#marks).
 
 Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
 `s3-manager-copy-dry-run`, `s3-manager-delete-recursive-dry-run`,
@@ -69,14 +73,48 @@ Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
 Nothing to configure for Evil; the keymap is registered as overriding, and keys
 it does not bind still reach Evil.
 
+### Marks
+
+`m` marks objects; `d` flags them for deletion. Two characters, and they never
+stand in for each other:
+
+```
+ prud  s3://media/videos/2026/   4 entries  2 marked, 1 flagged
+
+       Size Modified   Name
+          -        -   raw/
+*   1.8 GiB 2026-09-02 clip-01.mp4
+*   1.2 GiB 2026-09-02 clip-02.mp4
+D   1.2 KiB 2026-09-01 notes.md
+```
+
+`x` deletes what is flagged and looks at nothing else. `C`, `c`, `r` and the
+downloads act on what is marked, or on the entry at point when nothing is —
+Dired's rule, so one key means both "act on these" and "act on this".
+
+A batch asks once, not once per object: one destination, one existence check
+covering all of them, one confirmation naming what would be overwritten, one
+`aws` process at a time, and one summary. Marks survive a copy or a download —
+the objects are still there — and are dropped by a move.
+
+One object and several differ where it matters. `c` on one offers its key, so
+it can be renamed on the way; on several it asks for a *prefix*, and each keeps
+its own name. The same for a download: a filename for one, a directory for
+several. And `D` is always exactly the row under the cursor — prefixes cannot
+be marked, so a mark-aware `D` could only ever do `x`'s job with the other
+flag.
+
+Marks are dropped when you change prefix, and the header line counts them so
+that a mark scrolled off screen is not invisible state.
+
 ### Copying within S3
 
-`c` copies the entry at point to a prompted `s3://` destination and `r` renames
-or moves it, both server-side — the bytes never reach your machine. The
-destination is offered for editing, and what the prompt shows is what happens.
-A prefix goes recursively after a typed `yes`, and
-`M-x s3-manager-copy-dry-run` (with `C-u`, for a move) lists exactly what would
-happen first.
+`c` copies to a prompted `s3://` destination and `r` renames or moves, both
+server-side — the bytes never reach your machine. The destination is offered
+for editing, and what the prompt shows is what happens. A prefix goes
+recursively after a typed `yes` — only ever the one at point, since a prefix
+cannot be marked — and `M-x s3-manager-copy-dry-run` (with `C-u`, for a move)
+lists exactly what would happen first.
 
 Refused before anything runs: a destination equal to its source, two
 overlapping prefixes, an access point ARN or alias, and a listing on another
@@ -106,9 +144,10 @@ A recursive upload or S3-to-S3 copy does not ask: it already demands a typed
 ### Two windows
 
 With a Dired buffer beside a listing, `C` copies toward the other window in
-both directions. With a *second S3 listing* there instead, `C` copies into its
-prefix, server-side. `P` defaults its path there too. For the Dired half, bind
-it yourself:
+both directions, and marks decide what moves at either end. With a *second S3
+listing* there instead, `C` copies the marked objects into its prefix,
+server-side. `P` defaults its path there too. For the Dired half, bind it
+yourself:
 
 ```elisp
 (keymap-set dired-mode-map "C" #'s3-manager-dired-do-copy)
@@ -123,8 +162,9 @@ It uploads the marked files, with one confirmation for the batch.
   and names the existing object's size and date. Run
   `M-x s3-manager-upload-dry-run` on anything with symlinks in it — they are
   followed, and the preview is what shows you that.
-- **Deleting follows Dired.** `d`/`x` separates marking from executing; `D` on
-  a prefix demands a typed `yes`. Marks are dropped when you change prefix.
+- **Marking follows Dired.** `d`/`x` separates flagging from executing, and `m`
+  is the general mark the transfer commands read; `D` on a prefix demands a
+  typed `yes`. Marks are dropped when you change prefix.
 - **Failures are never summarised away.** Every one is appended to
   `*S3 Manager Error*` with the command and the CLI's own stderr verbatim, and
   shown unless `s3-manager-display-errors` is nil. `!` reopens it.

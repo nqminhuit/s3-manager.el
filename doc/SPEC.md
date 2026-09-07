@@ -1,6 +1,6 @@
 # `s3-manager.el` — Specification
 
-Status: **Describes v0.2.0.** One living document rather than one per release:
+Status: **Describes v0.5.0.** One living document rather than one per release:
 superseded decisions are marked in place, and the text as it stood for an
 earlier release is recoverable from that release's tag.
 
@@ -834,7 +834,21 @@ At the bucket root, `^` returns to the bucket-list buffer.
 s3://media/videos/2026/                     production      1000 shown  +more
 ```
 
-Showing profile, bucket, prefix, count, and whether more pages exist.
+Showing profile, bucket, prefix, count, and whether more pages exist — and,
+when anything is marked, what the marks add up to:
+
+```
+ prud  s3://media/videos/2026/   4 entries  2 marked, 1 flagged
+```
+
+Counted through `s3-manager--entries-marked`, the reader every batch command
+uses, rather than over the hash table: a mark whose object has gone from the
+listing is in neither, so the number shown cannot disagree with the number
+acted on. Nothing is shown while a fetch is in flight or after one failed —
+the entries are stale, so a count of them would be.
+
+The two kinds are counted apart because `x` acts on one of those numbers and
+on no part of the other; one combined figure would correspond to no command.
 
 ---
 
@@ -923,11 +937,40 @@ A sorter is *required* for Size: the displayed value is a human-readable string
 hash table keyed by S3 key), so marks survive a re-sort and a partial re-render.
 After any repaint, marks are reapplied from the hash table.
 
+**There are two marks, and the hash value is the tag character itself** —
+`s3-manager--mark-char` (`*`) or `s3-manager--delete-char` (`D`), never a type
+symbol translated to a glyph at each display site. A character cannot be got
+wrong the way a two-wide string can, and it leaves exactly one place
+(`s3-manager--put-tag`) that writes into the margin.
+
+Three readers, and the difference between them is the whole design:
+
+| Reader | Character | Fallback to point |
+|---|---|---|
+| `s3-manager--marked-keys` | `D` | **no** |
+| `s3-manager--marked-entries` | `*` | yes, as `dired-get-marked-files` does |
+| `s3-manager--mark-summary` | both, counted apart | — |
+
+Each asks for its character *by name*, so neither can drift into the other by
+a flag being tested the wrong way round. `--marked-keys` returns keys because
+deletion needs nothing else; `--marked-entries` returns entries because copy
+and download need `display-name` and `size`.
+
+**All three go through `s3-manager--entries-marked`, which filters on
+`(eq type 'object)`** rather than trusting that a directory was never marked. A zero-byte object whose key ends in `/` appears
+in `Contents` as well as in `CommonPrefixes`, so the table can hold one even
+though `s3-manager--markable-entry-at-point` refuses to put it there.
+
+That filter is what makes every batch path cheap: **a batch never sees a
+prefix**, so `--recursive`, the typed `yes`, `unbounded` sizing and the
+recursive cache purge all stay on the at-point path, untouched. Each command
+is `if (cdr entries) → batch, else → the single-entry code unchanged`.
+
 Two constraints, both verified:
 
 - `tabulated-list-put-tag` **no-ops silently** when `tabulated-list-padding` is
-  0. Padding is set to 2 (not 1) so a second mark type can be added later
-  without reflowing every column.
+  0. Padding was set to 2 (not 1) so a second mark type could be added without
+  reflowing every column, which is what 0.5.0 then did.
 - **Do not use `tabulated-list-print`'s `UPDATE` argument to preserve marks.**
   Its own documentation warns that tags are *not* removed from entries that
   haven't changed, so it leaves stale marks on rows. Erase and reapply from the
@@ -938,7 +981,52 @@ Marks live in the hash rather than in a struct slot because entry structs are
 (§6): a mutable `marked` slot would change an entry's identity and break point
 restoration.
 
-### 9.3.1 The header line is contested — columns move into the buffer
+### 9.3.1 `x` must never act on `*`
+
+The single most important property in §9.3, and the reason the two characters
+exist rather than one.
+
+**A mark is a noun, not a verb.** Nothing in the table records an operation, so
+"execute the marks" has no referent. The `d`/`x` split exists because flagging
+is a *deferred destructive commitment*; a general mark is a *selection for an
+operation the user is about to name*. Conflate them and `x` deletes the objects
+someone selected in order to download them — a data-loss bug designed in rather
+than introduced.
+
+So: `x` reads `D` and nothing else, and `C`, `c`, `r` and the downloads read
+`*` and nothing else. `u` and `U` remove either kind, and needed no change when
+the second mark arrived: neither ever read the value.
+
+**`D` deliberately does not become mark-aware.** Dired has both `D` and `x` and
+its own manual concedes the pair confuses people. Here the deviation is cheap
+to justify: prefixes cannot be marked, so a mark-aware `D` could only act on
+objects — which is `x`'s job with a different flag. Keeping `D` at point
+preserves one clean invariant: it is always exactly the thing under the cursor.
+Recorded as a decision, not an omission.
+
+### 9.3.2 Sequencing a batch
+
+`s3-manager--run-sequentially` runs one item at a time and reports how many
+failed; `s3-manager--batch-summary` says so. Sequential rather than parallel:
+each transfer is an `aws` process holding a pipe and two buffers, and one
+listing can hand this every object it shows. A queue with a width is §17's
+work.
+
+`START` receives one item and a continuation it must call exactly once on both
+paths, or the batch stops there with the rest unattempted and no summary.
+
+`s3-manager--delete-chunks` is deliberately *not* folded into this: it counts
+per-key errors out of one response rather than per-job failures.
+
+**One refresh at the end, not one per job.** `s3-manager--after-copy`
+invalidates a listing before reloading it, so N objects into one prefix would
+be N real re-fetches — and each reload would re-cache what the next
+invalidation was about to drop. `s3-manager--copy-targets` is separate from
+`s3-manager--refresh-targets` precisely so a batch can union what its jobs
+touched; `s3-manager--after-copy` is now `s3-manager--after-copies` with a list
+of one.
+
+### 9.3.3 The header line is contested — columns move into the buffer
 
 `tabulated-list-init-header` installs the column titles into
 `header-line-format`, which is also where §8.4 puts the profile, the current
@@ -954,7 +1042,7 @@ header line is free for the S3 context.
 A test must assert on the **first buffer line**, not only on
 `header-line-format`, or this regresses unnoticed.
 
-### 9.3.2 One mode, two column layouts
+### 9.3.4 One mode, two column layouts
 
 §9's format is the object browser's. The same mode also serves the bucket list
 (§8.1), whose columns differ. `tabulated-list-format` is buffer-local, so each
@@ -1074,11 +1162,17 @@ and preserved CRs *look* stripped.
 | `C` | `s3-manager-copy` | copy to the other window: Dired, or nothing there, → download; an S3 listing → server-side (§11.10) |
 | `c` | `s3-manager-copy-to` | copy to a prompted S3 location (§11.10) |
 | `r` | `s3-manager-rename` | rename, or move elsewhere in S3 (§11.10) |
+
+`C`, `c`, `r` and the downloads read `s3-manager--marked-entries`: the marked
+objects, or the entry at point when nothing is marked. `x` reads the flags and
+only the flags. See §9.3.1 for why those are not the same set.
+
 | `P` | `s3-manager-upload` | upload a local file, or a directory recursively (§11.8) |
-| `d` | `s3-manager-mark-delete` | mark for deletion, move down |
-| `u` | `s3-manager-unmark` | unmark, move down |
-| `U` | `s3-manager-unmark-all` | clear all marks |
-| `x` | `s3-manager-execute` | execute marked deletions |
+| `m` | `s3-manager-mark` | mark for `C`/`c`/`r` and the downloads, move down |
+| `d` | `s3-manager-mark-delete` | flag for deletion, move down |
+| `u` | `s3-manager-unmark` | unmark, either kind, move down |
+| `U` | `s3-manager-unmark-all` | clear all marks, either kind |
+| `x` | `s3-manager-execute` | execute the deletion flags, and nothing else (§9.3.1) |
 | `D` | `s3-manager-delete` | delete entry at point immediately (confirm) |
 | `n` / `p` | next / previous line | |
 | `!` | `s3-manager-show-errors` | display the accumulated failure reports (§12) |
@@ -1090,7 +1184,11 @@ Unbound, `M-x` only: `s3-manager-upload-dry-run`,
 `s3-manager-dired-do-copy` (meant for `C` in `dired-mode-map`),
 `s3-manager-get`, `s3-manager-get-recursive`, `s3-manager-switch-profile`,
 `s3-manager-clear-cache`, `s3-manager-forget-profiles`,
-`s3-manager-list-profiles`.
+`s3-manager-list-profiles`,
+`s3-manager-view` (what `RET` dispatches to for a small object, §11.7).
+
+That is 30 interactive commands in all, `s3-manager` and `s3-manager-mode`
+included — the surface §17 says a 1.0 would freeze.
 
 `RET` on an object **views** it; it does not download. A `RET` that silently
 starts a multi-gigabyte download is a footgun, and spending the most valuable
@@ -1109,9 +1207,14 @@ entry behind them — measured, `tabulated-list-get-id` returns nil there and
 every command in this map refuses the row. Binding it also gives `gg` to users
 without Evil. It takes a count, so `5gg` still means line 5.
 
-The `d`/`x` split follows Dired: `d` marks, `x` executes. Making `d` delete
+The `d`/`x` split follows Dired: `d` flags, `x` executes. Making `d` delete
 immediately would put the destructive action on one of the most easily mistyped
 keys in the map.
+
+`m` is Dired's general mark, on Dired's key, with Dired's character. It arrived
+in 0.5.0, before anything read it, so that the one property that matters could
+be established first: `x` ignores it, and the transfer commands ignore the
+flag (§9.3.1).
 
 `C` is the download key, not a duplicate of one. With nothing in the other
 window it prompts for a path, exactly as a dedicated key would; with Dired
@@ -1245,6 +1348,24 @@ download has no `s3api` equivalent worth writing, so `s3` is already in use.
 Destination is prompted with `read-file-name`, defaulting to
 `(expand-file-name display-name s3-manager-download-directory)`. Existing files
 prompt for confirmation before being overwritten — `s3 cp` will not ask.
+
+**One object and several take different prompts, and that is deliberate.** One
+is asked for with `read-file-name`, so it can be renamed on the way down.
+Several share one `read-directory-name` and keep their own display names — the
+split Dired makes, for the same reason.
+
+The batch carries **no duplicate-leaf guard**, unlike `s3-manager-dired-upload`
+(§11.9). The asymmetry is a fact about the two sides rather than an oversight:
+that guard exists because an upload derives its key from a leaf name, so two
+marked files in different directories collide on one key. These entries come
+from a single listing, where keys are unique and share one prefix, so their
+display names differ by construction.
+
+The overwrite check needs no probe — existence is a local question — and it
+asks **only when something would be replaced**. The directory was just typed;
+a second unconditional prompt would mean "are you sure" rather than "this will
+overwrite". It comes after the offer (§11.11), so someone who takes the command
+line away is never asked about files Emacs is no longer going to write.
 
 ```elisp
 (defcustom s3-manager-download-directory "~/Downloads/"
@@ -1469,13 +1590,35 @@ aws s3api head-object --bucket B2 --key key2           (existence probe)
 Server-side: the bytes never reach this machine, which is why this is not
 spelled as a download followed by an upload.
 
-`c` copies and `r` renames or moves, both on the entry at point. Both offer a
-destination for editing — for `r` the entry's own URI, so changing the last
-segment renames and changing the rest moves. **What the prompt shows is what
-happens:** the destination is taken as typed, never given the source's own name
-behind the user's back. `C` is the exception, because it never prompts; it uses
-the other window's prefix plus the source's name, which is the Dired reading of
-"copy this there".
+`c` copies and `r` renames or moves. Both offer a destination for editing — for
+`r` the entry's own URI, so changing the last segment renames and changing the
+rest moves. **What the prompt shows is what happens:** the destination is taken
+as typed, never given the source's own name behind the user's back. `C` is the
+exception, because it never prompts; it uses the other window's prefix plus the
+source's name, which is the Dired reading of "copy this there".
+
+**With several objects marked, what is read is a prefix rather than a key.** N
+objects cannot share one key, so `s3-manager--as-prefix` supplies the trailing
+slash the answer may not carry and each object keeps its own last segment. That
+also means **`r` over a batch can only move, never rename**: renaming is one key
+becoming another, and there is no such thing for several.
+
+That coercion is not cosmetic. It is the same one `s3-manager--copy-key` makes
+for a prefix source, and load-bearing for the same measured reason (§18.1.2):
+`s3 mv` compares the two URIs as typed, so one dropped slash walks straight past
+its own guard.
+
+**Every job in a batch is built before any of them runs.** A destination
+`s3-manager--check-destination` refuses — a listing aimed at its own prefix,
+above all — therefore stops the batch with nothing written rather than half of
+itself. `C`, `c` and `r` then share one `s3-manager--copy-batch`: offer, probe,
+confirm, run, so the three cannot drift apart.
+
+Marks survive a copy, as they do after `dired-do-copy` — the sources are still
+there — and are dropped per job by a move, since the source is gone and a mark
+keyed by a name that later belongs to something else would quietly enlarge the
+next batch. That includes a move that failed part-way, matching the single-job
+behaviour; the refresh that follows shows what is really still there.
 
 **The guards are ours, and they run before anything is invoked.** Measured:
 `s3 cp SRC SRC` exits 0 having done nothing visible, and `s3 mv` catches only
@@ -1554,6 +1697,18 @@ vector for both, so the offered command carries `--profile` and
 step; `*S3 Manager Command*` is what lets the command be read first, since the
 kill ring says nothing about what it holds.
 
+**A batch is N commands, and handing over one of them would be a lie.**
+`s3-manager--show-commands` and `s3-manager--offer-commands` take a list; the
+singulars are wrappers over them. All N go into the kill ring as **one** kill,
+newline-separated — three kills would be yanked back in reverse — and that
+block runs as a sequence when pasted into a shell, which is verified rather
+than assumed.
+
+**A batch gates on its total, not on its largest member.** What makes a
+transfer worth leaving Emacs for is how long it runs, and duration adds up. For
+a server-side copy the bytes never cross this machine either way, so duration
+is the *only* thing the offer buys there.
+
 **A masked command is flagged, not handed over.** Nothing this package puts on
 a command line is a credential — only a profile name and possibly an endpoint
 URL — but an endpoint of the form `user:pass@host` is one, and a key shaped
@@ -1566,7 +1721,7 @@ string is no longer the command, and saying so beats a plausible wrong one.
 |---|---|
 | A recursive upload, or a recursive S3→S3 copy | Already demands a typed `yes`. Two questions for one action is worse than not offering, and the typed `yes` cannot go — it is there because the operation is unbounded. |
 | An object below the threshold | The common case must not grow a prompt. |
-| The Dired batch upload | It drives `s3-manager--upload-start` once per file; asking per file is wrong, and its callback has to fire either way or the remaining files never start. |
+| The Dired batch upload | It drives `s3-manager--upload-start` once per file; asking per file is wrong, and its callback has to fire either way or the remaining files never start. Asking *once* for the batch, on its total, is 0.5.0's answer for every other batch. |
 | Anything, when the option is nil | The switch for someone who never wants the question, recursive included. |
 | Deletes | Fast regardless of size, and the typed `yes` is the point. |
 
@@ -2039,6 +2194,33 @@ wrapper.
 34. An `--endpoint-url` carrying `user:pass@host` → the command is masked and
     carries the warning that it is no longer runnable.
 
+### v0.5.0 adds
+
+35. `m` on an object → `*` in the margin, point moves down. `x` on a listing
+    that carries only `*` refuses, and leaves the marks standing.
+36. `d` on one row and `m` on another, then `x` → the flagged object is
+    deleted and the marked one is untouched.
+37. Two marked, point parked on a third, then a download → one directory
+    prompt, two transfers, both under their own names, and the row at point
+    is not one of them.
+38. Two marked, `C` with a second listing in the other window → one
+    confirmation, two server-side copies, and one re-read of each listing
+    they touched — not one per object.
+39. Three marked, `c` → the prompt asks for a *prefix*; a prefix typed without
+    its trailing slash still lands them under it rather than flattening them
+    onto `prefixname.txt`.
+40. Three marked, `r` → the sources are gone, the marks with them, and the
+    summary says "moved", not "copied".
+41. A batch whose destination the guard refuses → nothing runs at all, not
+    half of it.
+42. A batch over `s3-manager-large-transfer-size` in **total** while no single
+    member is → the offer fires, and `c` hands over all N command lines as one
+    kill.
+43. The header line reads "N marked, M flagged", follows `u` and `U`, and
+    follows a mark dropped by a move rather than by the user.
+44. A batch where one job fails → the rest still run and the summary counts
+    it.
+
 ### What has actually been run against a real endpoint
 
 The list above is the bar, not a record of having cleared it. Kept honest,
@@ -2046,13 +2228,15 @@ because a Definition of Done nobody has executed is a wish:
 
 | | |
 |---|---|
-| Run live | 1-9, 12-15, 17, 20-24, 26, the first clause of 25, **30**, **31**, and the prompt half of **29** (it named the size; only `c` was answered, never `r`) |
-| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing), **28**, **32**, **33**, **34**, and the `r` half of **29** |
+| Run live | 1-9, 12-15, 17, 20-24, 26, the first clause of 25, **30**, **31**, the prompt half of **29** (it named the size; only `c` was answered, never `r`), and **37**, **38**, **39**, **40**, **43** |
+| Covered by tests only | **16** (a transfer past 120 seconds on real bytes), **18** (`C` defaulting to the Dired window), **19** (a write-denied bucket), **27** (a cross-profile refusal), the last two clauses of **25** (`C` falling back to a download with Dired in the other window, and with Dired nearer than a second listing), **28**, **32**, **33**, **34**, the `r` half of **29**, and **35**, **36**, **41**, **42**, **44** |
 
 None of the test-only ones are hard; they want things a scratch bucket does
 not have to hand — a large object, a bucket the caller cannot write, a second
 profile, a hand-arranged window layout, an endpoint with credentials in its
-URL. They are listed so that "covered" is never mistaken for "tried".
+URL. 35, 36, 41, 42 and 44 want none of those and are simply not yet done:
+they are the cheapest entries on this list and the first to clear in 0.7.0.
+They are listed so that "covered" is never mistaken for "tried".
 
 ---
 
