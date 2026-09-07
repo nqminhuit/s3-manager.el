@@ -981,6 +981,24 @@ Marks live in the hash rather than in a struct slot because entry structs are
 (§6): a mutable `marked` slot would change an entry's identity and break point
 restoration.
 
+**Marking says what the marks are for.** `s3-manager--mark-hint` puts one line
+in the echo area on every `m` and every `d` — the count, then the keys that
+would act on it. This is not decoration: a general mark is the one piece of
+state in this package that answers *nothing* by itself, because §9.3.1's whole
+point is that the operation is named afterwards. The header line carries the
+count (§8.4); the hint carries what the count is *for*, and the two kinds name
+different keys because they have different answers.
+
+Written with `substitute-command-keys` rather than with `C`, `c`, `r` and `x`
+spelled out, so the hint names the user's own keys. Not a nicety: §18.9 shows
+that under Evil a global prefix can force `m` to be rebound whether the user
+meant to or not, and a hint naming keys that do nothing would be worse than no
+hint at all.
+
+Reported by a user as "they don't know what to do after mark", which no test
+would have caught: every batch path was verified, and none of them was
+discoverable.
+
 ### 9.3.1 `x` must never act on `*`
 
 The single most important property in §9.3, and the reason the two characters

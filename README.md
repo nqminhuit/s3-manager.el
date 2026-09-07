@@ -104,6 +104,15 @@ D   1.2 KiB 2026-09-01 notes.md
 downloads act on what is marked, or on the entry at point when nothing is —
 Dired's rule, so one key means both "act on these" and "act on this".
 
+Each keystroke says what the marks are for, so there is nothing to memorise:
+
+```
+S3: 2 marked -- C to the other window, c copy, r move, u unmarks
+S3: 1 flagged -- x deletes, u unmarks
+```
+
+Those name your own keys, not the defaults, so a rebinding is reflected.
+
 A batch asks once, not once per object: one destination, one existence check
 covering all of them, one confirmation naming what would be overwritten, one
 `aws` process at a time, and one summary. Marks survive a copy or a download —

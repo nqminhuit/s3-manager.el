@@ -668,12 +668,36 @@ nonetheless act on."
              "Prefixes cannot be marked; commands act on the prefix at point")))
     entry))
 
+(defun s3-manager--mark-hint (mark count)
+  "Return the echo-area hint after COUNT objects carry MARK.
+
+A mark on its own answers nothing: the whole point of the general mark
+is that the operation is named *afterwards*, so the keys that name one
+have to be said out loud.  The header line carries the count; this
+carries what the count is for.
+
+Written with `substitute-command-keys' rather than with the characters
+spelled out, so a user who has rebound any of these -- and under Evil a
+global prefix can force exactly that for `m' -- is told their own key
+rather than ours."
+  (substitute-command-keys
+   (if (eql mark s3-manager--delete-char)
+       (format "%d flagged -- \\[s3-manager-execute] deletes, \\[s3-manager-unmark] unmarks"
+               count)
+     (format (concat "%d marked -- \\[s3-manager-copy] to the other window,"
+                     " \\[s3-manager-copy-to] copy, \\[s3-manager-rename] move,"
+                     " \\[s3-manager-unmark] unmarks")
+             count))))
+
 (defun s3-manager--mark (mark)
   "Give the object at point MARK, then move down."
   (let ((entry (s3-manager--markable-entry-at-point)))
     (puthash (s3-manager-entry-key entry) mark s3-manager--marks)
     (s3-manager--put-tag mark t)
-    (s3-manager--update-header-line)))
+    (s3-manager--update-header-line)
+    (message "S3: %s"
+             (s3-manager--mark-hint
+              mark (length (s3-manager--entries-marked mark))))))
 
 (defun s3-manager-mark ()
   "Mark the object at point, then move down.

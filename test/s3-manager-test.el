@@ -7239,3 +7239,71 @@ directory, not a directory path handed to `aws s3 cp'."
             (dolist (d destinations)
               (should-not (string-suffix-p "/" d)))))
       (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-marking-says-what-to-do-next ()
+  "A mark answers nothing on its own: the operation is named afterwards,
+so the keys that name one have to be said out loud."
+  (let ((said nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (s3-manager-mark)
+        (s3-manager-mark))                ; b.txt
+      (should (equal (car said)
+                     (concat "S3: 2 marked -- C to the other window,"
+                             " c copy, r move, u unmarks")))
+      ;; The count is the marks, not the keystrokes.
+      (should (equal (nth 1 said)
+                     (concat "S3: 1 marked -- C to the other window,"
+                             " c copy, r move, u unmarks"))))))
+
+(ert-deftest s3-manager-test-flagging-says-what-to-do-next ()
+  "`d' has the same gap as `m', and a different answer: `x', never `C'."
+  (let ((said nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (s3-manager-mark-delete))
+      (should (equal (car said) "S3: 1 flagged -- x deletes, u unmarks"))
+      ;; The two hints must not name each other's keys.
+      (should-not (string-match-p "C\\|copy\\|move" (car said))))))
+
+(ert-deftest s3-manager-test-the-hint-names-the-user-s-own-keys ()
+  "Written with `substitute-command-keys', so a rebinding is reflected.
+Under Evil a global prefix can force a rebinding of `m' whether the user
+wanted one or not, and a hint naming keys that do nothing is worse than
+no hint."
+  (s3-manager-test--in-many-buffer
+    (let ((map (copy-keymap s3-manager-mode-map)))
+      (keymap-set map "K" #'s3-manager-copy)
+      (keymap-set map "C" nil)
+      (let ((s3-manager-mode-map map))
+        (use-local-map map)
+        (should (string-match-p
+                 "K to the other window"
+                 (s3-manager--mark-hint s3-manager--mark-char 1)))))))
+
+(ert-deftest s3-manager-test-the-hint-counts-its-own-kind ()
+  "With both kinds present, each hint counts only its own.
+The header line makes the same distinction for the same reason: `x' acts
+on one of these numbers and on no part of the other."
+  (let ((said nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (s3-manager-mark)                       ; a.txt carries `*'
+      (s3-manager-test--goto-key "c.txt")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (s3-manager-mark-delete))             ; c.txt carries `D'
+      (should (equal (car said) "S3: 1 flagged -- x deletes, u unmarks"))
+      ;; Two marks exist in the table; only one of them is a flag.
+      (should (= 2 (hash-table-count s3-manager--marks)))
+      (setq said nil)
+      (s3-manager-test--goto-key "b.txt")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (s3-manager-mark))
+      (should (string-prefix-p "S3: 2 marked" (car said)))
+      (should (= 3 (hash-table-count s3-manager--marks))))))
