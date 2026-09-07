@@ -47,13 +47,24 @@
     (s3-manager--parse-json (current-buffer))))
 
 (defun s3-manager-test--argv-records (file)
-  "Return the argument vectors the test double recorded in FILE.
+  "Return the COMPLETE argument vectors the test double recorded in FILE.
 One list per invocation, in order.  Commands that trigger a follow-up
-call -- a delete refreshing its listing -- produce more than one."
+call -- a delete refreshing its listing -- produce more than one.
+
+A record counts only once its terminating blank line has landed.  The
+double appends while these tests poll, so without that rule a
+half-written record reads as a whole one: `s3-manager-test--wait-for-argv'
+reports it as present and an assertion on its contents then fails on an
+argv that was still being written.  Observed once, in a full-suite run,
+on `--recursive' missing from a record that did have it a moment later."
   (with-temp-buffer
     (insert-file-contents file)
-    (mapcar (lambda (record) (split-string record "\n" t))
-            (split-string (buffer-string) "\n\n" t))))
+    (goto-char (point-max))
+    (let ((complete (if (search-backward "\n\n" nil t)
+                        (buffer-substring (point-min) (+ (point) 2))
+                      "")))
+      (mapcar (lambda (record) (split-string record "\n" t))
+              (split-string complete "\n\n" t)))))
 
 (defun s3-manager-test--wait-for-argv (file count)
   "Wait until FILE holds at least COUNT recorded invocations, and return them.
@@ -1298,7 +1309,7 @@ timers as well as sentinels."
       (should (null observed)))))
 
 (ert-deftest s3-manager-test-cached-profiles-callback-is-synchronous ()
-  "The cached path runs in the caller\='s own extent, so the prompt is normal."
+  "The cached path runs in the caller's own extent, so the prompt is normal."
   (s3-manager-test--with-clean-profiles
     (setq s3-manager--profiles '("default" "production"))
     (let ((ran nil))
@@ -7307,3 +7318,26 @@ on one of these numbers and on no part of the other."
         (s3-manager-mark))
       (should (string-prefix-p "S3: 2 marked" (car said)))
       (should (= 3 (hash-table-count s3-manager--marks))))))
+
+(ert-deftest s3-manager-test-argv-records-ignores-a-half-written-record ()
+  "The double appends while these tests poll, so the reader must not count
+a record whose terminating blank line has not landed.  Without this,
+`s3-manager-test--wait-for-argv' reported a partial record as present and
+an assertion on its contents failed on an argv still being written."
+  (let ((file (make-temp-file "s3-partial")))
+    (unwind-protect
+        (progn
+          ;; One complete record, then a partial one.
+          (with-temp-file file
+            (insert "--profile\nproduction\ns3\ncp\n\n"
+                    "--profile\nproduction\ns3"))
+          (should (equal (s3-manager-test--argv-records file)
+                         '(("--profile" "production" "s3" "cp"))))
+          ;; Nothing complete yet reads as nothing at all, not as one record.
+          (with-temp-file file (insert "--profile\nproduction"))
+          (should (null (s3-manager-test--argv-records file)))
+          ;; And the terminator completes it.
+          (with-temp-file file (insert "--profile\nproduction\n\n"))
+          (should (equal (s3-manager-test--argv-records file)
+                         '(("--profile" "production")))))
+      (delete-file file))))

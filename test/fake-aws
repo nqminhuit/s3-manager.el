@@ -16,9 +16,20 @@
 # Appended, one record per invocation, records separated by a blank line.
 # Overwriting would lose the command under test whenever it triggers a
 # follow-up call -- a delete refreshing its listing, for instance.
+#
+# Built up and written with ONE printf rather than one per argument: a reader
+# polling this file would otherwise see a half-written record, and
+# s3-manager-test--argv-records counted that as a record while an assertion on
+# its contents failed.  Observed once in a full-suite run.  The reader also
+# ignores unterminated records now, which is the guarantee that actually
+# holds -- this only narrows the window.
 if [ -n "$FAKE_AWS_ARGV_FILE" ]; then
-    { for a in "$@"; do printf '%s\n' "$a"; done; printf '\n'; } \
-        >> "$FAKE_AWS_ARGV_FILE"
+    record=
+    for a in "$@"; do
+        record="$record$a
+"
+    done
+    printf '%s\n' "$record" >> "$FAKE_AWS_ARGV_FILE"
 fi
 
 # Spawn a grandchild that inherits stderr and outlives us, so the stderr pipe
