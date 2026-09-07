@@ -2248,10 +2248,12 @@ They are listed so that "covered" is never mistaken for "tried".
 | ~~0.3.0~~ | ~~Dired integration~~ | **Shipped early** — §11.9 |
 | ~~0.3.0~~ | ~~Copy and move between S3 locations~~ | **Shipped** — §11.10 |
 | ~~0.4.0~~ | ~~Hand over the command for a large transfer~~ | **Shipped** — §11.11, issue #1 |
-| 0.5.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
-| 0.5.0 | Idle-based transfer watchdog | Partly — see §11.8; the current answer is no timeout at all |
-| 0.5.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
-| 1.0.0 | Stable public API | — |
+| ~~0.5.0~~ | ~~General marks~~ | **Shipped** — §9.3, §9.3.1 |
+| 0.6.0 | Idle-based transfer watchdog, and the cleanup defects on the same code path | Partly — see §11.8; the current answer is no timeout at all |
+| 0.7.0 | Close the live verification debt | Yes — §16 already names every item; what is missing is having run them |
+| 1.0.0 | Stable public API | Partly — §10 names the 30 commands and the 12 `defcustom`s are all in `s3-manager-core.el`, but no section yet names both as the frozen surface, and `s3-manager--` is private by convention only |
+| post-1.0 | Concurrent transfer queue | Yes — transport is already async; needs a scheduler over it, not a rewrite |
+| post-1.0 | Metadata, versions, ACL | Partly — needs extra columns; `s3api head-object` is already used by the upload probe |
 
 **No seam is left** for: a native AWS SDK (would replace the transport layer
 wholesale), recursive listing in the UI (deliberately excluded — see §5.1), or
