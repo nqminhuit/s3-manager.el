@@ -6410,3 +6410,264 @@ The split is Dired's: a directory prompt for several, a filename for one."
                             record))))
       (delete-file argv-file)
       (delete-directory directory t))))
+
+
+;;;; `C' copies every marked object
+
+(defun s3-manager-test--cp-records (file)
+  "Return the `s3 cp' invocations the double recorded in FILE."
+  (seq-filter (lambda (r) (member "cp" r))
+              (s3-manager-test--argv-records file)))
+
+(defun s3-manager-test--cp-pair (record)
+  "Return the (SOURCE . DESTINATION) URIs of `s3 cp' invocation RECORD."
+  (let ((at (seq-position record "cp")))
+    (cons (nth (+ 1 at) record) (nth (+ 2 at) record))))
+
+(defmacro s3-manager-test--marking-two (&rest body)
+  "Run BODY in a listing with a.txt and b.txt marked and point on c.txt."
+  (declare (indent 0))
+  `(s3-manager-test--in-many-buffer
+     (s3-manager-test--goto-key "a.txt")
+     (s3-manager-mark)
+     (s3-manager-mark)
+     ;; Point is left on the one row that is not marked: the marks decide.
+     (s3-manager-test--goto-key "c.txt")
+     ,@body))
+
+(ert-deftest s3-manager-test-copy-into-copies-every-marked-object ()
+  "Two marks, one confirmation, two server-side copies into the other prefix."
+  (let ((argv-file (make-temp-file "s3-C-argv"))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (s3-manager-test--with-other-listing other "backup" "keep/"
+                                                 "production"
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (p) (push p asked) t))
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file
+                     :head-exit 254 :head-stderr s3-manager-test--head-404)
+                  (s3-manager-copy)
+                  (should (s3-manager-test--wait
+                           (lambda ()
+                             (= 2 (length (s3-manager-test--cp-records
+                                           argv-file))))))))))
+          (let* ((records (s3-manager-test--argv-records argv-file))
+                 (probes (seq-filter (lambda (r) (member "head-object" r))
+                                     records))
+                 (pairs (mapcar #'s3-manager-test--cp-pair
+                                (s3-manager-test--cp-records argv-file))))
+            ;; One probe per destination, and c.txt is in neither list.
+            (should (= 2 (length probes)))
+            (should (equal pairs
+                           '(("s3://media/a.txt" . "s3://backup/keep/a.txt")
+                             ("s3://media/b.txt" . "s3://backup/keep/b.txt"))))
+            ;; One confirmation for the batch, not one per object.
+            (should (= 1 (length asked)))
+            (should (string-match-p "Copy 2 objects to s3://backup/keep/"
+                                    (car asked)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-into-batch-refreshes-each-listing-once ()
+  "N jobs into one prefix is one re-read of it, not N.
+`s3-manager--after-copy' invalidates before it reloads, so per-job
+refreshing would re-fetch the same listing once per object -- and each
+reload would re-cache what the next invalidation was about to drop."
+  (let ((argv-file (make-temp-file "s3-C-argv"))
+        (refreshed nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (s3-manager-test--with-other-listing other "backup" "keep/"
+                                                 "production"
+              (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                        ((symbol-function 's3-manager--refresh-listing)
+                         (lambda (_profile bucket prefix &rest _)
+                           (push (cons bucket prefix) refreshed)))
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file
+                     :head-exit 254 :head-stderr s3-manager-test--head-404)
+                  (s3-manager-copy)
+                  (should (s3-manager-test--wait (lambda () refreshed)))
+                  ;; Let anything else that was going to fire, fire.
+                  (s3-manager-test--wait #'ignore 0.3)))))
+          ;; Two ancestor levels of one destination prefix, each once --
+          ;; not once per job.
+          (should (equal (sort (copy-sequence refreshed)
+                               (lambda (a b) (string< (cdr a) (cdr b))))
+                         '(("backup" . "") ("backup" . "keep/")))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-into-batch-refuses-a-guarded-destination ()
+  "One destination the guard refuses stops the batch before anything runs.
+Every job is built up front for exactly this: a listing copied into
+itself must write nothing, not half of itself."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            ;; The same bucket and the same prefix: every destination is its
+            ;; own source.
+            (s3-manager-test--with-other-listing other "media" "" "production"
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (p) (error "Asked to confirm: %s" p)))
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file)
+                  (should-error (s3-manager-copy) :type 'user-error)))))
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-into-batch-names-what-it-would-overwrite ()
+  "The one confirmation says which destinations already exist."
+  (let ((asked nil))
+    (s3-manager-test--marking-two
+      (s3-manager-test--with-other-listing other "backup" "keep/" "production"
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (p) (setq asked p) nil))
+                  ((symbol-function 'message) #'ignore))
+          (s3-manager-test--with-fake-aws
+              (:stdout ""
+               :head-exit 0
+               :head-stdout (json-serialize '((ContentLength . 10))))
+            ;; The question arrives from a timer, after the two probes.
+            (s3-manager-copy)
+            (should (s3-manager-test--wait (lambda () asked)))))))
+    (should (string-match-p "Copy 2 objects to s3://backup/keep/" asked))
+    (should (string-match-p "overwriting 2" asked))))
+
+(ert-deftest s3-manager-test-copy-into-batch-writes-nothing-when-refused ()
+  "Answering no to the one question leaves both listings alone."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (s3-manager-test--with-other-listing other "backup" "keep/"
+                                                 "production"
+              (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil))
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file
+                     :head-exit 254 :head-stderr s3-manager-test--head-404)
+                  (s3-manager-copy)
+                  ;; The probes run; the copies must not.
+                  (s3-manager-test--wait-for-argv argv-file 2)
+                  (s3-manager-test--wait #'ignore 0.3)))))
+          (should (null (s3-manager-test--cp-records argv-file))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-into-batch-offers-on-the-total ()
+  "Two objects each under the threshold, whose sum is over it, still offer.
+The bytes never cross this machine either way, so what the offer buys is
+duration -- and duration adds up."
+  (let ((argv-file (make-temp-file "s3-C-argv"))
+        (kill-ring nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--marking-two
+            (s3-manager-test--with-other-listing other "backup" "keep/"
+                                                 "production"
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (p) (error "Asked to confirm: %s" p)))
+                        ((symbol-function 'display-buffer) #'ignore)
+                        ((symbol-function 'message) #'ignore))
+                (s3-manager-test--answering-offer ?c
+                  (s3-manager-test--with-fake-aws
+                      (:stdout "" :argv-file argv-file)
+                    (let ((s3-manager-large-transfer-size 25))  ; 10 + 20
+                      (s3-manager-copy))
+                    (should (string-match-p "Copy 2 objects" offered)))))))
+          ;; Handed over, so nothing ran -- not even the probes.
+          (should (null (s3-manager-test--argv-records argv-file)))
+          (let ((lines (split-string (current-kill 0) "\n" t)))
+            (should (= 2 (length lines)))
+            (should (string-match-p "s3://backup/keep/a.txt" (nth 0 lines)))
+            (should (string-match-p "s3://backup/keep/b.txt" (nth 1 lines)))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-into-batch-counts-failures ()
+  "A batch is not atomic, so the summary says how many did not land."
+  (let ((said nil))
+    (s3-manager-test--with-fresh-error-buffer
+      (s3-manager-test--marking-two
+        (s3-manager-test--with-other-listing other "backup" "keep/" "production"
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                    ((symbol-function 'display-buffer) #'ignore)
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) said))))
+            (s3-manager-test--with-fake-aws
+                (:stdout "" :stderr "fatal error: boom" :exit 1
+                 :head-exit 254 :head-stderr s3-manager-test--head-404)
+              (s3-manager-copy)
+              (should (s3-manager-test--wait
+                       (lambda ()
+                         (seq-find (lambda (m) (string-match-p "copied" m))
+                                   said)))))))))
+    ;; The second was attempted even though the first failed, and no
+    ;; per-job part-way message drowned the summary.
+    (should (seq-find (lambda (m) (string-match-p "copied 0, 2 failed" m))
+                      said))
+    (should-not (seq-find (lambda (m) (string-match-p "stopped part-way" m))
+                          said))))
+
+(ert-deftest s3-manager-test-marks-survive-a-copy ()
+  "The sources are still there afterwards, as they are after `dired-do-copy'."
+  (let ((argv-file (make-temp-file "s3-C-argv")))
+    (unwind-protect
+        (s3-manager-test--marking-two
+          (s3-manager-test--with-other-listing other "backup" "keep/"
+                                               "production"
+            (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :argv-file argv-file
+                   :head-exit 254 :head-stderr s3-manager-test--head-404)
+                (s3-manager-copy)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (= 2 (length (s3-manager-test--cp-records
+                                         argv-file)))))))))
+          (should (equal (mapcar #'s3-manager-entry-key
+                                 (s3-manager--entries-marked
+                                  s3-manager--mark-char))
+                         '("a.txt" "b.txt"))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-copy-start-hands-the-finish-to-its-caller ()
+  "With DONE, `s3-manager--copy-start' neither refreshes nor reports.
+The batch owns both: a per-job refresh would re-fetch the same listing
+once per object, and a per-job part-way message would be printed after
+the next job announced itself and then overwritten."
+  (let ((job (s3-manager-copy-job--create
+              :profile "production"
+              :source-bucket "media" :source-key "a.txt"
+              :bucket "backup" :key "keep/a.txt"
+              :size 10))
+        (refreshed 0)
+        (finished 'pending)
+        (said nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "production" s3-manager--bucket "media")
+      (cl-letf (((symbol-function 's3-manager--after-copy)
+                 (lambda (_job) (cl-incf refreshed)))
+                ((symbol-function 'display-buffer) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) said))))
+        (s3-manager-test--with-fresh-error-buffer
+          (s3-manager-test--with-fake-aws
+              (:stdout "" :stderr "fatal error: boom" :exit 1)
+            (s3-manager-test--collect finished
+              (s3-manager--copy-start
+               job (lambda (ok) (setq finished ok))))))))
+    ;; Called on the failure path too, and nothing else happened.
+    (should (null finished))
+    (should (zerop refreshed))
+    (should-not (seq-find (lambda (m) (string-match-p "stopped part-way" m))
+                          said))))

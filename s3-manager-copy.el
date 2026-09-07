@@ -221,10 +221,23 @@ Only a move takes it away; after a copy the mark still names something."
 A move empties the source as well as filling the destination, and `aws
 s3' exits 1 or 2 having done part of the work, so the listings have
 changed either way."
-  (s3-manager--purge-subtrees job)
-  (s3-manager--forget-source-mark job)
-  (s3-manager--refresh-targets (s3-manager-job-profile job)
-                               (s3-manager--copy-targets job)))
+  (s3-manager--after-copies (list job)))
+
+(defun s3-manager--after-copies (jobs)
+  "Refresh both ends of every job in JOBS, re-reading each listing once.
+
+Not `s3-manager--after-copy' per job: it invalidates a listing and then
+reloads it, so ten objects copied into one prefix would be ten real
+re-fetches of that prefix -- and each reload would re-cache what the
+next invalidation was about to drop.  Unioning the targets first is why
+`s3-manager--copy-targets' is separate from the refreshing at all."
+  (dolist (job jobs)
+    (s3-manager--purge-subtrees job)
+    (s3-manager--forget-source-mark job))
+  (when jobs
+    (s3-manager--refresh-targets
+     (s3-manager-job-profile (car jobs))
+     (mapcan #'s3-manager--copy-targets jobs))))
 
 ;;;; Running
 
@@ -246,31 +259,54 @@ the default would only pin us to it."
             ;; progress the mode line depends on.
             '("--progress-frequency" "1"))))
 
-(defun s3-manager--copy-start (job)
-  "Run JOB, refreshing both ends when it stops, either way."
+(defun s3-manager--copy-start (job &optional done)
+  "Run JOB, refreshing both ends when it stops, either way.
+DONE replaces the refresh, for a batch that refreshes once at the end,
+and is called on failure too -- the parameter `s3-manager--upload-start'
+already carries, for the same reason."
   (s3-manager--transfer
    (s3-manager--copy-args job)
    (s3-manager--job-describe job)
-   (lambda () (s3-manager--after-copy job))
+   (lambda () (if done (funcall done t) (s3-manager--after-copy job)))
    (lambda ()
      ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
      ;; exactly as in `s3-manager--delete-prefix', so both listings have
      ;; changed even though the command failed.
-     (s3-manager--after-copy job)
-     ;; `s3-manager--transfer' has already reported the CLI's own stderr
-     ;; verbatim.  This says what state the two ends are left in, which the
-     ;; stderr does not, and names the report again because this `message'
-     ;; overwrites the summary that named it.
-     (message
-      "S3: %s stopped part-way -- %s; see %s"
-      (s3-manager--job-describe job)
-      (if (s3-manager-job-move job)
-          ;; `aws s3 mv' copies and deletes one object at a time -- the CLI's
-          ;; own wording -- so a key it did not reach is untouched at the
-          ;; source and re-running finishes the job.
-          "anything not moved is still at the source"
-        "some objects were copied")
-      s3-manager--error-buffer))))
+     (if done
+         ;; And no part-way message either: the next job in the batch
+         ;; announces itself immediately, so this one would be printed out
+         ;; of order and then overwritten.  The summary counts the failures
+         ;; and names the report that holds them.
+         (funcall done nil)
+       (s3-manager--after-copy job)
+       ;; `s3-manager--transfer' has already reported the CLI's own stderr
+       ;; verbatim.  This says what state the two ends are left in, which the
+       ;; stderr does not, and names the report again because this `message'
+       ;; overwrites the summary that named it.
+       (message
+        "S3: %s stopped part-way -- %s; see %s"
+        (s3-manager--job-describe job)
+        (if (s3-manager-job-move job)
+            ;; `aws s3 mv' copies and deletes one object at a time -- the CLI's
+            ;; own wording -- so a key it did not reach is untouched at the
+            ;; source and re-running finishes the job.
+            "anything not moved is still at the source"
+          "some objects were copied")
+        s3-manager--error-buffer)))))
+
+(defun s3-manager--run-copies (jobs)
+  "Run JOBS one at a time, refreshing what they touched once at the end.
+
+Sequential for `s3-manager--run-sequentially' reason: each job is an
+`aws' process holding a pipe and two buffers, and one listing can hand
+this every object it shows."
+  (let ((total (length jobs)))
+    (s3-manager--run-sequentially
+     jobs
+     (lambda (job done) (s3-manager--copy-start job done))
+     (lambda (failed)
+       (s3-manager--after-copies jobs)
+       (s3-manager--batch-summary "copied" "object" total failed)))))
 
 (defun s3-manager--copy-confirm (job)
   "Confirm JOB, then run it.
@@ -438,19 +474,21 @@ mystifying."
                         "default")))
       buffer)))
 
-(defun s3-manager--copy-into (target)
-  "Copy the entry at point into the listing TARGET is showing."
-  (let* ((entry (s3-manager--entry-at-point))
-         (job (s3-manager--copy-job
-               entry
-               (buffer-local-value 's3-manager--bucket target)
-               ;; The other window's prefix, under the source's own name --
-               ;; the Dired reading of "copy this there", and the reason
-               ;; `s3-manager--key-into' is separate from
-               ;; `s3-manager--copy-key', which honours a typed key exactly.
-               (s3-manager--key-into
-                (buffer-local-value 's3-manager--prefix target)
-                (s3-manager-entry-display-name entry)))))
+(defun s3-manager--copy-into-job (entry target)
+  "Return the job copying ENTRY into the listing TARGET is showing."
+  (s3-manager--copy-job
+   entry
+   (buffer-local-value 's3-manager--bucket target)
+   ;; The other window's prefix, under the source's own name -- the Dired
+   ;; reading of "copy this there", and the reason `s3-manager--key-into' is
+   ;; separate from `s3-manager--copy-key', which honours a typed key exactly.
+   (s3-manager--key-into
+    (buffer-local-value 's3-manager--prefix target)
+    (s3-manager-entry-display-name entry))))
+
+(defun s3-manager--copy-into-one (entry target)
+  "Copy ENTRY into the listing TARGET is showing."
+  (let ((job (s3-manager--copy-into-job entry target)))
     ;; `C' writes without having prompted for anywhere, so it confirms.  A
     ;; prefix is already about to face the typed `yes'.
     (unless (or (s3-manager-job-recursive job)
@@ -460,13 +498,66 @@ mystifying."
       (user-error "Copy aborted"))
     (s3-manager--copy-confirm job)))
 
+(defun s3-manager--copy-into-batch (entries target)
+  "Copy every entry in ENTRIES into the listing TARGET is showing.
+
+Every job is built before any of them runs, so a destination
+`s3-manager--check-destination' refuses -- copying a listing into
+itself, above all -- stops the batch with nothing written rather than
+part-way through.
+
+No job here is ever recursive: a prefix cannot be marked, and the mark
+reader filters for objects besides.  That is what keeps the typed `yes',
+the `unbounded' sizing and the recursive cache purge on the at-point
+path where they belong."
+  (let* ((bucket (buffer-local-value 's3-manager--bucket target))
+         (prefix (buffer-local-value 's3-manager--prefix target))
+         (jobs (mapcar (lambda (entry)
+                         (s3-manager--copy-into-job entry target))
+                       entries))
+         (total (length jobs))
+         (lead (format "Copy %d objects to %s" total
+                       (s3-manager--uri bucket prefix)))
+         (origin (current-buffer)))
+    (when (s3-manager--offer-commands
+           (mapcar #'s3-manager--copy-args jobs) lead
+           ;; The total, not the largest: the bytes never cross this machine
+           ;; either way, so what the offer buys is duration, and duration
+           ;; adds up.
+           (seq-reduce (lambda (sum job)
+                         (+ sum (or (s3-manager-job-size job) 0)))
+                       jobs 0))
+      (message "S3: checking %d destination%s..." total (if (= total 1) "" "s"))
+      (s3-manager--probe-each
+       bucket (mapcar #'s3-manager-job-key jobs) nil nil
+       (lambda (existing unchecked)
+         (s3-manager--prompt-later
+          origin
+          (lambda ()
+            ;; One question for the batch: a probe per object is bounded, a
+            ;; prompt per object is not.
+            (unless (y-or-n-p
+                     (s3-manager--batch-question lead existing unchecked))
+              (user-error "Copy aborted"))
+            (s3-manager--run-copies jobs))
+          "Copy"))))))
+
+(defun s3-manager--copy-into (target)
+  "Copy into the listing TARGET is showing.
+The marked objects when any are marked, else the entry at point."
+  (let ((entries (s3-manager--marked-entries)))
+    (if (cdr entries)
+        (s3-manager--copy-into-batch entries target)
+      (s3-manager--copy-into-one (car entries) target))))
+
 (defun s3-manager-copy ()
   "Copy to whatever is in the other window.
 
 Dired there means a download: of the marked objects, or of the entry at
 point when none are marked, recursively for a prefix.  Another S3
-listing means a server-side copy of the entry at point into its prefix,
-which is the one thing `G' and `R' cannot do.  The mirror of
+listing means a server-side copy into its prefix -- of the marked
+objects, or of the entry at point -- which is the one thing `G' and `R'
+cannot do.  The mirror of
 `s3-manager-dired-do-copy', so `C' means the same thing wherever it is
 pressed."
   (interactive)
