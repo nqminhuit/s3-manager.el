@@ -155,51 +155,76 @@ that new object a mark the user never set, which `x' would act on.
       (with-current-buffer buffer
         (when s3-manager--marks (remhash key s3-manager--marks))))))
 
+(defun s3-manager--copy-targets (job)
+  "Return the (BUCKET PREFIX CHILD) triples JOB changed, destination first.
+
+CHILD is what appeared in, or vanished from, PREFIX at that level.
+Destination first so that when a rename in place makes both ends the
+same listing, point lands on what arrived rather than on what left --
+`s3-manager--refresh-targets' keeps the first triple for a listing and
+drops the rest.
+
+Separate from the refreshing so a batch can union what its jobs touched
+and re-read each listing once, rather than once per object."
+  (let ((targets nil))
+    (dolist (step (s3-manager--ancestor-steps (s3-manager-job-key job)))
+      (push (list (s3-manager-job-bucket job) (car step) (cdr step)) targets))
+    (when (s3-manager-job-move job)
+      (dolist (step (s3-manager--ancestor-steps
+                     (s3-manager-job-source-key job)))
+        (push (list (s3-manager-job-source-bucket job) (car step) (cdr step))
+              targets)))
+    (nreverse targets)))
+
+(defun s3-manager--refresh-targets (profile targets)
+  "Drop and re-read PROFILE's TARGETS, each listing at most once.
+Caches go first and the reloads second, or a reload would re-cache a
+listing that is about to be dropped."
+  (let ((seen nil))
+    (dolist (target targets)
+      (let ((where (cons (nth 0 target) (nth 1 target))))
+        (unless (member where seen)
+          (push where seen)
+          (s3-manager--cache-invalidate
+           (s3-manager--cache-key-for profile (nth 0 target) (nth 1 target)))
+          (s3-manager--refresh-listing profile (nth 0 target) (nth 1 target)
+                                       (nth 2 target)))))))
+
+(defun s3-manager--purge-subtrees (job)
+  "Drop cached listings beneath JOB's ends.
+Only a recursive job has any: a single object writes at its prefix, not
+below it.  A move empties the source subtree as well as filling the
+destination's."
+  (when (s3-manager-job-recursive job)
+    (let* ((profile (s3-manager-job-profile job))
+           (endpoint (s3-manager--endpoint-for profile)))
+      (s3-manager--cache-purge profile endpoint
+                               (s3-manager-job-bucket job)
+                               (s3-manager-job-key job))
+      (when (s3-manager-job-move job)
+        (s3-manager--cache-purge profile endpoint
+                                 (s3-manager-job-source-bucket job)
+                                 (s3-manager-job-source-key job))))))
+
+(defun s3-manager--forget-source-mark (job)
+  "Drop the mark on JOB's source when the source is gone.
+Only a move takes it away; after a copy the mark still names something."
+  (when (s3-manager-job-move job)
+    (s3-manager--forget-mark (s3-manager-job-profile job)
+                             (s3-manager-job-source-bucket job)
+                             (s3-manager--parent-prefix
+                              (s3-manager-job-source-key job))
+                             (s3-manager-job-source-key job))))
+
 (defun s3-manager--after-copy (job)
   "Refresh both of JOB's ends, whether it succeeded or failed part-way.
 A move empties the source as well as filling the destination, and `aws
 s3' exits 1 or 2 having done part of the work, so the listings have
-changed either way.
-
-Caches go first and the reloads second, or a reload would re-cache a
-listing that is about to be dropped."
-  (let* ((profile (s3-manager-job-profile job))
-         (endpoint (s3-manager--endpoint-for profile))
-         (bucket (s3-manager-job-bucket job))
-         (key (s3-manager-job-key job))
-         (move (s3-manager-job-move job))
-         (recursive (s3-manager-job-recursive job))
-         (source-bucket (s3-manager-job-source-bucket job))
-         (source-key (s3-manager-job-source-key job))
-         (targets nil))
-    ;; Subtrees first: a recursive transfer writes, and a move empties,
-    ;; below the prefix as well as at it.
-    (when recursive
-      (s3-manager--cache-purge profile endpoint bucket key)
-      (when move
-        (s3-manager--cache-purge profile endpoint source-bucket source-key)))
-    ;; The destination is collected first, so that when a rename in place
-    ;; makes both ends the same listing, point lands on what arrived rather
-    ;; than on what left.
-    (dolist (step (s3-manager--ancestor-steps key))
-      (push (list bucket (car step) (cdr step)) targets))
-    (when move
-      (dolist (step (s3-manager--ancestor-steps source-key))
-        (push (list source-bucket (car step) (cdr step)) targets)))
-    (when move
-      (s3-manager--forget-mark profile source-bucket
-                               (s3-manager--parent-prefix source-key)
-                               source-key))
-    (setq targets (nreverse targets))
-    (let ((seen nil))
-      (dolist (target targets)
-        (let ((where (cons (nth 0 target) (nth 1 target))))
-          (unless (member where seen)
-            (push where seen)
-            (s3-manager--cache-invalidate
-             (s3-manager--cache-key-for profile (nth 0 target) (nth 1 target)))
-            (s3-manager--refresh-listing profile (nth 0 target) (nth 1 target)
-                                         (nth 2 target))))))))
+changed either way."
+  (s3-manager--purge-subtrees job)
+  (s3-manager--forget-source-mark job)
+  (s3-manager--refresh-targets (s3-manager-job-profile job)
+                               (s3-manager--copy-targets job)))
 
 ;;;; Running
 

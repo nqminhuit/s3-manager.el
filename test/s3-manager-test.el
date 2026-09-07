@@ -5755,3 +5755,75 @@ open, which is what a parallel driver would trip."
     (should-not (string-match-p ", d" q))
     (should (string-match-p "1 unchecked" q))))
 
+;;;; Refresh targets, so a batch can union them
+
+(ert-deftest s3-manager-test-copy-targets-puts-the-destination-first ()
+  "A rename in place makes both ends one listing; point belongs on what came."
+  (let ((targets (s3-manager--copy-targets
+                  (s3-manager-copy-job--create
+                   :profile "p" :source-bucket "bk" :source-key "old.txt"
+                   :bucket "bk" :key "new.txt" :move t))))
+    ;; Both ends name the bucket root, and the destination is the first of
+    ;; them, which is what `--refresh-targets' keeps.
+    (should (equal targets '(("bk" "" "new.txt") ("bk" "" "old.txt"))))))
+
+(ert-deftest s3-manager-test-copy-targets-omits-the-source-for-a-copy ()
+  "A copy changes nothing at the source, so its listing must not be re-read."
+  (should (equal (s3-manager--copy-targets
+                  (s3-manager-copy-job--create
+                   :profile "p" :source-bucket "bk" :source-key "from/a.txt"
+                   :bucket "bk" :key "to/a.txt" :move nil))
+                 '(("bk" "to/" "to/a.txt") ("bk" "" "to/")))))
+
+(ert-deftest s3-manager-test-refresh-targets-reads-each-listing-once ()
+  "The point of the split: N jobs into one prefix is one re-fetch, not N.
+
+`--refresh-targets' invalidates before reloading, so a duplicate would
+be a real second request against the service."
+  (let ((reloaded nil)
+        (s3-manager--cache (make-hash-table :test #'equal))
+        (s3-manager-endpoint-url nil)
+        (s3-manager-endpoint-alist nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "bk"
+            s3-manager--prefix "to/")
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (&optional _t key) (push key reloaded))))
+        ;; What a three-object batch into one prefix would hand it.
+        (s3-manager--refresh-targets
+         "p" '(("bk" "to/" "to/a.txt")
+               ("bk" "to/" "to/b.txt")
+               ("bk" "to/" "to/c.txt")))
+        ;; One reload, and point on the first -- the destination of the
+        ;; first job, not the last.
+        (should (equal reloaded '("to/a.txt")))))))
+
+(ert-deftest s3-manager-test-purge-subtrees-only-for-a-recursive-job ()
+  "A single object writes at its prefix, never below it.
+
+Asserted on the calls rather than on the cache: a non-recursive purge
+would be handed an object key, which happens to match no cached prefix
+in most listings, so a cache check cannot tell the two apart."
+  (let (purged)
+    (cl-letf (((symbol-function 's3-manager--cache-purge)
+               (lambda (_profile _endpoint bucket prefix)
+                 (push (cons bucket prefix) purged))))
+      (s3-manager--purge-subtrees
+       (s3-manager-copy-job--create
+        :profile "p" :source-bucket "bk" :source-key "a.txt"
+        :bucket "bk" :key "to/a.txt" :recursive nil :move t))
+      (should-not purged)
+      ;; Recursive: the destination subtree, and the source's too on a move.
+      (s3-manager--purge-subtrees
+       (s3-manager-copy-job--create
+        :profile "p" :source-bucket "src" :source-key "from/"
+        :bucket "bk" :key "to/" :recursive t :move t))
+      (should (equal (nreverse purged) '(("bk" . "to/") ("src" . "from/"))))
+      ;; Recursive copy: the destination only, since the source still stands.
+      (setq purged nil)
+      (s3-manager--purge-subtrees
+       (s3-manager-copy-job--create
+        :profile "p" :source-bucket "src" :source-key "from/"
+        :bucket "bk" :key "to/" :recursive t :move nil))
+      (should (equal purged '(("bk" . "to/")))))))
