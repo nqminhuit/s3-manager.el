@@ -3188,22 +3188,27 @@ download directory when there is no Dired buffer to borrow from."
   "`C' means copy, and the entry decides whether that is recursive.
 Choosing between `G' and `R' by hand is the thing this removes."
   (let ((called nil))
-    (cl-letf (((symbol-function 's3-manager-get)
-               (lambda () (setq called 'get)))
+    (cl-letf (((symbol-function 's3-manager--download)
+               (lambda (entries) (setq called (cons 'get entries))))
               ((symbol-function 's3-manager-get-recursive)
                (lambda () (setq called 'recursive))))
       (s3-manager-test--in-object-buffer
         (s3-manager-test--goto-object)
         (s3-manager-copy)
-        (should (eq called 'get))
+        ;; Nothing is marked, so the download gets exactly the row under the
+        ;; cursor -- one entry, not the whole listing.
+        (should (eq (car called) 'get))
+        (should (equal (mapcar #'s3-manager-entry-key (cdr called))
+                       (list (s3-manager-entry-key
+                              (s3-manager--entry-at-point)))))
         (s3-manager-test--goto-directory)
         (s3-manager-copy)
         (should (eq called 'recursive))))))
 
 (ert-deftest s3-manager-test-copy-refuses-in-the-bucket-list ()
   (let ((called nil))
-    (cl-letf (((symbol-function 's3-manager-get)
-               (lambda () (setq called t))))
+    (cl-letf (((symbol-function 's3-manager--download)
+               (lambda (_entries) (setq called t))))
       (with-temp-buffer
         (s3-manager-mode)
         (setq s3-manager--bucket nil)
@@ -5102,8 +5107,8 @@ this spelling -- dropping the trailing slash on a prefix walks past it."
           (delete-other-windows)
           (set-window-buffer (selected-window) (current-buffer))
           (set-window-buffer (split-window) dired-buffer)
-          (cl-letf (((symbol-function 's3-manager-get)
-                     (lambda () (setq got 'download)))
+          (cl-letf (((symbol-function 's3-manager--download)
+                     (lambda (_entries) (setq got 'download)))
                     ((symbol-function 's3-manager--copy-into)
                      (lambda (_) (setq got 'server-side))))
             (s3-manager-copy)))))
@@ -5138,8 +5143,8 @@ this spelling -- dropping the trailing slash on a prefix walks past it."
             (save-window-excursion
               (delete-other-windows)
               (set-window-buffer (selected-window) (current-buffer))
-              (cl-letf (((symbol-function 's3-manager-get)
-                         (lambda () (setq got 'download)))
+              (cl-letf (((symbol-function 's3-manager--download)
+                         (lambda (_entries) (setq got 'download)))
                         ((symbol-function 's3-manager--copy-into)
                          (lambda (_) (setq got 'server-side))))
                 (s3-manager-copy))))
@@ -6071,3 +6076,337 @@ designed in rather than introduced."
     (should-error (s3-manager-mark-delete) :type 'user-error)
     (should (zerop (hash-table-count s3-manager--marks)))))
 
+
+
+;;;; The downloads act on the marked objects
+
+(defun s3-manager-test--goto-key (key)
+  "Put point on the row for KEY."
+  (s3-manager--goto-entry
+   (car (seq-filter (lambda (e) (equal (s3-manager-entry-key e) key))
+                    s3-manager--entries))))
+
+(defun s3-manager-test--record-uri (record)
+  "Return the s3:// argument in argv RECORD."
+  (seq-find (lambda (a) (string-prefix-p "s3://" a)) record))
+
+(ert-deftest s3-manager-test-get-downloads-every-marked-object ()
+  "Two marks, one directory, two transfers -- and point's row is not one."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t)))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)               ; marks a.txt, advances to b.txt
+            (s3-manager-mark)
+            ;; Point is left somewhere else entirely: the marks decide.
+            (s3-manager-test--goto-key "c.txt")
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) directory))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records
+                                        argv-file))
+                               2)))))))
+          (let ((records (s3-manager-test--argv-records argv-file)))
+            (should (= 2 (length records)))
+            (should (equal (sort (mapcar #'s3-manager-test--record-uri records)
+                                 #'string<)
+                           '("s3://media/a.txt" "s3://media/b.txt")))
+            ;; Each lands under its own name, in the one directory.
+            (should (equal
+                     (sort (mapcar (lambda (r)
+                                     (seq-find (lambda (a)
+                                                 (string-prefix-p directory a))
+                                               r))
+                                   records)
+                           #'string<)
+                     (list (expand-file-name "a.txt" directory)
+                           (expand-file-name "b.txt" directory))))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-get-ignores-the-deletion-flag ()
+  "`D' is a deferred commitment to destroy, never a selection to download.
+The mirror of `x' ignoring `*', and the reason the two characters are
+distinct: conflate them and `C' downloads what someone flagged to
+delete while `x' deletes what they meant to fetch."
+  (let ((got 'none))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (s3-manager-mark-delete)
+      (s3-manager-test--goto-key "c.txt")
+      (cl-letf (((symbol-function 's3-manager--download-one)
+                 (lambda (entry) (setq got entry)))
+                ((symbol-function 's3-manager--download-batch)
+                 (lambda (_entries) (error "A flag is not a mark"))))
+        (s3-manager-get))
+      ;; The flagged row is untouched; the row under the cursor came down.
+      (should (equal (s3-manager-entry-key got) "c.txt")))))
+
+(ert-deftest s3-manager-test-copy-downloads-every-marked-object ()
+  "`C' falls back to the download, and the download honours the marks."
+  (let ((got nil))
+    (s3-manager-test--in-many-buffer
+      (s3-manager-test--goto-key "a.txt")
+      (s3-manager-mark)
+      (s3-manager-mark)
+      ;; Point on a prefix, deliberately: marks win over the row under the
+      ;; cursor, so this is the batch and not a recursive download.
+      (s3-manager-test--goto-directory)
+      (cl-letf (((symbol-function 's3-manager--download)
+                 (lambda (entries) (setq got entries)))
+                ((symbol-function 's3-manager-get-recursive)
+                 (lambda () (setq got 'recursive))))
+        (s3-manager-copy))
+      (should (equal (mapcar #'s3-manager-entry-key got) '("a.txt" "b.txt"))))))
+
+(ert-deftest s3-manager-test-download-batch-asks-once-for-a-directory ()
+  "One prompt for three objects.  A probe per object is bounded; a prompt
+per object is not, which is `s3-manager-dired-upload' reasoning in the
+other direction."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t))
+        (dir-prompts 0)
+        (file-prompts 0))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) (cl-incf dir-prompts) directory))
+                      ((symbol-function 'read-file-name)
+                       (lambda (&rest _) (cl-incf file-prompts) directory))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (error "Asked to confirm: %s" p)))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records
+                                        argv-file))
+                               3)))))))
+          (should (= 3 (length (s3-manager-test--argv-records argv-file))))
+          (should (= 1 dir-prompts))
+          ;; And no per-object filename prompt sneaked in behind it.
+          (should (zerop file-prompts)))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-batch-names-what-it-would-overwrite ()
+  "One question, naming the victims, and refusing it writes nothing.
+`aws s3 cp' overwrites without asking, so this is the only chance."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "b.txt" directory)
+            (insert "older\n"))
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) directory))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (p) (setq asked p) nil))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-get) :type 'user-error))))
+          (should (string-match-p "overwriting 1 (b.txt)" asked))
+          (should (null (s3-manager-test--argv-records argv-file))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-batch-asks-nothing-when-nothing-exists ()
+  "The overwrite question means \"this will overwrite\", not \"are you sure\".
+The directory was just typed; asking again for a batch that replaces
+nothing is a prompt nobody reads."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t)))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager-test--goto-key "a.txt")
+          (s3-manager-mark)
+          (s3-manager-mark)
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (&rest _) directory))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (p) (error "Asked to confirm: %s" p)))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-get)
+              (should (s3-manager-test--wait
+                       (lambda ()
+                         (>= (length (s3-manager-test--argv-records argv-file))
+                             2)))))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-batch-creates-the-directory-it-was-given ()
+  "`aws s3 cp' would create it silently, so a mistyped path is asked about."
+  (let* ((parent (make-temp-file "s3-get-dir" t))
+         (missing (file-name-as-directory (expand-file-name "not-yet" parent)))
+         (argv-file (make-temp-file "s3-get-argv")))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) missing))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (should-error (s3-manager-get) :type 'user-error))))
+          ;; Refused: no directory, and nothing ran.
+          (should-not (file-directory-p missing))
+          (should (null (s3-manager-test--argv-records argv-file)))
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) missing))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records
+                                        argv-file))
+                               2)))))))
+          (should (file-directory-p missing)))
+      (delete-directory parent t)
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-download-batch-offers-on-the-total ()
+  "Two objects each under the threshold, whose sum is over it, still offer.
+What makes a transfer worth leaving Emacs for is how long it runs, and
+duration adds up."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t))
+        (kill-ring nil))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")   ; 10 bytes
+            (s3-manager-mark)
+            (s3-manager-mark)                     ; b.txt, 20 bytes
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) directory))
+                      ((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--answering-offer ?c
+                (s3-manager-test--with-fake-aws
+                    (:stdout "" :argv-file argv-file)
+                  (let ((s3-manager-large-transfer-size 25))
+                    (should-not (s3-manager--large-transfer-p 10))
+                    (should-not (s3-manager--large-transfer-p 20))
+                    (s3-manager-get))
+                  (should (string-match-p "Download 2 objects" offered))))))
+          ;; Handed over, so nothing ran here -- and all of it was handed
+          ;; over, not just the first command.
+          (should (null (s3-manager-test--argv-records argv-file)))
+          (should (= 2 (length (split-string (current-kill 0) "\n" t)))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-download-batch-counts-failures ()
+  "A batch is not atomic, so the summary says how many did not land."
+  (let ((directory (make-temp-file "s3-get-dir" t))
+        (said nil))
+    (unwind-protect
+        (s3-manager-test--with-fresh-error-buffer
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "a.txt")
+            (s3-manager-mark)
+            (s3-manager-mark)
+            (cl-letf (((symbol-function 'read-directory-name)
+                       (lambda (&rest _) directory))
+                      ((symbol-function 'display-buffer) #'ignore)
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) said))))
+              (s3-manager-test--with-fake-aws
+                  (:stdout "" :stderr "fatal error: boom" :exit 1)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (seq-find (lambda (m)
+                                       (string-match-p "downloaded" m))
+                                     said))))))))
+      (delete-directory directory t))
+    ;; The second was attempted even though the first failed.
+    (should (seq-find (lambda (m) (string-match-p "downloaded 0, 2 failed" m))
+                      said))))
+
+(ert-deftest s3-manager-test-marks-survive-a-download ()
+  "The objects are still there afterwards, as they are after `dired-do-copy'."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t)))
+    (unwind-protect
+        (s3-manager-test--in-many-buffer
+          (s3-manager-test--goto-key "a.txt")
+          (s3-manager-mark)
+          (s3-manager-mark)
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (&rest _) directory))
+                    ((symbol-function 'message) #'ignore))
+            (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+              (s3-manager-get)
+              (should (s3-manager-test--wait
+                       (lambda ()
+                         (>= (length (s3-manager-test--argv-records argv-file))
+                             2))))))
+          (should (equal (mapcar #'s3-manager-entry-key
+                                 (s3-manager--entries-marked
+                                  s3-manager--mark-char))
+                         '("a.txt" "b.txt"))))
+      (delete-file argv-file)
+      (delete-directory directory t))))
+
+(ert-deftest s3-manager-test-get-still-renames-one-object ()
+  "One object keeps the filename prompt, so it can be renamed on the way down.
+The split is Dired's: a directory prompt for several, a filename for one."
+  (let ((argv-file (make-temp-file "s3-get-argv"))
+        (directory (make-temp-file "s3-get-dir" t))
+        (file-prompts 0))
+    (unwind-protect
+        (progn
+          (s3-manager-test--in-many-buffer
+            (s3-manager-test--goto-key "b.txt")
+            (cl-letf (((symbol-function 'read-file-name)
+                       (lambda (&rest _)
+                         (cl-incf file-prompts)
+                         (expand-file-name "renamed.txt" directory)))
+                      ((symbol-function 'read-directory-name)
+                       (lambda (&rest _)
+                         (error "One object must not be asked for a directory")))
+                      ((symbol-function 'message) #'ignore))
+              (s3-manager-test--with-fake-aws (:stdout "" :argv-file argv-file)
+                (s3-manager-get)
+                (should (s3-manager-test--wait
+                         (lambda ()
+                           (>= (length (s3-manager-test--argv-records
+                                        argv-file))
+                               1)))))))
+          (should (= 1 file-prompts))
+          (let ((record (car (s3-manager-test--argv-records argv-file))))
+            (should (equal (s3-manager-test--record-uri record)
+                           "s3://media/b.txt"))
+            (should (member (expand-file-name "renamed.txt" directory)
+                            record))))
+      (delete-file argv-file)
+      (delete-directory directory t))))

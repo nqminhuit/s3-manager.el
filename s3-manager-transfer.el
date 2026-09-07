@@ -183,25 +183,115 @@ option."
           ;; the mode line depends on.
           '("--progress-frequency" "1")))
 
+(defun s3-manager--download-one (entry)
+  "Download the single object ENTRY, asking where it should land."
+  (unless (eq (s3-manager-entry-type entry) 'object)
+    (user-error "%s"
+                (substitute-command-keys
+                 "That is a prefix; use \\[s3-manager-get-recursive]")))
+  (let* ((key (s3-manager-entry-key entry))
+         (destination (s3-manager--read-destination-file
+                       (s3-manager-entry-display-name entry)))
+         (args (s3-manager--get-args (s3-manager--s3-uri key) destination))
+         (description (format "downloading %s to %s"
+                              key (abbreviate-file-name destination))))
+    (when (s3-manager--offer-command args description
+                                     (s3-manager-entry-size entry))
+      (s3-manager--transfer args description))))
+
+(defun s3-manager--download-directory (count)
+  "Read the one local directory COUNT downloaded objects should land in.
+
+Created after confirmation when it is absent, exactly as
+`s3-manager-get-recursive' creates its own: `aws s3 cp' would make it
+silently, so a mistyped path is otherwise a directory nobody meant with
+the bytes already in it."
+  (let ((directory (file-name-as-directory
+                    (expand-file-name
+                     (read-directory-name
+                      (format "Download %d objects to: " count)
+                      (s3-manager--local-default-directory) nil nil)))))
+    (unless (file-directory-p directory)
+      (unless (y-or-n-p (format "Create %s? " directory))
+        (user-error "Download aborted"))
+      (make-directory directory t))
+    directory))
+
+(defun s3-manager--download-jobs (entries directory)
+  "Return one (DESTINATION ARGS DESCRIPTION) per entry in ENTRIES.
+Each lands under its own display name in DIRECTORY.
+
+No duplicate-leaf guard, unlike `s3-manager-dired-upload', and the
+asymmetry is a fact about the two sides rather than an oversight: that
+guard exists because keys are derived from leaf names, so two marked
+files in different directories collide.  These entries come from a
+single listing, where the keys are unique and share one prefix, so the
+display names differ by construction."
+  (mapcar
+   (lambda (entry)
+     (let* ((key (s3-manager-entry-key entry))
+            (destination (expand-file-name
+                          (s3-manager-entry-display-name entry) directory)))
+       (list destination
+             (s3-manager--get-args (s3-manager--s3-uri key) destination)
+             (format "downloading %s to %s"
+                     key (abbreviate-file-name destination)))))
+   entries))
+
+(defun s3-manager--download-batch (entries)
+  "Download ENTRIES into one local directory, one transfer at a time.
+
+One prompt for the directory and at most one for overwriting: a probe
+per object is bounded, but a prompt per object is not, which is
+`s3-manager-dired-upload' reasoning in the other direction."
+  (let* ((total (length entries))
+         (directory (s3-manager--download-directory total))
+         (jobs (s3-manager--download-jobs entries directory))
+         (lead (format "Download %d objects to %s"
+                       total (abbreviate-file-name directory))))
+    (when (s3-manager--offer-commands
+           (mapcar #'cadr jobs) lead
+           ;; The total, not the largest: what makes a batch worth leaving
+           ;; Emacs for is how long it runs, and that adds up.
+           (seq-reduce (lambda (sum entry)
+                         (+ sum (or (s3-manager-entry-size entry) 0)))
+                       entries 0))
+      ;; After the offer, so someone who takes the command line away is
+      ;; never asked about files Emacs is no longer going to write.  Nothing
+      ;; is ever unchecked: existence here is a local question with no round
+      ;; trip to fail, which is why there is no probe.
+      (when-let* ((existing (seq-filter #'file-exists-p (mapcar #'car jobs))))
+        ;; `aws s3 cp' overwrites without asking, so this is the only chance.
+        (unless (y-or-n-p (s3-manager--batch-question
+                           lead
+                           (mapcar #'file-name-nondirectory existing) nil))
+          (user-error "Download aborted")))
+      (s3-manager--run-sequentially
+       jobs
+       (lambda (job done)
+         (s3-manager--transfer (nth 1 job) (nth 2 job)
+                               (lambda () (funcall done t))
+                               (lambda () (funcall done nil))))
+       (lambda (failed)
+         (s3-manager--batch-summary "downloaded" "object" total failed))))))
+
+(defun s3-manager--download (entries)
+  "Download ENTRIES, which is never empty.
+
+The split is Dired's: one object gets a filename prompt, and so can be
+renamed on the way down, while several share a directory and keep their
+own names.  Marks are left alone -- the objects are still there, as they
+are after `dired-do-copy'."
+  (if (cdr entries)
+      (s3-manager--download-batch entries)
+    (s3-manager--download-one (car entries))))
+
 (defun s3-manager-get ()
-  "Download the object at point."
+  "Download the marked objects, or the object at point when none are marked."
   (interactive)
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
-  (let ((entry (s3-manager--entry-at-point)))
-    (unless (eq (s3-manager-entry-type entry) 'object)
-      (user-error "%s"
-                  (substitute-command-keys
-                   "That is a prefix; use \\[s3-manager-get-recursive]")))
-    (let* ((key (s3-manager-entry-key entry))
-           (destination (s3-manager--read-destination-file
-                         (s3-manager-entry-display-name entry))))
-      (let ((args (s3-manager--get-args (s3-manager--s3-uri key) destination))
-            (description (format "downloading %s to %s"
-                                 key (abbreviate-file-name destination))))
-        (when (s3-manager--offer-command args description
-                                         (s3-manager-entry-size entry))
-          (s3-manager--transfer args description))))))
+  (s3-manager--download (s3-manager--marked-entries)))
 
 (defun s3-manager-get-recursive ()
   "Download every object under the prefix at point."

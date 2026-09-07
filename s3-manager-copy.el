@@ -461,20 +461,26 @@ mystifying."
     (s3-manager--copy-confirm job)))
 
 (defun s3-manager-copy ()
-  "Copy the entry at point to whatever is in the other window.
+  "Copy to whatever is in the other window.
 
-Dired there means a download, recursively for a prefix.  Another S3
-listing means a server-side copy into its prefix, which is the one thing
-`G' and `R' cannot do.  The mirror of `s3-manager-dired-do-copy', so
-`C' means the same thing wherever it is pressed."
+Dired there means a download: of the marked objects, or of the entry at
+point when none are marked, recursively for a prefix.  Another S3
+listing means a server-side copy of the entry at point into its prefix,
+which is the one thing `G' and `R' cannot do.  The mirror of
+`s3-manager-dired-do-copy', so `C' means the same thing wherever it is
+pressed."
   (interactive)
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
   (if-let* ((target (s3-manager--copy-target)))
       (s3-manager--copy-into target)
-    (if (eq (s3-manager-entry-type (s3-manager--entry-at-point)) 'directory)
-        (s3-manager-get-recursive)
-      (s3-manager-get))))
+    (let ((entries (s3-manager--marked-entries)))
+      ;; Only the at-point fallback can be a prefix: marks are refused on
+      ;; one, and the mark reader filters for objects besides.
+      (if (and (null (cdr entries))
+               (eq (s3-manager-entry-type (car entries)) 'directory))
+          (s3-manager-get-recursive)
+        (s3-manager--download entries)))))
 
 (defun s3-manager-copy-dry-run (&optional move)
   "Show what copying the entry at point elsewhere would do, doing nothing.
