@@ -5879,3 +5879,74 @@ carry the same key."
     (should (equal " " (buffer-substring (line-beginning-position)
                                          (1+ (line-beginning-position)))))))
 
+;;;; Handing over every command in a batch
+
+(ert-deftest s3-manager-test-show-commands-hands-over-all-of-them ()
+  "A batch is N commands; handing over one of them would be a lie."
+  (let ((kill-ring nil))
+    (cl-letf (((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (s3-manager--show-commands
+       '(("aws" "s3" "cp" "s3://b/one" "/tmp/one")
+         ("aws" "s3" "cp" "s3://b/two" "/tmp/two")
+         ("aws" "s3" "cp" "s3://b/three" "/tmp/three")))
+      ;; One kill, not three: three kills would be yanked back in reverse.
+      (should (= 1 (length kill-ring)))
+      (let ((copied (current-kill 0)))
+        (should (equal (split-string copied "\n" t)
+                       '("aws s3 cp s3://b/one /tmp/one"
+                         "aws s3 cp s3://b/two /tmp/two"
+                         "aws s3 cp s3://b/three /tmp/three"))))
+      (with-current-buffer s3-manager--command-buffer
+        ;; Plural heading, and every command present.
+        (should (string-match-p "Run these in a terminal" (buffer-string)))
+        (should (string-match-p "s3://b/three" (buffer-string)))))))
+
+(ert-deftest s3-manager-test-show-command-is-the-one-command-form ()
+  "The singular stays, so the four existing call sites are untouched."
+  (let ((kill-ring nil))
+    (cl-letf (((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (s3-manager--show-command '("aws" "s3" "ls" "s3://b/p/"))
+      (should (equal (current-kill 0) "aws s3 ls s3://b/p/"))
+      (with-current-buffer s3-manager--command-buffer
+        (should (string-match-p "Run this in a terminal" (buffer-string)))))))
+
+(ert-deftest s3-manager-test-a-batch-of-commands-pastes-into-a-shell ()
+  "The block has to run as a sequence, not merely look like one."
+  (skip-unless (executable-find "sh"))
+  (let ((kill-ring nil))
+    (cl-letf (((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (s3-manager--show-commands
+       (list (list "printf" "[%s]" "s3://b/has space.txt")
+             (list "printf" "[%s]" "s3://b/semi;colon&"))))
+    (let ((output (with-output-to-string
+                    (with-current-buffer standard-output
+                      (call-process "sh" nil t nil "-c" (current-kill 0))))))
+      (should (equal output "[s3://b/has space.txt][s3://b/semi;colon&]")))))
+
+(ert-deftest s3-manager-test-offer-commands-hands-over-every-one ()
+  "And the offer passes the whole list through, not just the first."
+  (let ((kill-ring nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (&rest _) (list ?c "" "")))
+              ((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--profile "production")
+        (let ((s3-manager-large-transfer-size 1)
+              (s3-manager-endpoint-url nil)
+              (s3-manager-endpoint-alist nil))
+          (should-not (s3-manager--offer-commands
+                       '(("s3" "cp" "s3://b/one" "/tmp/one")
+                         ("s3" "cp" "s3://b/two" "/tmp/two"))
+                       "copying 2 objects" 999)))))
+    (let ((lines (split-string (current-kill 0) "\n" t)))
+      (should (= 2 (length lines)))
+      ;; Each carries the base args, so each is runnable on its own.
+      (dolist (line lines)
+        (should (string-match-p "--profile production" line))
+        (should (string-prefix-p "aws " line))))))
+

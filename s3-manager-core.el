@@ -450,17 +450,30 @@ name and possibly an endpoint URL -- but an endpoint carrying
 `user:pass@host' is one, and a key shaped like an access-key id trips
 the same rules.  Either way the string is no longer the command, and
 saying so beats a plausible wrong one."
-  (let* ((command (s3-manager--quote-argv argv))
-         (masked (s3-manager--redact command)))
+  (s3-manager--show-commands (list argv)))
+
+(defun s3-manager--show-commands (argvs)
+  "Put ARGVS' command lines in the kill ring, one per line, and display them.
+
+A batch is N commands, so handing over one of them would be a lie.  The
+block pastes into a shell as the sequence that would have run, in the
+order it would have run in.
+
+One kill, not N: `kill-new' per command would leave the user yanking
+them back one at a time in reverse."
+  (let* ((commands (mapconcat #'s3-manager--quote-argv argvs "\n"))
+         (masked (s3-manager--redact commands))
+         (total (length argvs)))
     (kill-new masked)
     (s3-manager--show-report
      s3-manager--command-buffer
-     "Run this in a terminal:"
+     (if (= total 1) "Run this in a terminal:" "Run these in a terminal:")
      (concat masked "\n"
-             (unless (equal command masked)
+             (unless (equal commands masked)
                (concat "\nCredential-shaped text was masked above, so this"
                        " is no longer\nthe command that would have run.\n"))))
-    (message "S3: command copied to the kill ring")))
+    (message "S3: %d command%s copied to the kill ring"
+             total (if (= total 1) "" "s"))))
 
 (defun s3-manager--show-report (buffer heading body)
   "Display BODY under HEADING in BUFFER, replacing what was there.

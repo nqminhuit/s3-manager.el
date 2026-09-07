@@ -68,15 +68,25 @@ transfer, whose extent nothing here can know."
 
 (defun s3-manager--offer-command (args description size)
   "Ask whether to run ARGS here, or hand over the command line.
+DESCRIPTION and SIZE are as in `s3-manager--offer-commands', of which
+this is the one-command form."
+  (s3-manager--offer-commands (list args) description size))
 
-Returns non-nil to run it, nil when the command was handed over instead,
-and signals a `user-error' when the answer is quit, so a caller can
-write `(when (s3-manager--offer-command ...) (s3-manager--transfer ...))'.
+(defun s3-manager--offer-commands (argvs description size)
+  "Ask whether to run ARGVS here, or hand over the command lines.
+
+Returns non-nil to run them, nil when the commands were handed over
+instead, and signals a `user-error' when the answer is quit, so a caller
+can write `(when (s3-manager--offer-commands ...) ...)'.
 
 DESCRIPTION names the operation and SIZE decides whether to ask at all
--- see `s3-manager--large-transfer-p'.  The command shown is built by
-`s3-manager--full-argv', the same function the transport builds its own
-vector with, so what is offered is what would have run."
+-- see `s3-manager--large-transfer-p'.  For a batch SIZE is the total,
+not the largest member: what makes a transfer worth leaving Emacs for is
+duration, and duration adds up.
+
+The commands shown are built by `s3-manager--full-argv', the same
+function the transport builds its own vector with, so what is offered is
+what would have run."
   (if (not (s3-manager--large-transfer-p size))
       t
     (pcase (car (read-multiple-choice
@@ -89,8 +99,10 @@ vector with, so what is offered is what would have run."
                        "Put the aws command in the kill ring instead")
                    (?q "quit" "Do nothing"))))
       (?r t)
-      (?c (s3-manager--show-command
-           (s3-manager--full-argv s3-manager--profile args))
+      (?c (s3-manager--show-commands
+           (mapcar (lambda (args)
+                     (s3-manager--full-argv s3-manager--profile args))
+                   argvs))
           nil)
       (_ (user-error "Aborted")))))
 
