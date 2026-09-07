@@ -167,7 +167,11 @@ one that would quietly enlarge the next batch.
                (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
                (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
       (with-current-buffer buffer
-        (when s3-manager--marks (remhash key s3-manager--marks))))))
+        (when s3-manager--marks (remhash key s3-manager--marks))
+        ;; The count in the header names what a command would act on, so it
+        ;; has to follow a mark that was dropped on the object's behalf and
+        ;; not only one the user removed.
+        (s3-manager--update-header-line)))))
 
 (defun s3-manager--copy-targets (job)
   "Return the (BUCKET PREFIX CHILD) triples JOB changed, destination first.

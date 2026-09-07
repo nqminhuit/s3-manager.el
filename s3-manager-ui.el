@@ -55,6 +55,30 @@
              ;; "sale-50%-off.png" would render `%-' as padding.
              (s3-manager--quote-percent s3-manager--transfer-status)))))
 
+(defun s3-manager--mark-summary ()
+  "Return what this buffer's marks add up to, or nil when there are none.
+
+Counted through `s3-manager--entries-marked', the same reader every
+batch command uses, so the number shown cannot disagree with the number
+acted on -- a mark whose object has since gone from the listing is in
+neither.
+
+Shown at all because a mark is input to a command and can be scrolled
+off screen.  `s3-manager-execute' refuses an unflagged listing for the
+same reason: state nobody can see must not be state a command silently
+acts on."
+  (let ((marked (length (s3-manager--entries-marked s3-manager--mark-char)))
+        (flagged (length (s3-manager--entries-marked
+                          s3-manager--delete-char))))
+    (when (or (> marked 0) (> flagged 0))
+      (string-join
+       (delq nil
+             (list (when (> marked 0) (format "%d marked" marked))
+                   ;; Named apart from the marks, as the two keys are: `x'
+                   ;; acts on this number and on no part of the other.
+                   (when (> flagged 0) (format "%d flagged" flagged))))
+       ", "))))
+
 (defun s3-manager--update-header-line ()
   "Refresh the header line from this buffer's state."
   (setq-local
@@ -79,7 +103,9 @@
                    ;; The listing was capped by `s3-manager-page-size'.
                    (when s3-manager--next-token
                      (substitute-command-keys
-                      "  \\[s3-manager-load-more] for more")))))))))
+                      "  \\[s3-manager-load-more] for more"))
+                   (when-let* ((marks (s3-manager--mark-summary)))
+                     (concat "  " marks)))))))))
 
 (defun s3-manager--set-status (status)
   "Set this buffer's request STATUS and repaint the indicators."
@@ -616,7 +642,8 @@ caller is unchanged."
 Called whenever the prefix changes: marks name keys in one listing, and
 carrying them into another would leave invisible marks that `x' would
 nonetheless act on."
-  (when s3-manager--marks (clrhash s3-manager--marks)))
+  (when s3-manager--marks (clrhash s3-manager--marks))
+  (s3-manager--update-header-line))
 
 (defun s3-manager--set-prefix (prefix)
   "Show PREFIX in this buffer, discarding marks that belonged to the old one."
@@ -639,7 +666,8 @@ nonetheless act on."
   "Give the object at point MARK, then move down."
   (let ((entry (s3-manager--markable-entry-at-point)))
     (puthash (s3-manager-entry-key entry) mark s3-manager--marks)
-    (s3-manager--put-tag mark t)))
+    (s3-manager--put-tag mark t)
+    (s3-manager--update-header-line)))
 
 (defun s3-manager-mark ()
   "Mark the object at point, then move down.
@@ -658,7 +686,8 @@ The transfer commands act on this mark; `s3-manager-execute' does not."
   (let ((entry (s3-manager--entry-at-point)))
     (when (s3-manager-entry-p entry)
       (remhash (s3-manager-entry-key entry) s3-manager--marks))
-    (s3-manager--put-tag nil t)))
+    (s3-manager--put-tag nil t)
+    (s3-manager--update-header-line)))
 
 (defun s3-manager-unmark-all ()
   "Remove every mark in this buffer."

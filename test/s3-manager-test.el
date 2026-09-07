@@ -6832,3 +6832,99 @@ than stopping it half-way through."
                                said)))))))
     (should (seq-find (lambda (m) (equal m "S3: moved 2 objects")) said))
     (should-not (seq-find (lambda (m) (string-match-p "copied" m)) said))))
+
+
+;;;; The header line names the marks
+
+(defun s3-manager-test--header ()
+  "Return this buffer's header line string.
+
+Not `format-mode-line': in batch there is no window showing this buffer,
+so it formats the selected window's header instead and answers \"\".
+The value here is always a string built by
+`s3-manager--update-header-line', so reading it is reading what would be
+displayed -- bar the `%%' doubling `s3-manager--quote-percent' adds,
+which no assertion below looks at."
+  header-line-format)
+
+(ert-deftest s3-manager-test-header-names-the-marks ()
+  "A mark is input to a command and can be scrolled off screen."
+  (s3-manager-test--in-many-buffer
+    (should-not (string-match-p "marked" (s3-manager-test--header)))
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark)
+    (should (string-match-p "1 marked" (s3-manager-test--header)))
+    (s3-manager-mark)                   ; b.txt
+    (should (string-match-p "2 marked" (s3-manager-test--header)))
+    ;; The two kinds are counted apart: `x' acts on one of these numbers
+    ;; and on no part of the other.
+    (s3-manager-test--goto-key "c.txt")
+    (s3-manager-mark-delete)
+    (should (string-match-p "2 marked, 1 flagged" (s3-manager-test--header)))
+    ;; And the listing's own count is still there.
+    (should (string-match-p "4 entries" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-shows-flags-alone ()
+  "Flagging without marking says so, rather than saying \"0 marked\"."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark-delete)
+    (should (string-match-p "1 flagged" (s3-manager-test--header)))
+    (should-not (string-match-p "marked" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-follows-unmarking ()
+  "The count has to come down as well as up, and `U' clears it."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark)
+    (s3-manager-mark)
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-unmark)
+    (should (string-match-p "1 marked" (s3-manager-test--header)))
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (s3-manager-unmark-all))
+    (should-not (string-match-p "marked" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-counts-only-what-is-listed ()
+  "A mark whose object has gone from the listing is not one a command
+would act on, so it is not one the header counts."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark)
+    (puthash "gone.txt" s3-manager--mark-char s3-manager--marks)
+    (s3-manager--update-header-line)
+    (should (string-match-p "1 marked" (s3-manager-test--header)))
+    (should-not (string-match-p "2 marked" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-follows-a-mark-dropped-by-a-move ()
+  "A moved object's mark goes without the user touching a key.
+`s3-manager--forget-mark' drops it from whichever buffer is showing that
+listing, so the count in that buffer has to follow."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark)
+    (s3-manager-mark)
+    (should (string-match-p "2 marked" (s3-manager-test--header)))
+    (s3-manager--forget-mark "production" "media" "" "a.txt")
+    (should (string-match-p "1 marked" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-hides-the-count-while-loading ()
+  "During a fetch the entries are stale, so counting them would be too."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "a.txt")
+    (s3-manager-mark)
+    (s3-manager--set-status 'loading)
+    (should-not (string-match-p "marked" (s3-manager-test--header)))
+    (s3-manager--set-status 'error)
+    (should-not (string-match-p "marked" (s3-manager-test--header)))
+    (s3-manager--set-status nil)
+    (should (string-match-p "1 marked" (s3-manager-test--header)))))
+
+(ert-deftest s3-manager-test-header-survives-a-repaint ()
+  "The count is rebuilt from the marks, not carried in the string."
+  (s3-manager-test--in-many-buffer
+    (s3-manager-test--goto-key "b.txt")
+    (s3-manager-mark)
+    (s3-manager--print-list)
+    (s3-manager--update-header-line)
+    (should (string-match-p "1 marked" (s3-manager-test--header)))))
