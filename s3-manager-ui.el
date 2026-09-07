@@ -157,6 +157,12 @@ acts on."
 ;; nearly every key above, so without this the keymap is dead under Evil.  nil
 ;; covers every state; unbound keys still reach Evil, and a user's own
 ;; `evil-define-key' still outranks this.
+;;
+;; What this does NOT buy: precedence over an auxiliary map attached to another
+;; keymap.  Measured -- a user's `evil-define-key 'normal global-map "mhh"'
+;; makes `m' a global prefix, and that prefix outranks `m' here, so
+;; `s3-manager-mark' becomes unreachable while the other eighteen keys are
+;; fine.  See SPEC §18.9; the fix is the user's, as §11.9 has it.
 (declare-function evil-make-overriding-map "evil-core"
                   (keymap &optional state copy))
 (with-eval-after-load 'evil

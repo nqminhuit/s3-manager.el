@@ -1196,8 +1196,9 @@ key on the map to duplicate `C` would waste it.
 
 **`g` is a prefix, not a command.** `evil-collection` gives Dired that shape --
 `gr` reverts, `gg` is left to Evil -- and binding `g` itself would swallow
-`gg`, since this map is registered as overriding and anything it resolves beats
-Evil, an inherited `g` from `special-mode` included. `gg` is bound rather than
+`gg`, since this map is registered as overriding and beats Evil's own state
+maps, an inherited `g` from `special-mode` included. (Overriding does *not*
+beat everything: see §18.9 for the one thing it loses to.) `gg` is bound rather than
 left to Evil, and it is `s3-manager-beginning-of-listing` rather than
 `beginning-of-buffer` or `evil-goto-first-line`. Both of those go to line 1,
 and line 1 here is the column header: this mode sets
@@ -2562,6 +2563,48 @@ grammar is any UTF-8 sequence up to 1024 bytes. This is why
 one, and why item 45 in §16 is only half run live. It is also a reminder that
 "the endpoint rejected it" is not the same as "it cannot happen": the package
 serves both.
+
+---
+
+### 18.9 An overriding map loses to a user's *prefix*, measured for 0.5.0
+
+Emacs 31.1, `evil` and `evil-collection` from MELPA, `s3-manager-mode-map`
+registered with `evil-make-overriding-map`, and a user's own
+`evil-define-key 'normal global-map "mhh"` — i.e. `m` made a prefix globally,
+which is a common Vim-user arrangement.
+
+| Key in an S3 buffer | `(key-binding …)` |
+|---|---|
+| `m` | **a prefix keymap** — `s3-manager-mark` unreachable |
+| `d` `x` `u` `U` `C` `c` `r` `P` `D` `!` `RET` `^` `+` `g g` `g r` `n` `p` `q` | ours, all 18 correct |
+
+**A *prefix* keymap in `global-map`'s Evil auxiliary map outranks a *complete*
+binding in an overriding major-mode map.** `evil-make-overriding-map` buys
+precedence over Evil's *state* maps (`evil-normal-state-map` and friends); it
+does not buy precedence over an auxiliary map attached to another keymap. So
+the moment a user turns one of this package's single-key bindings into the
+first key of a global sequence, that binding is gone — silently, because the
+key now waits for a second one instead of erroring.
+
+`m` is the only key at risk in practice, because it is the only one this
+package binds that a Vim user is likely to have made a prefix. `d` and `x`
+survived the same test.
+
+**Two arrangements fix it**, both measured, and both the user's to apply --
+§11.9's reasoning, since the conflict is with a binding the package cannot see:
+
+| Fix | Result |
+|---|---|
+| `evil-define-key 'normal s3-manager-mode-map "m" #'s3-manager-mark` | works — an aux map on the *mode* map outranks one on `global-map` |
+| `s3-manager-mode-hook` + `evil-local-set-key 'normal "m"` | works — a buffer-local state map is highest of all |
+
+The first is the one to document: it is one line, it matches what other
+list-mode packages already do, and it needs no hook.
+
+**Related, and not our bug:** Emacs *merges* prefix keymaps across active maps,
+so a mode-local `m c` and a global `m h` coexist — both resolve. It is only the
+complete-binding-versus-prefix case that loses. Verified while advising on a
+user's config, where the opposite had been predicted.
 
 ---
 

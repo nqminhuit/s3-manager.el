@@ -73,6 +73,18 @@ Also `M-x`: `s3-manager-switch-profile`, `s3-manager-upload-dry-run`,
 Nothing to configure for Evil; the keymap is registered as overriding, and keys
 it does not bind still reach Evil.
 
+**One exception, if you have made `m` a prefix** — `mhh`, `mcc` and the like
+bound in `global-map`. A global prefix outranks even an overriding map, so `m`
+waits for a second key instead of marking, silently. Measured; `doc/SPEC.md`
+§18.9. One line fixes it:
+
+```elisp
+(with-eval-after-load 'evil
+  (evil-define-key 'normal s3-manager-mode-map "m" #'s3-manager-mark))
+```
+
+`m` is the only key this affects — the other eighteen were checked.
+
 ### Marks
 
 `m` marks objects; `d` flags them for deletion. Two characters, and they never
