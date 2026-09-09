@@ -194,6 +194,30 @@ acts on."
   (add-hook 'kill-buffer-hook #'s3-manager--cancel nil t))
 
 
+;;;; Finding listing buffers
+
+(defun s3-manager--object-listing-p (buffer)
+  "Return non-nil when BUFFER is showing the objects in a bucket."
+  (buffer-local-value 's3-manager--bucket buffer))
+
+(defun s3-manager--do-listings (profile bucket prefix function)
+  "Call FUNCTION with no arguments in each buffer showing PREFIX.
+PREFIX is the one in BUCKET under PROFILE.
+
+Buffers are matched by what they are showing rather than looked up by
+`s3-manager--buffer-name': the name is derived from the profile and
+bucket, so the lookup would be wrong for any listing held in a buffer
+this package did not create."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                        's3-manager-mode)
+               (equal (buffer-local-value 's3-manager--profile buffer) profile)
+               (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
+               (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
+      (with-current-buffer buffer (funcall function)))))
+
+
 ;;;; Bucket listing
 
 (defconst s3-manager--bucket-list-format

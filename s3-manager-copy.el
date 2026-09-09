@@ -132,22 +132,9 @@ at all."
 (defun s3-manager--refresh-listing (profile bucket prefix key)
   "Re-read any listing of PREFIX in BUCKET under PROFILE, point on KEY.
 Does nothing when none is on screen: the cache entry has already gone,
-so the next visit re-reads.
-
-Buffers are matched by what they are showing rather than looked up by
-`s3-manager--buffer-name'.  The name is derived from the profile and
-bucket, so the lookup would be right for every buffer this package
-creates and wrong for any other -- including the one that started the
-copy, if a caller ever holds a listing in a buffer of its own."
-  (dolist (buffer (buffer-list))
-    (when (and (buffer-live-p buffer)
-               (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
-                                        's3-manager-mode)
-               (equal (buffer-local-value 's3-manager--profile buffer) profile)
-               (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
-               (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
-      (with-current-buffer buffer
-        (s3-manager--reload nil key)))))
+so the next visit re-reads."
+  (s3-manager--do-listings profile bucket prefix
+                           (lambda () (s3-manager--reload nil key))))
 
 (defun s3-manager--forget-mark (profile bucket prefix key)
   "Drop KEY's mark in any listing of PREFIX in BUCKET under PROFILE.
@@ -159,19 +146,14 @@ marked object and later creating something at the old key would give
 that new object a mark the user never set -- one `x' would act on, or
 one that would quietly enlarge the next batch.
 `s3-manager--delete-finished' clears marks for the same reason."
-  (dolist (buffer (buffer-list))
-    (when (and (buffer-live-p buffer)
-               (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
-                                        's3-manager-mode)
-               (equal (buffer-local-value 's3-manager--profile buffer) profile)
-               (equal (buffer-local-value 's3-manager--bucket buffer) bucket)
-               (equal (buffer-local-value 's3-manager--prefix buffer) prefix))
-      (with-current-buffer buffer
-        (when s3-manager--marks (remhash key s3-manager--marks))
-        ;; The count in the header names what a command would act on, so it
-        ;; has to follow a mark that was dropped on the object's behalf and
-        ;; not only one the user removed.
-        (s3-manager--update-header-line)))))
+  (s3-manager--do-listings
+   profile bucket prefix
+   (lambda ()
+     (when s3-manager--marks (remhash key s3-manager--marks))
+     ;; The count in the header names what a command would act on, so it has
+     ;; to follow a mark dropped on the object's behalf, not only one the
+     ;; user removed.
+     (s3-manager--update-header-line))))
 
 (defun s3-manager--copy-targets (job)
   "Return the (BUCKET PREFIX CHILD) triples JOB changed, destination first.
@@ -574,12 +556,12 @@ mystifying."
   (let ((buffer (seq-some
                  (lambda (window)
                    (let ((b (window-buffer window)))
-                     (and (or (buffer-local-value 's3-manager--bucket b)
+                     (and (or (s3-manager--object-listing-p b)
                               (provided-mode-derived-p
                                (buffer-local-value 'major-mode b) 'dired-mode))
                           b)))
                  (cdr (window-list nil nil (selected-window))))))
-    (when (and buffer (buffer-local-value 's3-manager--bucket buffer))
+    (when (and buffer (s3-manager--object-listing-p buffer))
       (unless (s3-manager--same-profile-p buffer)
         (user-error "Cannot copy across profiles: this listing is %s, %s is %s"
                     (or s3-manager--profile "default")

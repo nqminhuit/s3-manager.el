@@ -51,6 +51,24 @@ follows their setting rather than imposing one."
        (require 'dired-aux nil t)
        (dired-dwim-target-directory)))
 
+(defun s3-manager--refuse-remote (path complaint)
+  "Signal a `user-error' when PATH is remote.  COMPLAINT completes the message.
+
+Checked before any predicate that would touch PATH: `file-directory-p'
+on a TRAMP path opens a connection.  `aws' cannot reach one in any
+case, and `default-directory' is pinned to a local directory, so the
+CLI's own failure would be mystifying."
+  (when (file-remote-p path)
+    (user-error "%s is remote; aws cannot %s" path complaint)))
+
+(defun s3-manager--repeated (names)
+  "Return the members of NAMES appearing more than once, each named once."
+  (seq-uniq (seq-filter (lambda (name)
+                          (> (seq-count (lambda (other) (equal other name))
+                                        names)
+                             1))
+                        names)))
+
 (defun s3-manager--transfer-finished ()
   "Note that one transfer in this buffer has stopped."
   (setq s3-manager--transfers (max 0 (1- s3-manager--transfers)))
@@ -155,11 +173,8 @@ set up in advance."
                                  ;; the directory it is joined to.  Offering
                                  ;; "~root" here meant one RET wrote to /root.
                                  (s3-manager--safe-leaf name)))))
-    ;; First, before any predicate that would touch it: `file-directory-p' on
-    ;; a TRAMP path opens a connection, so the check has to precede the one
-    ;; below.  `aws' cannot write there in any case.
-    (when (file-remote-p chosen)
-      (user-error "%s is remote; aws cannot write there" chosen))
+    ;; Must stay above `file-directory-p', which would open a connection.
+    (s3-manager--refuse-remote chosen "write there")
     (let ((destination
            ;; Naming a directory means "into it, under the object's own name".
            (if (file-directory-p chosen)
@@ -219,8 +234,7 @@ honours `dired-dwim-target', so a remote Dired in the other window is
 what gets offered."
   (let ((directory (expand-file-name (read-directory-name prompt default
                                                           nil nil))))
-    (when (file-remote-p directory)
-      (user-error "%s is remote; aws cannot write there" directory))
+    (s3-manager--refuse-remote directory "write there")
     (file-name-as-directory directory)))
 
 (defun s3-manager--ensure-local-directory (directory)
@@ -271,15 +285,9 @@ whether there is one."
                           (let ((leaf (file-name-nondirectory (car job))))
                             (if fold (downcase leaf) leaf)))
                         jobs)))
-    (when (/= (length names) (length (seq-uniq names)))
+    (when-let* ((clashing (s3-manager--repeated names)))
       (user-error "Marked objects share a destination name: %s"
-                  (string-join
-                   (seq-uniq (seq-filter
-                              (lambda (n)
-                                (> (seq-count (lambda (o) (equal o n)) names)
-                                   1))
-                              names))
-                   ", ")))))
+                  (string-join clashing ", ")))))
 
 (defun s3-manager--download-jobs (entries directory)
   "Return one (DESTINATION ARGS DESCRIPTION) per entry in ENTRIES.
@@ -397,7 +405,7 @@ tilde guard is needed (nothing expands them on the S3 side), and an
 unusable name is refused rather than defaulted -- inventing a key would
 write the user's bytes somewhere they never named."
   (let ((name (file-name-nondirectory (directory-file-name source))))
-    (when (member name '("" "." ".."))
+    (when (member name s3-manager--unsafe-leaf-names)
       (user-error "Cannot derive an object name from %s" source))
     name))
 
@@ -423,11 +431,7 @@ Writing the leaf into the destination is what keeps it."
     ;; ignoring it all reach here -- and these checks also narrow the window
     ;; between this prompt and the transfer, which for a single file spans a
     ;; round trip and an unbounded confirmation.
-    ;; Refused for the same reason `s3-manager--dired-sources' refuses it:
-    ;; `aws' cannot read a TRAMP path, and `default-directory' is pinned to a
-    ;; local one, so the CLI's own failure would be mystifying.
-    (when (file-remote-p source)
-      (user-error "%s is remote; aws cannot read it" source))
+    (s3-manager--refuse-remote source "read it")
     (unless (file-exists-p source)
       (user-error "%s does not exist" source))
     (unless (file-readable-p source)
@@ -677,8 +681,7 @@ recursively, after a typed confirmation."
   "Return an S3 object listing shown in another window, or nil.
 The selected window is excluded, so this answers \"what is in the other
 window\" from either side of the pair."
-  (seq-find (lambda (buffer)
-              (buffer-local-value 's3-manager--bucket buffer))
+  (seq-find #'s3-manager--object-listing-p
             (mapcar #'window-buffer
                     (delq (selected-window) (window-list)))))
 
@@ -686,9 +689,7 @@ window\" from either side of the pair."
   "Return an S3 object-listing buffer to upload into.
 A visible one wins, so the window layout picks the destination."
   (let ((visible (s3-manager--visible-listing))
-        (live (seq-filter (lambda (buffer)
-                            (buffer-local-value 's3-manager--bucket buffer))
-                          (buffer-list))))
+        (live (seq-filter #'s3-manager--object-listing-p (buffer-list))))
     (cond
      (visible visible)
      ((null live) (user-error "No S3 object listing to upload into"))
@@ -701,10 +702,7 @@ A visible one wins, so the window layout picks the destination."
   (let ((files (dired-get-marked-files)))
     (unless files (user-error "Nothing to upload"))
     (dolist (file files)
-      ;; `aws' cannot read a TRAMP path, and the transport pins
-      ;; `default-directory' to a local one, so fail plainly instead.
-      (when (file-remote-p file)
-        (user-error "%s is remote; aws cannot read it" file)))
+      (s3-manager--refuse-remote file "read it"))
     (mapcar #'expand-file-name files)))
 
 (defun s3-manager--probe-each (bucket keys existing unchecked done)
@@ -838,16 +836,9 @@ but a prompt per file is not."
     ;; Keys come from the leaf, so /a/x.txt and /b/x.txt would both write
     ;; PREFIX/x.txt: two transfers racing, one object, and nothing to say
     ;; which won.  The probe cannot see it -- neither key exists yet.
-    (when (/= (length leaves) (length (seq-uniq leaves)))
+    (when-let* ((clashing (s3-manager--repeated leaves)))
       (user-error "Marked files share a name: %s"
-                  (string-join
-                   (seq-uniq (seq-filter (lambda (leaf)
-                                           (> (seq-count (lambda (o)
-                                                           (equal o leaf))
-                                                         leaves)
-                                              1))
-                                         leaves))
-                   ", ")))
+                  (string-join clashing ", ")))
     (with-current-buffer target
       (let* ((prefix s3-manager--prefix)
              (keys (mapcar (lambda (source)

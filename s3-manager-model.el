@@ -150,36 +150,31 @@ a bucket this buffer is not showing."
   "Forget the cached listing for KEY."
   (remhash key s3-manager--cache))
 
-(defun s3-manager--cache-purge-profile (profile)
-  "Forget every cached listing belonging to PROFILE.  Return the count.
+(defun s3-manager--cache-drop (predicate)
+  "Forget every cached listing whose key satisfies PREDICATE.  Return the count.
 Keys are collected before removal: `remhash' during `maphash' is not
 documented as safe."
   (let ((doomed nil))
     (maphash (lambda (key _page)
-               (when (equal (nth 0 key) profile)
-                 (push key doomed)))
+               (when (funcall predicate key) (push key doomed)))
              s3-manager--cache)
     (mapc (lambda (key) (remhash key s3-manager--cache)) doomed)
     (length doomed)))
+
+(defun s3-manager--cache-purge-profile (profile)
+  "Forget every cached listing belonging to PROFILE.  Return the count."
+  (s3-manager--cache-drop (lambda (key) (equal (nth 0 key) profile))))
 
 (defun s3-manager--cache-purge (profile endpoint bucket &optional prefix)
   "Forget cached listings for BUCKET under PROFILE and ENDPOINT.
 With PREFIX, forget only that prefix and everything beneath it.  Return
-the number of entries dropped.
-
-Keys are collected before being removed: `remhash' during `maphash' is
-not documented as safe."
-  (let ((doomed nil))
-    (maphash (lambda (key _page)
-               (when (and (equal (nth 0 key) profile)
-                          (equal (nth 1 key) endpoint)
-                          (equal (nth 2 key) bucket)
-                          (or (null prefix)
-                              (string-prefix-p prefix (nth 3 key))))
-                 (push key doomed)))
-             s3-manager--cache)
-    (mapc (lambda (key) (remhash key s3-manager--cache)) doomed)
-    (length doomed)))
+the number of entries dropped."
+  (s3-manager--cache-drop
+   (lambda (key)
+     (and (equal (nth 0 key) profile)
+          (equal (nth 1 key) endpoint)
+          (equal (nth 2 key) bucket)
+          (or (null prefix) (string-prefix-p prefix (nth 3 key)))))))
 
 ;;;###autoload
 (defun s3-manager-clear-cache ()
