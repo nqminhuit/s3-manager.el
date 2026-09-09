@@ -483,21 +483,6 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
 (defconst s3-manager--command-buffer "*S3 Manager Command*"
   "Name of the buffer showing a command to run in a terminal.")
 
-(defun s3-manager--show-command (argv)
-  "Put ARGV's command line in the kill ring, and display it.
-
-Both, deliberately: the kill ring is what makes pasting into a terminal
-one step, and it says nothing about what was copied, so the buffer is
-what lets the user read the command before running it.
-
-A masked command is flagged rather than handed over quietly.  Nothing
-this package puts on a command line is a credential -- only a profile
-name and possibly an endpoint URL -- but an endpoint carrying
-`user:pass@host' is one, and a key shaped like an access-key id trips
-the same rules.  Either way the string is no longer the command, and
-saying so beats a plausible wrong one."
-  (s3-manager--show-commands (list argv)))
-
 (defun s3-manager--show-commands (argvs)
   "Put ARGVS' command lines in the kill ring, one per line, and display them.
 
@@ -577,20 +562,6 @@ so only what would otherwise reach the CLI as a mystery is refused."
     (when (string-match-p "[[:space:]]" bucket)
       (user-error "Not a bucket name: %s" bucket))
     (cons bucket key)))
-
-(defun s3-manager--key-leaf (key)
-  "Return KEY's last segment, without a trailing slash.
-The S3 mirror of `file-name-nondirectory' on a directory name, and
-hand-rolled for the same reason `s3-manager--parent-prefix' is: a key is
-not a file name, and the file-name functions consult
-`file-name-handler-alist', so a key beginning \"/ssh:\" would take a TRAMP
-detour."
-  (let ((trimmed (if (string-suffix-p "/" key)
-                     (substring key 0 (1- (length key)))
-                   key)))
-    (if (string-match "\\`.*/\\([^/]*\\)\\'" trimmed)
-        (match-string 1 trimmed)
-      trimmed)))
 
 (defun s3-manager--copy-key (typed leaf directory)
   "Return the destination key for TYPED, an S3 destination the user gave.
