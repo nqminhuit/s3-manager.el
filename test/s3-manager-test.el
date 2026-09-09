@@ -2984,6 +2984,15 @@ was gone from S3, yet the row was still on screen."
 
 ;;;; Batch robustness
 
+(ert-deftest s3-manager-test-repeated-names-each-appear-once ()
+  "The clashing names go into a prompt, so each must be named once.
+Both call sites feed the result to `string-join', and a name repeated
+per occurrence would read as more collisions than there are."
+  (should (equal (s3-manager--repeated '("a" "b" "a" "c" "b" "a")) '("a" "b")))
+  (should (equal (s3-manager--repeated '("x.txt" "x.txt")) '("x.txt")))
+  (should (null (s3-manager--repeated '("a" "b" "c"))))
+  (should (null (s3-manager--repeated nil))))
+
 (ert-deftest s3-manager-test-dired-upload-refuses-duplicate-names ()
   "Two marked files with the same name would race on one key.
 Keys come from the leaf, so /a/x.txt and /b/x.txt both write
