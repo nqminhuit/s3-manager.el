@@ -32,17 +32,15 @@
 
 (defvar s3-manager--view-pending nil
   "View directories not yet handed to a buffer that will clean them up.
-
-A directory is created when the download starts and passes to the
-buffer's `kill-buffer-hook' once one exists.  Every other outcome --- a
-failed or timed-out transfer, or an origin buffer killed mid-download,
-which suppresses the callbacks entirely --- would otherwise leave the
-object's bytes in the temporary directory.")
+The directory passes to the buffer's `kill-buffer-hook' once one
+exists.  Every other outcome -- a failed transfer, or an origin buffer
+killed mid-download, which suppresses the callbacks -- would otherwise
+leave the object's bytes behind.")
 
 (defun s3-manager--discard-directory (directory)
   "Delete DIRECTORY and its contents, reporting a failure rather than hiding it.
-Silence here would leave downloaded object bytes in the temporary
-directory while the package behaved as though it had cleaned up."
+Silence would leave object bytes in the temporary directory while the
+package behaved as though it had cleaned up."
   (condition-case err
       (delete-directory directory t)
     (error
@@ -70,25 +68,17 @@ suppresses the callbacks."
 
 (defun s3-manager--view-file-name (entry)
   "Return a safe leaf file name for viewing ENTRY.
-
-S3 keys are arbitrary strings and may legally be or contain \"..\", so
-the name is taken from the leaf only and rejected outright if it could
-name anything other than a file inside its own directory.  Building a
-path from a key directly would let one escape the temporary directory."
-  ;; `s3-manager--safe-leaf' is shared with the download paths, which face
-  ;; the same keys and the same `expand-file-name'.  It lived here first, and
-  ;; the download batch went without it for a release.
+Building a path from a key directly would let one escape the temporary
+directory: keys may legally be or contain \"..\"."
   (s3-manager--safe-leaf
    (s3-manager--leaf-of (s3-manager-entry-display-name entry))))
 
 (defun s3-manager--view-destination (entry)
   "Return a fresh temporary path to download ENTRY to.
-A directory of its own per view, so that objects of the same name in
-different prefixes cannot collide and the buffer keeps the object's own
-name."
-  ;; `file-name-concat' rather than `expand-file-name': it performs no tilde
-  ;; expansion, so the result cannot leave the directory even if the guard
-  ;; above is ever weakened.
+A directory of its own per view, so objects of the same name in
+different prefixes cannot collide."
+  ;; `file-name-concat' rather than `expand-file-name': no tilde expansion, so
+  ;; the result cannot leave the directory even if the guard above weakens.
   (let ((directory (file-name-as-directory
                     (make-temp-file "s3-manager-view-" t))))
     (push directory s3-manager--view-pending)
@@ -97,9 +87,8 @@ name."
 (defun s3-manager--view-cleanup ()
   "Delete the local copy behind the current buffer."
   (when s3-manager--view-file
-    ;; Recursive, so an auto-save or backup file landing beside the copy
-    ;; cannot leave the directory behind.  Only ever this view's own
-    ;; directory, which holds nothing else.
+    ;; The whole directory, so an auto-save or backup file landing beside the
+    ;; copy cannot keep it alive.  It holds nothing else.
     (s3-manager--view-discard (file-name-directory s3-manager--view-file))))
 
 (defun s3-manager--display-view (file uri)
@@ -126,7 +115,7 @@ name."
       (add-hook 'kill-buffer-hook #'s3-manager--view-cleanup nil t)
       (read-only-mode 1))
     ;; Same window, like `dired-find-file': `RET' is one key for both
-    ;; descending and viewing, so the two must not display differently.
+    ;; descending and viewing.
     (pop-to-buffer-same-window buffer)))
 
 (defun s3-manager-view ()

@@ -2367,14 +2367,6 @@ delete the object."
                   :type 'user-error))
   (should-not (s3-manager--check-destination "b" "a.png" "plain-bucket" "a.png" nil)))
 
-(ert-deftest s3-manager-test-key-leaf ()
-  (should (equal (s3-manager--key-leaf "a/b/c.txt") "c.txt"))
-  (should (equal (s3-manager--key-leaf "c.txt") "c.txt"))
-  ;; A prefix loses its trailing slash, which is what makes it appendable.
-  (should (equal (s3-manager--key-leaf "a/b/") "b"))
-  (should (equal (s3-manager--key-leaf "a/") "a"))
-  (should (equal (s3-manager--key-leaf "") "")))
-
 (ert-deftest s3-manager-test-get-args ()
   "The download argv, as a value, so it can be shown as well as run."
   (should (equal (s3-manager--get-args "s3://b/k" "/tmp/out")
@@ -2991,6 +2983,15 @@ was gone from S3, yet the row was still on screen."
 
 
 ;;;; Batch robustness
+
+(ert-deftest s3-manager-test-repeated-names-each-appear-once ()
+  "The clashing names go into a prompt, so each must be named once.
+Both call sites feed the result to `string-join', and a name repeated
+per occurrence would read as more collisions than there are."
+  (should (equal (s3-manager--repeated '("a" "b" "a" "c" "b" "a")) '("a" "b")))
+  (should (equal (s3-manager--repeated '("x.txt" "x.txt")) '("x.txt")))
+  (should (null (s3-manager--repeated '("a" "b" "c"))))
+  (should (null (s3-manager--repeated nil))))
 
 (ert-deftest s3-manager-test-dired-upload-refuses-duplicate-names ()
   "Two marked files with the same name would race on one key.
@@ -5580,15 +5581,15 @@ on top of it."
     (cl-letf (((symbol-function 'display-buffer) #'ignore)
               ((symbol-function 'message) #'ignore))
       ;; An endpoint carrying credentials is the case redaction exists for.
-      (s3-manager--show-command
-       '("aws" "--endpoint-url" "https://user:hunter2@minio.example.com"
-         "s3" "cp" "s3://b/k" "/tmp/o"))
+      (s3-manager--show-commands
+       '(("aws" "--endpoint-url" "https://user:hunter2@minio.example.com"
+          "s3" "cp" "s3://b/k" "/tmp/o")))
       (with-current-buffer s3-manager--command-buffer
         (should (string-match-p "no longer" (buffer-string)))
         (should-not (string-match-p "hunter2" (buffer-string))))
       (should-not (string-match-p "hunter2" (current-kill 0)))
       ;; An ordinary command carries no such warning.
-      (s3-manager--show-command '("aws" "s3" "cp" "s3://b/k" "/tmp/o"))
+      (s3-manager--show-commands '(("aws" "s3" "cp" "s3://b/k" "/tmp/o")))
       (with-current-buffer s3-manager--command-buffer
         (should-not (string-match-p "no longer" (buffer-string)))))))
 
@@ -5942,12 +5943,12 @@ carry the same key."
         (should (string-match-p "Run these in a terminal" (buffer-string)))
         (should (string-match-p "s3://b/three" (buffer-string)))))))
 
-(ert-deftest s3-manager-test-show-command-is-the-one-command-form ()
-  "The singular stays, so the four existing call sites are untouched."
+(ert-deftest s3-manager-test-one-command-gets-the-singular-heading ()
+  "A batch of one still reads as one."
   (let ((kill-ring nil))
     (cl-letf (((symbol-function 'display-buffer) #'ignore)
               ((symbol-function 'message) #'ignore))
-      (s3-manager--show-command '("aws" "s3" "ls" "s3://b/p/"))
+      (s3-manager--show-commands '(("aws" "s3" "ls" "s3://b/p/")))
       (should (equal (current-kill 0) "aws s3 ls s3://b/p/"))
       (with-current-buffer s3-manager--command-buffer
         (should (string-match-p "Run this in a terminal" (buffer-string)))))))

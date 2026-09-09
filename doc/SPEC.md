@@ -2022,6 +2022,20 @@ submission**: docstrings on every public symbol, a clean byte-compile with
 prefixing. `package-lint` and full `checkdoc` conformance are explicitly *not*
 gates for this release; §17 lists them as v0.2 work.
 
+**Where the reasoning lives.** A docstring states the rule; this document holds
+the measurement behind it. The split was made after v0.5.0, when prose had
+grown to 38% of the source — 1,104 lines of docstring and 536 of comment against roughly
+2,170 of code — most of it re-arguing decisions already argued here. A comment
+that *justifies a settled choice* belongs in a numbered section and is cited
+from the code by number. A comment that *warns against a plausible future edit*
+stays in the code, because that is where the edit will be made: detaching the
+sentinel before the kill in `s3-manager--cancel`, the entry struct taking no
+mutable state, the remote check preceding `file-directory-p`,
+`tabulated-list-format` not being set in the mode body.
+
+`checkdoc` is what stops this becoming deletion: it requires a docstring on
+every `defun`, so the target is one or two lines, never none.
+
 ---
 
 ## 15. Test plan
