@@ -11,8 +11,7 @@
 ;;; Commentary:
 
 ;; Marked batches, one object, or a whole prefix.  The recursive form can
-;; destroy an unbounded amount of data, so it demands a typed `yes' and offers
-;; a dry run first.
+;; destroy an unbounded amount of data, so it demands a typed `yes'.
 
 ;;; Code:
 
@@ -28,13 +27,10 @@
 
 (defun s3-manager--after-delete (&optional prefix)
   "Refresh after a deletion, invalidating the affected cache entries.
-With PREFIX, everything at or beneath it is dropped, which is what a
-recursive delete requires."
-  ;; The listing on screen has changed by definition, so drop it first.  A
-  ;; recursive delete does not imply this: the prefix removed sits *below*
-  ;; the listing showing it, so purging at-and-under the prefix leaves the
-  ;; parent cached and the refresh redisplays the prefix that no longer
-  ;; exists.
+With PREFIX, everything at or beneath it is dropped too."
+  ;; This listing first, and unconditionally: a removed prefix sits *below*
+  ;; the listing showing it, so purging at-and-under it alone would leave the
+  ;; parent cached and redisplay a prefix that no longer exists.
   (s3-manager--cache-invalidate (s3-manager--cache-key))
   (when prefix
     (s3-manager--cache-purge s3-manager--profile
@@ -70,9 +66,8 @@ recursive delete requires."
 
 (defun s3-manager--delete-payload (keys)
   "Return the --delete argument deleting KEYS.
-Built with `json-serialize', which escapes the quotes and newlines an S3
-key may legally contain; the result is one argv element, never shell
-input."
+`json-serialize' escapes the quotes and newlines a key may legally
+contain.  The result is one argv element, never shell input."
   (json-serialize
    (list (cons 'Objects
                (vconcat (mapcar (lambda (key) (list (cons 'Key key)))
@@ -142,27 +137,23 @@ input."
 
 (defun s3-manager--delete-prefix (prefix)
   "Delete every object under PREFIX, after emphatic confirmation."
-  ;; `yes-or-no-p', not `y-or-n-p': unbounded destruction must not be
-  ;; reachable by a single keystroke.  Recursive upload asks the same way, for
-  ;; the same reason -- it can overwrite just as many objects.
+  ;; `yes-or-no-p': unbounded destruction must not ride on one keystroke.
   (unless (yes-or-no-p
            (format "Recursively delete ALL objects under %s? "
                    (s3-manager--s3-uri prefix)))
     (user-error "Deletion aborted"))
   (message "S3: deleting everything under %s..." (s3-manager--s3-uri prefix))
   (s3-manager--aws-async
-   ;; `s3 rm --recursive' rather than one delete-object per key: the CLI
-   ;; batches server-side, and enumerating would be orders of magnitude
-   ;; slower.  --only-show-errors because it otherwise prints one line per
-   ;; object deleted, which on a large prefix is a million lines of stdout.
+   ;; `s3 rm --recursive' rather than a delete-object per key: the CLI batches
+   ;; server-side.  --only-show-errors, or a large prefix prints a million
+   ;; lines of stdout.
    (list "s3" "rm" (s3-manager--s3-uri prefix)
          "--recursive" "--only-show-errors")
    :profile s3-manager--profile
    :buffer (current-buffer)
    :parse nil
-   ;; Unbounded, like a transfer: `s3-manager-timeout' is measured from the
-   ;; start, so a large prefix was killed mid-delete and reported as a
-   ;; timeout for an operation that was working.
+   ;; Unbounded, like a transfer: `s3-manager-timeout' runs from the start, so
+   ;; a large prefix was killed mid-delete and reported as a timeout.
    :timeout s3-manager-transfer-timeout
    :name "s3-rm-recursive"
    :on-success (lambda (_output)

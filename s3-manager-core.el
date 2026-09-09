@@ -43,19 +43,9 @@ Takes precedence over `s3-manager-endpoint-url' for matching profiles."
 
 (defcustom s3-manager-page-size 1000
   "Number of entries fetched per listing request.
-
-Passed as `--max-keys', which is the S3 API's own MaxKeys and counts
-objects and prefixes together.
-
-The CLI's documented paging flags are not used, because `--max-items'
-counts only the primary result key.  A listing truncated by it reports
-*zero* CommonPrefixes and resuming never recovers them, so every
-directory silently disappears from a paginated listing.  Measured
-against a prefix holding three objects and one sub-prefix:
-`--max-items 3' returned the three objects, no prefixes, and a
-continuation token; following that token returned nothing further.
-`--max-keys 2' with `--continuation-token' returned all four across two
-pages."
+Passed as `--max-keys', which counts objects and prefixes together.
+`--max-items' cannot be used in its place: it drops CommonPrefixes.
+Measured in spec section 5.3.1."
   :type 'integer)
 
 (defcustom s3-manager-download-directory "~/Downloads/"
@@ -64,23 +54,17 @@ pages."
 
 (defcustom s3-manager-view-max-size (* 10 1024 1024)
   "Largest object, in bytes, that RET will open in a buffer.
-
-RET is the most frequently pressed key in the listing, so it must never
-be an unbounded operation.  Anything larger is refused with its size and
-a pointer at `s3-manager-get'."
+RET is the most frequently pressed key here, so it must never be
+unbounded.  Anything larger is refused with a pointer at
+`s3-manager-get'."
   :type 'integer)
 
 (defcustom s3-manager-large-transfer-size (* 100 1024 1024)
   "Transfers above this many bytes offer the command instead of running.
-
-Moving gigabytes is not something to start inside an editor you might
-quit, so above this size the transfer asks first, and one of the answers
-is the `aws' command line to paste into a terminal.
-
-A recursive transfer always asks, whatever this is: nothing here knows
-how much sits under a prefix, and a delimited listing cannot say.  Nil
-turns the whole offer off, recursive included -- it is the switch for
-someone who never wants the question."
+One answer to the offer is the `aws' command line to paste into a
+terminal.  A recursive transfer always asks, whatever this is: nothing
+here can know how much sits under a prefix.  Nil turns the offer off
+entirely, recursive included."
   :type '(choice (integer :tag "Bytes")
                  (const :tag "Never offer" nil)))
 
@@ -91,31 +75,25 @@ this only decides what is dropped when the cap is reached."
   :type 'integer)
 
 (defcustom s3-manager-timeout 120
-  "Seconds before an AWS CLI invocation is abandoned.
-Set to nil to wait indefinitely.
-
-Governs listings and other metadata calls.  Transfers use
+  "Seconds before a listing or other metadata call is abandoned.
+Set to nil to wait indefinitely.  Transfers use
 `s3-manager-transfer-timeout' instead; see why there."
   :type '(choice (const :tag "No timeout" nil) integer))
 
 (defcustom s3-manager-transfer-timeout nil
   "Seconds before a transfer is abandoned, or nil to wait indefinitely.
-Separate from `s3-manager-timeout': that timer runs for a total
-duration, not idle time, so any value kills a healthy transfer that is
-merely large -- measured, mid-progress.  The CLI's own connect and read
-timeouts still bound a transfer to a black hole."
+Nil by default because the timer measures total duration rather than
+idle time, so any value kills a healthy transfer that is merely large
+-- measured, mid-progress.  The CLI's own connect and read timeouts
+still bound a transfer to a black hole."
   :type '(choice (const :tag "No timeout" nil) integer))
 
 (defcustom s3-manager-upload-follow-symlinks t
   "Whether a recursive upload follows symbolic links.
-
-The AWS CLI follows them by default and does not detect cycles, so a
-link pointing at a large tree uploads that tree, and one pointing into
-its own parent does not terminate.  The default follows anyway, because
-silently *skipping* files the user asked to upload is the worse failure
-of the two, and `s3-manager-upload-dry-run' enumerates exactly what
-would be sent before a byte moves.  Set this to nil to pass
-`--no-follow-symlinks'."
+The CLI follows them by default and detects no cycles, so a link into
+its own parent does not terminate.  Following anyway is the lesser
+failure -- `s3-manager-upload-dry-run' shows what would be sent -- but
+set this to nil to pass `--no-follow-symlinks'."
   :type 'boolean)
 
 (defcustom s3-manager-display-errors t
@@ -132,10 +110,9 @@ older versions ignore it silently and send every request to AWS.")
 
 ;;;; Error conditions
 ;;
-;; Errors travel to callers through the ON-ERROR callback rather than by
-;; `signal', because a signal raised inside a process sentinel is swallowed by
-;; Emacs.  The conditions exist to give the error object a structured shape that
-;; callers can dispatch on and that `error-message-string' renders.
+;; Errors reach callers through ON-ERROR rather than by `signal': a signal
+;; raised inside a process sentinel is swallowed by Emacs.  The conditions give
+;; the error object a shape callers can dispatch on.
 
 (define-error 's3-manager-error "S3 Manager error")
 (define-error 's3-manager-cli-error "AWS CLI command failed"
@@ -164,9 +141,8 @@ N, which is what makes rapid navigation safe.  See spec section 4.6.")
 
 ;;;; Redaction
 ;;
-;; Credentials never reach the command line -- only a profile name and possibly
-;; an endpoint URL.  The realistic leak is an endpoint carrying embedded
-;; userinfo, plus whatever the service chooses to echo back in an error.
+;; Credentials never reach the command line.  The realistic leak is an endpoint
+;; carrying embedded userinfo, plus whatever the service echoes back.
 
 (defconst s3-manager--redactions
   '(("\\(://[^/@[:space:]]+\\):[^/@[:space:]]+@" . "\\1:***@")
@@ -182,8 +158,7 @@ N, which is what makes rapid navigation safe.  See spec section 4.6.")
 (defun s3-manager--endpoint-for (profile)
   "Return the endpoint URL override for PROFILE, or nil.
 `s3-manager-endpoint-alist' wins over `s3-manager-endpoint-url'.  Nil
-means no override: the CLI resolves the endpoint from its own
-configuration, which is the preferred arrangement."
+means the CLI resolves the endpoint itself, which is preferred."
   (or (and profile (cdr (assoc profile s3-manager-endpoint-alist)))
       s3-manager-endpoint-url))
 
@@ -201,9 +176,9 @@ configuration, which is the preferred arrangement."
 
 (defun s3-manager--quote-argv (argv)
   "Render ARGV as a shell command line, quoting only what needs it.
-Separate from `s3-manager--command-string' so that a caller can tell
-whether redaction changed anything: a masked command is not one the user
-can paste, and saying so beats handing over a plausible wrong one."
+Unredacted, unlike `s3-manager--command-string', so a caller can tell
+whether redaction changed anything -- a masked command is not one the
+user can paste."
   (mapconcat (lambda (a)
                (if (string-match-p "\\`[A-Za-z0-9_@%+=:,./-]+\\'" a)
                    a
@@ -258,12 +233,10 @@ ERR is (CONDITION COMMAND EXIT-CODE DETAIL)."
   "Append ERR to `s3-manager--error-buffer' without disturbing the user.
 CONTEXT, when given, is a short string naming the operation.
 
-The recording half of `s3-manager--report-error', separate so that a
-background probe the user did not ask for can still leave a trace
-instead of being dropped.  The buffer is appended to rather than
-replaced: the previous failure is often what explains this one, and the
-CLI's stderr is reproduced verbatim, line for line, because a summary
-of someone else's error message is a guess."
+The recording half of `s3-manager--report-error', so a probe the user
+did not ask for still leaves a trace.  Appended, not replaced: the
+previous failure often explains this one.  The CLI's stderr goes in
+verbatim -- summarising someone else's error message is a guess."
   (with-current-buffer (get-buffer-create s3-manager--error-buffer)
     (let ((inhibit-read-only t))
       (unless (derived-mode-p 'special-mode) (special-mode))
@@ -281,20 +254,18 @@ of someone else's error message is a guess."
 
 (defun s3-manager--local-error (context detail)
   "Return an error tuple describing a local failure in CONTEXT.
-DETAIL is the message.  Local failures have no exit code, but they are
-worth recording in the same place as the CLI's: a temporary directory
-that could not be removed is exactly as interesting as a refused
-request, and rather harder to notice."
+DETAIL is the message.  No exit code, but recorded beside the CLI's: a
+temporary directory that could not be removed is as interesting as a
+refused request and harder to notice."
   (list 's3-manager-error context nil detail))
 
 (defun s3-manager--report-error (err &optional context)
   "Record ERR in `s3-manager--error-buffer' and tell the user about it.
 CONTEXT, when given, is a short string naming the operation.
 
-The echo area gets a one-line summary that always names the buffer
-holding the detail, and the buffer itself is displayed when
-`s3-manager-display-errors' is non-nil -- in another window, the way
-`compile' surfaces a failure, never stealing the selected one."
+The echo-area summary always names the buffer holding the detail.  That
+buffer is displayed when `s3-manager-display-errors' is non-nil, in
+another window -- never stealing the selected one."
   (let ((buffer (s3-manager--record-error err context))
         (summary (s3-manager--summarize-error err)))
     (when s3-manager-display-errors
@@ -361,21 +332,19 @@ commit.")
 (defconst s3-manager--delete-char ?D
   "The deletion flag: the mark `s3-manager-execute' acts on, and nothing else.
 
-Deliberately not the same character as `s3-manager--mark-char'.  A mark
-is a noun and nothing in the table records a verb, so \"execute the
-marks\" has no referent: flagging is a deferred commitment to destroy,
-while marking is a selection for an operation named afterwards.  Conflate
-them and `x' deletes the objects someone selected in order to copy.")
+Never the same character as `s3-manager--mark-char'.  Nothing in the
+table records a verb, so \"execute the marks\" has no referent; conflate
+the two and `x' deletes objects someone selected in order to copy.
+See spec section 9.3.1.")
 
 (defvar-local s3-manager--marks nil
   "Hash table mapping an S3 key to the mark character it carries.
-Authoritative: `tabulated-list-print' erases the characters in the
-buffer, and its UPDATE argument leaves stale tags behind rather than
-preserving them, so marks are re-applied from here after every repaint.
+Authoritative: `tabulated-list-print' erases the buffer's own
+characters and its UPDATE argument leaves stale ones behind, so marks
+are re-applied from here after every repaint.
 
-The value is the character rather than a flag, so that a second kind of
-mark needs no second table and no second code path -- only a different
-character.  `tabulated-list-padding' is 2 for the same reason.")
+The value is the character, not a flag, so a second kind of mark needs
+no second table and no second code path.")
 
 (defun s3-manager--strip-prefix (key prefix)
   "Return KEY with PREFIX removed from its front."
@@ -389,19 +358,10 @@ Each of them names a directory rather than a file inside one.")
 
 (defun s3-manager--safe-leaf-p (name)
   "Return non-nil when NAME can only name a file inside its own directory.
-
-S3 keys are arbitrary strings, so a display name may legally be \"..\" or
-begin with a tilde -- and `expand-file-name' resolves both against
-something other than the directory it was handed.  Measured:
-
-    (expand-file-name \"..\"    \"/tmp/dl\") => \"/tmp\"
-    (expand-file-name \"~root\" \"/tmp/dl\") => \"/root\"
-    (expand-file-name \"~\"     \"/tmp/dl\") => the home directory
-
-A name that does either is not a leaf, whatever it looks like in the
-listing.  A slash is refused too: the delimiter means an object display
-name cannot contain one today, and this must not become the thing that
-has to be re-checked if that ever changes."
+S3 keys are arbitrary, so a display name may legally be \"..\" or start
+with a tilde, and `expand-file-name' resolves both somewhere other than
+the directory it was handed -- measured in spec section 11.4.  A slash
+is refused too, though the delimiter means one cannot appear today."
   (not (or (member name s3-manager--unsafe-leaf-names)
            (string-prefix-p "~" name)
            (string-search "/" name))))
@@ -413,9 +373,9 @@ A zero-byte directory-marker object can carry one."
 
 (defun s3-manager--safe-leaf (name)
   "Return NAME when `s3-manager--safe-leaf-p', else a fixed stand-in.
-For the callers that need *a* name rather than the right one.  A caller
-writing several files at once must refuse instead, or two unsafe names
-would collide on the stand-in."
+For a caller needing *a* name rather than the right one.  One writing
+several files at once must refuse instead: two unsafe names would
+collide on the stand-in."
   (if (s3-manager--safe-leaf-p name) name "s3-object"))
 
 (defun s3-manager--parent-prefix (prefix)
@@ -433,30 +393,24 @@ would collide on the stand-in."
 
 (defun s3-manager--format-date (timestamp)
   "Return the calendar date of ISO-8601 TIMESTAMP, or \"-\" if absent.
-
-S3 renders timestamps with a numeric offset rather than a Z suffix, for
-example \"2026-08-01T10:22:31+00:00\".  Only the date is displayed, so
-the leading ten characters are taken directly instead of parsing."
+Only the date is shown, so the leading ten characters are taken
+directly rather than parsed."
   (if (and (stringp timestamp) (>= (length timestamp) 10))
       (substring timestamp 0 10)
     "-"))
 
 (defun s3-manager--buffer-name (profile &optional bucket)
   "Return the buffer name for PROFILE, and BUCKET when given.
-
-One buffer per profile for the bucket list, and one per bucket for
-browsing it -- reused across prefixes, which is why the prefix appears
-in the header line rather than here."
+One buffer per profile for the bucket list, one per bucket for browsing
+it -- reused across prefixes, so the prefix is in the header line."
   (if bucket
       (format "*s3: %s/%s*" (or profile "default") bucket)
     (format "*s3: %s*" (or profile "default"))))
 
 (defun s3-manager--format-progress (line)
   "Condense an `aws s3' progress LINE for display in a mode line.
-
-The CLI emits lines like \"Completed 70.5 KiB/70.5 KiB (558.5 KiB/s)
-with 1 file(s) remaining\", which is far too long, so the transferred
-amount and the rate are pulled out of it."
+The CLI's own line is far too long, so only the transferred amount and
+the rate are kept."
   (if (string-match "\\`Completed \\([^(]*?\\) (\\([^)]*\\))" line)
       (format "%s %s" (string-trim (match-string 1 line))
               (match-string 2 line))
@@ -464,11 +418,9 @@ amount and the rate are pulled out of it."
 
 (defun s3-manager--quote-percent (string)
   "Return STRING safe to put in a mode line or header line.
-
-Those are format constructs, not literal text, so a `%' in an S3 key is
-interpreted: \"sale-50%-off.png\" renders `%-' as padding to the right
-margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
-`%' are commonplace, URL-encoded ones especially."
+Those are format constructs, so a `%' in a key is interpreted:
+\"sale-50%-off.png\" renders `%-' as padding to the right margin.  Keys
+containing `%' are commonplace, URL-encoded ones especially."
   (replace-regexp-in-string "%" "%%" string t t))
 
 (defun s3-manager--format-size (size)
@@ -486,12 +438,13 @@ margin and \"a%b.txt\" renders `%b' as the buffer name.  Keys containing
 (defun s3-manager--show-commands (argvs)
   "Put ARGVS' command lines in the kill ring, one per line, and display them.
 
-A batch is N commands, so handing over one of them would be a lie.  The
-block pastes into a shell as the sequence that would have run, in the
-order it would have run in.
+The block pastes into a shell as the sequence that would have run.  One
+kill, not N: `kill-new' per command would leave the user yanking them
+back one at a time in reverse.
 
-One kill, not N: `kill-new' per command would leave the user yanking
-them back one at a time in reverse."
+A masked command is flagged rather than handed over quietly.  Nothing
+here puts a credential on a command line, but an endpoint carrying
+`user:pass@host' is one, and the string is then no longer the command."
   (let* ((commands (mapconcat #'s3-manager--quote-argv argvs "\n"))
          (masked (s3-manager--redact commands))
          (total (length argvs)))
@@ -508,16 +461,10 @@ them back one at a time in reverse."
 
 (defun s3-manager--show-report (buffer heading body)
   "Display BODY under HEADING in BUFFER, replacing what was there.
-
-Replaced rather than appended, unlike `s3-manager--error-buffer': each
-of these buffers answers one question, and the previous answer described
-a different target.  An empty BODY is spelled out rather than left
-blank, because a blank buffer reads as a failure and the difference
-matters when the next keystroke acts on what this listed.
-
-`display-buffer', so the report appears without stealing the selected
-window -- the user is still in the listing and about to press something
-there."
+Replaced, not appended as `s3-manager--error-buffer' is: each of these
+answers one question about one target.  An empty BODY is spelled out,
+since a blank buffer reads as a failure.  `display-buffer' leaves the
+selected window alone -- the user is still in the listing."
   (with-current-buffer (get-buffer-create buffer)
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -543,14 +490,11 @@ there."
 
 (defun s3-manager--parse-uri (uri)
   "Return (BUCKET . KEY) for URI, or signal a `user-error'.
-KEY may be empty, meaning the bucket root; a caller needing an object
-says so itself.
+KEY may be empty, meaning the bucket root.
 
 Split rather than matched: a key may legally contain a newline, which
-`.' in an Emacs regexp does not match, and `s3-manager--delete-payload'
-already relies on keys being arbitrary.  Bucket naming is the
-endpoint's business -- this package exists for the S3-compatible ones --
-so only what would otherwise reach the CLI as a mystery is refused."
+`.' does not match.  Bucket naming is the endpoint's business, so only
+what would reach the CLI as a mystery is refused."
   (unless (string-prefix-p "s3://" uri)
     (user-error "Not an s3:// URI: %s" uri))
   (let* ((rest (substring uri 5))
@@ -568,27 +512,12 @@ so only what would otherwise reach the CLI as a mystery is refused."
 LEAF is the source's own last segment, DIRECTORY non-nil when the source
 is a prefix rather than an object.
 
-TYPED is honoured: what the prompt showed is what happens.  Only two
-things are normalised, and neither can change a key that was meant.
-
-An object aimed at a prefix -- empty, or ending in a slash -- goes into
-it under its own name, since an object key ending in a slash is a
-directory marker the listing drops as a phantom.  A prefix keeps its own
-name only if TYPED already carries it, which is why
-`s3-manager--key-into' writes it into what the user is offered rather
-than this appending it afterwards: a rename means TYPED exactly, and
-appending there would turn share/ -> archive/ into archive/share/.
-
-A prefix destination is always given a trailing slash.  That is
-load-bearing for `--recursive' -- measured, `s3 cp s3://a/share/
-s3://b/tree/ --recursive' maps share/README.md onto tree/README.md,
-dropping share's own name, the flattening `s3-manager--upload-key'
-compensates for -- and it is also what closes a measured hole in
-`s3 mv'.  Its refusal to move a key onto itself compares the two URIs as
-typed, so `s3 mv s3://b/share/ s3://b/share --recursive' walks past it
-and then maps every object onto itself.  Coercing here, before
-`s3-manager--check-destination' compares, is what makes that
-unreachable."
+TYPED is honoured -- what the prompt showed is what happens -- bar two
+normalisations neither of which can change a key that was meant: an
+object aimed at a prefix goes into it under LEAF, and a prefix
+destination always gains a trailing slash.  That slash is load-bearing
+for `--recursive' and for `s3 mv' own self-copy guard, which compares
+the two URIs as typed; both measured in spec section 11.10."
   (cond
    (directory
     (cond ((string-empty-p typed) typed) ; the bucket root, deliberately
@@ -600,21 +529,18 @@ unreachable."
 
 (defun s3-manager--key-into (prefix leaf)
   "Return the key placing LEAF inside PREFIX.
-The rule for \"copy this into that\", named once because two callers need
-it and they must not disagree: `C', which takes the other window's
-prefix without prompting, and the destination `c' offers for editing.
-`s3-manager--copy-key' deliberately does not do it -- a rename means the
+The rule for \"copy this into that\", shared by `C' and by the
+destination `c' offers for editing so the two cannot disagree.
+`s3-manager--copy-key' deliberately does not do it: a rename means the
 key as typed."
   (concat prefix leaf))
 
 (defun s3-manager--plain-bucket-p (bucket)
   "Return non-nil when BUCKET is a plain bucket name.
-An access point ARN or alias can resolve to the same underlying bucket
-under a different name, which no comparison of two strings can see --
-the CLI's own `s3 mv' documentation warns that a move between two such
-names can delete the object.  Refusing them is cheap and costs no API
-call; `--validate-same-s3-paths' is the alternative, and its availability
-at the AWS CLI 2.13.0 this package requires is not established."
+An access point ARN or alias can resolve to the same bucket under
+another name, which no string comparison can see -- and the CLI warns
+that an `s3 mv' between two such names can delete the object.  Refusing
+them costs no API call."
   (and (not (string-empty-p bucket))
        (not (string-search ":" bucket))
        (not (string-suffix-p "-s3alias" bucket))
@@ -627,9 +553,8 @@ SOURCE-BUCKET holds the source; DIRECTORY is non-nil for a recursive
 operation.  KEY has already been through `s3-manager--copy-key', which
 is what makes the comparison meaningful.
 
-Ours rather than the CLI's, in both directions: `s3 cp' onto its own
-source exits 0 having done nothing visible, and `s3 mv' exits 252 only
-for the spellings its string comparison happens to catch."
+Ours rather than the CLI's: `s3 cp' onto its own source exits 0 having
+done nothing, and `s3 mv' catches only some spellings of it."
   (unless (s3-manager--plain-bucket-p bucket)
     (user-error "Refusing an access point or ARN as a destination: %s" bucket))
   (when (equal bucket source-bucket)

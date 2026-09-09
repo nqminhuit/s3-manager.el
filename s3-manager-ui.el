@@ -24,10 +24,9 @@
 (require 's3-manager-process)
 (require 's3-manager-model)
 
-;; The keymap below binds commands that live in the files built on top of this
-;; one -- they operate on the buffer this file defines, so the dependency runs
-;; that way round and cannot be reversed.  Declared rather than reordered
-;; because a keymap is the one place a lower layer must name its callers.
+;; The keymap binds commands from the files built on top of this one: they act
+;; on the buffer defined here, so the dependency cannot be reversed.  A keymap
+;; is the one place a lower layer must name its callers.
 (declare-function s3-manager-copy "s3-manager-copy" ())
 (declare-function s3-manager-copy-to "s3-manager-copy" ())
 (declare-function s3-manager-rename "s3-manager-copy" ())
@@ -57,16 +56,10 @@
 
 (defun s3-manager--mark-summary ()
   "Return what this buffer's marks add up to, or nil when there are none.
-
-Counted through `s3-manager--entries-marked', the same reader every
-batch command uses, so the number shown cannot disagree with the number
-acted on -- a mark whose object has since gone from the listing is in
-neither.
-
-Shown at all because a mark is input to a command and can be scrolled
-off screen.  `s3-manager-execute' refuses an unflagged listing for the
-same reason: state nobody can see must not be state a command silently
-acts on."
+Counted through `s3-manager--entries-marked', the reader every batch
+command uses, so the number shown cannot disagree with the number acted
+on.  Shown at all because a mark is input to a command and can scroll
+off screen -- state nobody can see must not be state a command acts on."
   (let ((marked (length (s3-manager--entries-marked s3-manager--mark-char)))
         (flagged (length (s3-manager--entries-marked
                           s3-manager--delete-char))))
@@ -74,8 +67,8 @@ acts on."
       (string-join
        (delq nil
              (list (when (> marked 0) (format "%d marked" marked))
-                   ;; Named apart from the marks, as the two keys are: `x'
-                   ;; acts on this number and on no part of the other.
+                   ;; Named apart, as the two keys are: `x' acts on this
+                   ;; number and on no part of the other.
                    (when (> flagged 0) (format "%d flagged" flagged))))
        ", "))))
 
@@ -119,25 +112,19 @@ acts on."
 (defvar-keymap s3-manager-mode-map
   :doc "Keymap for `s3-manager-mode'."
   :parent tabulated-list-mode-map
-  ;; `q' arrives from `special-mode', so it is deliberately not rebound here.
+  ;; `q' arrives from `special-mode' and is deliberately not rebound.
   ;;
-  ;; `s3-manager-get' and `s3-manager-get-recursive' are deliberately not
-  ;; bound either.  `C' already falls back to them when no other window holds
-  ;; anything, so a key each would only buy forcing a download past a visible
-  ;; S3 listing -- and it would cost `G', which Evil users want for
-  ;; end-of-buffer.  Both remain available as `M-x'.
+  ;; Nor are `s3-manager-get' and `s3-manager-get-recursive': `C' falls back
+  ;; to them already, so a key each would only buy forcing a download past a
+  ;; visible listing, and it would cost `G'.  Both remain available as `M-x'.
   "RET" #'s3-manager-open
   "^" #'s3-manager-up
-  ;; `g' is a prefix, not a command, which is the shape `evil-collection'
-  ;; gives Dired: `gr' reverts there and `gg' is left to Evil.  Binding `g'
-  ;; itself would swallow `gg' -- this map is registered as overriding, so
-  ;; anything it resolves beats Evil, and an inherited `g' from
-  ;; `special-mode' does too.  `gg' is bound rather than left to Evil so that
-  ;; it also works without it.
+  ;; `g' is a prefix, not a command -- the shape `evil-collection' gives
+  ;; Dired.  Binding `g' itself would swallow `gg', which is bound here rather
+  ;; than left to Evil so that it works without Evil too.
   ;;
-  ;; Refresh is not left to `special-mode' -> `revert-buffer' either, whose
-  ;; first argument is IGNORE-AUTO, so `C-u' could never reach the
-  ;; whole-bucket purge.  `revert-buffer-function' still works for M-x.
+  ;; Refresh is not left to `revert-buffer' either: its first argument is
+  ;; IGNORE-AUTO, so `C-u' could never reach the whole-bucket purge.
   "g g" #'s3-manager-beginning-of-listing
   "g r" #'s3-manager-refresh
   "+" #'s3-manager-load-more
@@ -153,16 +140,14 @@ acts on."
   "P" #'s3-manager-upload
   "!" #'s3-manager-show-errors)
 
-;; Evil's state maps outrank a major-mode map, and its normal state binds
-;; nearly every key above, so without this the keymap is dead under Evil.  nil
-;; covers every state; unbound keys still reach Evil, and a user's own
-;; `evil-define-key' still outranks this.
+;; Evil's state maps outrank a major-mode map and its normal state binds nearly
+;; every key above, so without this the keymap is dead under Evil.  nil covers
+;; every state; unbound keys still reach Evil.
 ;;
-;; What this does NOT buy: precedence over an auxiliary map attached to another
-;; keymap.  Measured -- a user's `evil-define-key 'normal global-map "mhh"'
-;; makes `m' a global prefix, and that prefix outranks `m' here, so
-;; `s3-manager-mark' becomes unreachable while the other eighteen keys are
-;; fine.  See SPEC §18.9; the fix is the user's, as §11.9 has it.
+;; What it does NOT buy: precedence over an auxiliary map attached to another
+;; keymap.  A user's own `m' prefix in `global-map' outranks `m' here and makes
+;; `s3-manager-mark' unreachable -- measured, spec §18.9, and the fix is the
+;; user's own binding as §11.9 has it.
 (declare-function evil-make-overriding-map "evil-core"
                   (keymap &optional state copy))
 (with-eval-after-load 'evil
@@ -172,25 +157,20 @@ acts on."
   "Major mode for browsing S3 buckets and objects.
 
 \\{s3-manager-mode-map}"
-  ;; `tabulated-list-format' is deliberately NOT set here.  This one mode
-  ;; serves both the bucket list and the object browser, whose columns
-  ;; differ; each setup function installs its own layout and calls
-  ;; `tabulated-list-init-header'.  The variable is buffer-local, so the two
-  ;; cannot interfere.
+  ;; `tabulated-list-format' is deliberately NOT set here: one mode serves both
+  ;; the bucket list and the object browser, and each setup function installs
+  ;; its own layout.  The variable is buffer-local, so they cannot interfere.
   (setq tabulated-list-padding 2)  ; reserved for Dired-style marks
   (setq s3-manager--marks (make-hash-table :test #'equal))
-  ;; Render the column titles as the first line of the buffer instead of in
-  ;; the header line.  `tabulated-list-init-header' would otherwise claim
-  ;; `header-line-format', which this mode uses for the profile, the current
-  ;; s3:// path and the request status -- and the columns would vanish.
+  ;; Column titles go in the buffer, not the header line, which this mode
+  ;; spends on the profile, the s3:// path and the status.  See §9.3.3.
   (setq-local tabulated-list-use-header-line nil)
-  ;; `tabulated-list-mode' installs the synchronous `tabulated-list-revert',
-  ;; which would repaint stale rows and never re-fetch.  This must therefore
-  ;; be replaced after the parent's setup has run, i.e. here.
+  ;; Replaces the parent's synchronous `tabulated-list-revert', which would
+  ;; repaint stale rows and never re-fetch.  Must run after the parent's setup.
   (setq-local revert-buffer-function #'s3-manager--revert)
   (setq-local mode-line-process '(:eval (s3-manager--mode-line-status)))
-  ;; Without this, killing the buffer mid-request orphans an `aws' process
-  ;; that :noquery t stops Emacs from even asking about at exit.
+  ;; Killing the buffer mid-request would otherwise orphan an `aws' process
+  ;; that :noquery t stops Emacs even asking about at exit.
   (add-hook 'kill-buffer-hook #'s3-manager--cancel nil t))
 
 
@@ -223,17 +203,14 @@ this package did not create."
 (defconst s3-manager--bucket-list-format
   [("Created" 12 t) ("Name" 63 t)]
   "Column layout for the bucket list.
-
-Ordered like `s3-manager--object-list-format', and for the same reason:
-a bucket name may be up to 63 characters, so putting it first would
-misalign the date.  `Created' is an ISO-8601 date and therefore sorts
-correctly as a string.")
+Ordered like `s3-manager--object-list-format', for the same reason: a
+bucket name may run to 63 characters and would misalign the date.
+`Created' is ISO-8601, so it sorts correctly as a string.")
 
 (defun s3-manager--print-list ()
   "Print the list, restoring point to the row that was asked for.
 REMEMBER-POS matches the id already at point, which is useless when the
-whole listing is replaced -- so moving up supplies the row explicitly.
-It stays on for a by-key request, whose key may not be in the listing."
+whole listing is replaced, so moving up supplies the row explicitly."
   (let ((target s3-manager--restore-target)
         (key s3-manager--restore-key))
     (setq s3-manager--restore-target nil
@@ -249,9 +226,8 @@ It stays on for a by-key request, whose key may not be in the listing."
   (setq tabulated-list-entries
         (mapcar (lambda (bucket)
                   (let ((name (alist-get 'Name bucket)))
-                    ;; The bucket name is the entry id: it is what every
-                    ;; command on this buffer needs, and it is stable across
-                    ;; a re-sort so point survives one.
+                    ;; The bucket name is the entry id: what every command
+                    ;; here needs, and stable across a re-sort.
                     (list name
                           (vector (s3-manager--format-date
                                    (alist-get 'CreationDate bucket))
@@ -270,12 +246,11 @@ is the same request for a row whose entry cannot be synthesized in
 advance; TARGET wins when both are given."
   (unless (derived-mode-p 's3-manager-mode)
     (user-error "Not an S3 Manager buffer"))
-  ;; Abandon any request still in flight; this also advances the generation,
-  ;; so a response already on its way is dropped rather than rendered over
-  ;; the newer one.
+  ;; Also advances the generation, so a response already on its way is dropped
+  ;; rather than rendered over the newer one.
   (s3-manager--cancel)
-  ;; Both are set unconditionally, so the newest reload owns the slots and a
-  ;; request left over from an earlier one cannot fire on this listing.
+  ;; Both set unconditionally, so the newest reload owns the slots and an
+  ;; earlier request cannot fire on this listing.
   (setq s3-manager--restore-target target
         s3-manager--restore-key key)
   (let ((page (s3-manager--cache-get (s3-manager--cache-key))))
@@ -323,10 +298,9 @@ Accepts and ignores the three arguments `revert-buffer' supplies."
 
 (defun s3-manager-refresh (&optional whole-bucket)
   "Re-read the current listing from S3, bypassing the cache.
-
-`g' means \"I do not trust what I see\", so the cached copy of this
-prefix is dropped first.  With a prefix argument WHOLE-BUCKET, drop every
-cached prefix of this bucket -- for after something changed it wholesale."
+`g' means \"I do not trust what I see\", so this prefix's cached copy goes
+first.  With a prefix argument WHOLE-BUCKET, drop every cached prefix of
+the bucket."
   (interactive "P")
   (unless (derived-mode-p 's3-manager-mode)
     (user-error "Not an S3 Manager buffer"))
@@ -352,9 +326,9 @@ cached prefix of this bucket -- for after something changed it wholesale."
     (user-error "Still loading"))
   (let ((token s3-manager--next-token)
         (origin (current-buffer)))
-    ;; Deliberately not `s3-manager--cancel': that would advance the
-    ;; generation and there is nothing in flight worth killing.  Reuse the
-    ;; current generation so a stale page cannot append to a newer listing.
+    ;; Not `s3-manager--cancel': that advances the generation and there is
+    ;; nothing worth killing.  Reusing it stops a stale page appending to a
+    ;; newer listing.
     (s3-manager--set-status 'loading)
     (setq s3-manager--process
           (s3-manager--aws-async
@@ -397,13 +371,10 @@ TARGET, when given, is the bucket name to put point on once it lands."
    ("Modified" 12 s3-manager--sort-by-time)
    ("Name" 44 s3-manager--sort-by-name)]
   "Column layout for the object browser.
-
-Name comes last because `tabulated-list' does not truncate: a name
-wider than its column pushes everything after it out of alignment, and
-S3 keys are frequently long.  With the two fixed-width columns first,
-an overlong name can only run off the right-hand end, which costs
-nothing.  Truncating instead would hide the part of a file name that
-distinguishes it.")
+Name last because `tabulated-list' does not truncate: a name wider than
+its column pushes everything after it out of alignment, and S3 keys are
+often long.  With the fixed-width columns first it can only run off the
+right-hand end.")
 
 (defun s3-manager--directory-rank (entry)
   "Return a sort rank for ENTRY placing directories before objects."
@@ -411,11 +382,9 @@ distinguishes it.")
 
 (defun s3-manager--sort-by (a b accessor predicate)
   "Order rows A and B by ACCESSOR under PREDICATE, directories first.
-
-A and B are whole `tabulated-list-entries' elements.  Only their ids are
-read: with the UPDATE argument `tabulated-list-print' synthesizes the
-rest, and the displayed strings would sort wrongly anyway -- \"9 B\"
-comes after \"1.8 GiB\" lexicographically."
+A and B are whole `tabulated-list-entries' elements, but only their ids
+are read: the displayed strings sort wrongly -- \"9 B\" comes after
+\"1.8 GiB\" lexicographically."
   (let* ((ea (car a))
          (eb (car b))
          (ra (s3-manager--directory-rank ea))
@@ -474,7 +443,7 @@ from a truncated listing is ordinary, and jumping to the top is worse."
       (goto-char (point-min))
       (while (and (not found) (not (eobp)))
         (let ((id (tabulated-list-get-id)))
-          ;; Bucket-list ids are bare strings, not entries.
+          ;; Bucket-list ids are bare strings.
           (if (and (s3-manager-entry-p id)
                    (equal key (s3-manager-entry-key id)))
               (setq found (point))
@@ -489,13 +458,12 @@ is how `s3-manager-load-more' extends a truncated listing."
     (setq s3-manager--entries (if append
                                   (append s3-manager--entries new)
                                 new)
-          ;; Raw response, so this is S3's own cursor -- present exactly
-          ;; when IsTruncated is true.
+          ;; S3's own cursor, present exactly when IsTruncated is true.
           s3-manager--next-token (alist-get 'NextContinuationToken response)))
   (setq tabulated-list-entries
         (mapcar #'s3-manager--entry-row s3-manager--entries))
-  ;; Cache the accumulation, token included, so returning to a
-  ;; partly-loaded prefix resumes rather than starting over.
+  ;; Token included, so returning to a partly-loaded prefix resumes rather
+  ;; than starting over.
   (s3-manager--cache-put (s3-manager--cache-key)
                          tabulated-list-entries
                          s3-manager--entries
@@ -508,13 +476,10 @@ is how `s3-manager-load-more' extends a truncated listing."
   "Return the service arguments listing the current bucket and prefix.
 CONTINUATION-TOKEN, when given, resumes a truncated listing.
 
-`--no-paginate' turns off the CLI's own aggregation so that one
-invocation is exactly one S3 request, and `--max-keys' is the API's own
-MaxKeys.  See `s3-manager-page-size' for why the documented
-`--max-items' cannot be used: it drops CommonPrefixes."
+`--no-paginate' makes one invocation exactly one S3 request.  See
+`s3-manager-page-size' for why `--max-items' cannot replace `--max-keys'."
   (append (list "s3api" "list-objects-v2" "--bucket" s3-manager--bucket)
-          ;; Omitted entirely at the bucket root: an empty --prefix is
-          ;; accepted but says nothing.
+          ;; Omitted at the bucket root: an empty --prefix says nothing.
           (unless (string-empty-p s3-manager--prefix)
             (list "--prefix" s3-manager--prefix))
           (list "--delimiter" "/"
@@ -553,8 +518,8 @@ TARGET, when given, is the entry to put point on once the listing lands."
      ((null s3-manager--bucket)
       (pop-to-buffer-same-window (s3-manager--object-buffer s3-manager--profile id "")))
      ((eq (s3-manager-entry-type id) 'directory)
-      ;; Remember where we were so `s3-manager-up' can put point back on
-      ;; this row rather than at the top of the parent listing.
+      ;; So `s3-manager-up' can put point back on this row rather than at the
+      ;; top of the parent listing.
       (push (cons s3-manager--prefix id) s3-manager--history)
       (s3-manager--set-prefix (s3-manager-entry-key id))
       (s3-manager--reload))
@@ -563,16 +528,13 @@ TARGET, when given, is the entry to put point on once the listing lands."
 
 (defun s3-manager-beginning-of-listing (&optional count)
   "Move to the first row of the listing, or to line COUNT.
+Bound to `gg', and takes a count as Evil's own does, so `5gg' still goes
+to line 5.
 
-Bound to `gg', and it takes a count the way Evil's own `gg' does, so
-`5gg' still goes to line 5.
-
-Without a count it does not go to line 1, which is what
-`evil-goto-first-line' and `beginning-of-buffer' both do and what makes
-them wrong here: this mode sets `tabulated-list-use-header-line' to nil,
-spending the header line on the profile and prefix, so the column names
-are a real line in the buffer with no entry behind them.  Every command
-in this map refuses such a row, so landing there is landing nowhere."
+Without a count it does not go to line 1, which is what makes
+`beginning-of-buffer' wrong here: the column names are a real line in
+the buffer with no entry behind them, and every command in this map
+refuses such a row."
   (interactive "P")
   (goto-char (point-min))
   (if count
@@ -595,10 +557,9 @@ in this map refuses such a row, so landing there is landing nowhere."
     (let* ((parent (s3-manager--parent-prefix s3-manager--prefix))
            (remembered (and (equal (caar s3-manager--history) parent)
                             (cdr (pop s3-manager--history))))
-           ;; Arriving here by any route other than descending -- a refresh
-           ;; in the child, say -- leaves no history, so synthesize the entry
-           ;; we are returning to.  Structural `equal' on the struct is what
-           ;; makes the synthesized one match the real row.
+           ;; Arriving by any route but descending -- a refresh in the child,
+           ;; say -- leaves no history, so synthesize the entry.  Structural
+           ;; `equal' is what makes it match the real row.
            (target (or remembered
                        (s3-manager--directory-entry s3-manager--prefix
                                                     parent))))
@@ -609,26 +570,22 @@ in this map refuses such a row, so landing there is landing nowhere."
 ;;;; Marks
 ;;
 ;; The hash table is authoritative, not the characters in the buffer:
-;; `tabulated-list-print' erases everything, and its UPDATE argument is no
-;; help because it leaves *stale* tags on rows that did not change.  Marks are
-;; keyed by S3 key so they survive a re-sort, and they are stored outside the
-;; entry struct because that struct is an entry id compared with `equal' --
-;; mutating it would break point restoration.
+;; `tabulated-list-print' erases everything and its UPDATE argument leaves
+;; *stale* tags on unchanged rows.  Marks are keyed by S3 key so they survive
+;; a re-sort, and live outside the entry struct because that struct is an
+;; entry id compared with `equal'.
 
 (defun s3-manager--put-tag (mark &optional advance)
   "Write MARK, a character or nil, in the padding column.
-With ADVANCE, move down a line afterwards.  The one place that knows a
-mark renders as anything, so a second kind of mark needs no second
-literal."
+With ADVANCE, move down a line afterwards.  The one place that knows how
+a mark renders."
   (tabulated-list-put-tag (if mark (char-to-string mark) "") advance))
 
 (defun s3-manager--entries-marked (mark)
   "Return the objects carrying MARK, in listing order.
-
-Directories are excluded rather than merely never marked: a zero-byte
-object whose key ends in a slash appears in `Contents' as well as in
-`CommonPrefixes', so the table could hold one even though
-`s3-manager--markable-entry-at-point' refuses to put it there."
+Directories are filtered out rather than merely never marked: a
+zero-byte object whose key ends in a slash appears in `Contents' as well
+as `CommonPrefixes', so the table can hold one."
   (seq-filter (lambda (entry)
                 (and (eq (s3-manager-entry-type entry) 'object)
                      (eql mark (gethash (s3-manager-entry-key entry)
@@ -637,20 +594,17 @@ object whose key ends in a slash appears in `Contents' as well as in
 
 (defun s3-manager--marked-keys ()
   "Return the S3 keys flagged for deletion, in listing order.
-
-No fallback to the entry at point, unlike `s3-manager--marked-entries':
-`x' commits to what was flagged, so an unflagged listing must refuse
-rather than delete the row the cursor happens to be on."
+No fallback to point, unlike `s3-manager--marked-entries': `x' commits
+to what was flagged, so an unflagged listing must refuse rather than
+delete the row the cursor happens to be on."
   (mapcar #'s3-manager-entry-key
           (s3-manager--entries-marked s3-manager--delete-char)))
 
 (defun s3-manager--marked-entries ()
   "Return the marked objects, or the entry at point when none are marked.
-
-The fallback is the one `dired-get-marked-files' takes, and it is what
-lets one key mean both \"act on these\" and \"act on this\".  It returns whatever
-is at point, a prefix included, so the at-point behaviour of every
-caller is unchanged."
+`dired-get-marked-files' fallback, which is what lets one key mean both
+\"act on these\" and \"act on this\".  What is at point comes back
+whatever it is, a prefix included."
   (or (s3-manager--entries-marked s3-manager--mark-char)
       (list (s3-manager--entry-at-point))))
 
@@ -669,9 +623,8 @@ caller is unchanged."
 
 (defun s3-manager--clear-marks ()
   "Forget every mark in this buffer.
-Called whenever the prefix changes: marks name keys in one listing, and
-carrying them into another would leave invisible marks that `x' would
-nonetheless act on."
+Called whenever the prefix changes: carrying marks into another listing
+would leave invisible ones that `x' would still act on."
   (when s3-manager--marks (clrhash s3-manager--marks))
   (s3-manager--update-header-line))
 
@@ -694,16 +647,10 @@ nonetheless act on."
 
 (defun s3-manager--mark-hint (mark count)
   "Return the echo-area hint after COUNT objects carry MARK.
-
-A mark on its own answers nothing: the whole point of the general mark
-is that the operation is named *afterwards*, so the keys that name one
-have to be said out loud.  The header line carries the count; this
-carries what the count is for.
-
-Written with `substitute-command-keys' rather than with the characters
-spelled out, so a user who has rebound any of these -- and under Evil a
-global prefix can force exactly that for `m' -- is told their own key
-rather than ours."
+The operation a general mark feeds is named *afterwards*, so the keys
+that name one have to be said out loud.  `substitute-command-keys', not
+the characters spelled out, so a user who has rebound any of them --
+which under Evil a global prefix can force for `m' -- is told their own."
   (substitute-command-keys
    (if (eql mark s3-manager--delete-char)
        (format "%d flagged -- \\[s3-manager-execute] deletes, \\[s3-manager-unmark] unmarks"
@@ -756,8 +703,8 @@ The transfer commands act on this mark; `s3-manager-execute' does not."
 
 (defun s3-manager--entry-at-point ()
   "Return the entry on the current line, or signal a `user-error'.
-The only supported way for a command to obtain an entry: rows such as a
-placeholder carry a nil id, and every command must refuse them."
+The only supported way to obtain one: a placeholder row carries a nil
+id, and every command must refuse it."
   (or (tabulated-list-get-id)
       (user-error "No S3 entry on this line")))
 

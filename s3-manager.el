@@ -37,7 +37,8 @@
 ;; Requires AWS CLI 2.13.0 or newer -- earlier releases silently ignore
 ;; `endpoint_url' in ~/.aws/config and send every request to AWS.
 ;;
-;; doc/SPEC.md is the design document; the code refers to its sections.
+;; doc/SPEC.md is the design document.  Where a choice here needed measuring
+;; rather than reasoning, the reason is recorded there and named by section.
 
 ;;; Code:
 
@@ -70,16 +71,12 @@ and ask the AWS CLI for it again."
   "Choose a different AWS profile and show its buckets.
 
 Opens the chosen profile's bucket list rather than re-pointing this
-buffer: buffer names carry the profile, and a bucket present under one
-profile need not exist under another.
-
-Listings cached for the profile being left are dropped.  They cannot be
-served wrongly -- the cache key includes the profile -- but a profile
-switch usually means that account is no longer what is being worked on,
-so keeping them only costs room in a capped table.
+buffer: buffer names carry the profile.  Listings cached for the profile
+being left are dropped -- they could never be served wrongly, the cache
+key includes the profile, but they only cost room in a capped table.
 
 With a prefix argument REREAD-PROFILES, ask the CLI for the profile list
-again first, for a profile added since the list was cached."
+again first."
   (interactive "P")
   (s3-manager--check-executable)
   (s3-manager--check-version)

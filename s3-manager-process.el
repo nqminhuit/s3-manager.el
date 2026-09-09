@@ -23,22 +23,19 @@
 
 (defvar s3-manager--cli-version nil
   "Cons of (PROGRAM . VERSION) from the last successful version probe.
-Only successes are cached, and only for the program they were probed
-with: the remedy `s3-manager--check-cli' suggests is to install the CLI
-or change `s3-manager-aws-program', and caching the failure would make
-both ineffective until Emacs restarted.")
+Successes only, and only for the program probed: the remedy for a
+failure is to install the CLI or change `s3-manager-aws-program', and a
+cached failure would make both ineffective until restart.")
 
 
 ;;;; AWS CLI discovery
 
 (defun s3-manager--safe-directory ()
   "Return a guaranteed-local, guaranteed-existing directory.
-
-Subprocesses are created with `default-directory' bound to this.  A
-remote `default-directory' would leave the subprocess running in $HOME
-with no warning, and a deleted one makes `make-process' signal
-`file-missing'.  Note that locality of execution is guaranteed by using
-`make-process' without :file-handler, not by this binding."
+Subprocesses bind `default-directory' to this: a remote one would run
+the subprocess in $HOME without a word, and a deleted one makes
+`make-process' signal `file-missing'.  Locality of execution comes from
+`make-process' without :file-handler, not from this binding."
   (if (and default-directory
            (not (file-remote-p default-directory))
            (file-accessible-directory-p default-directory))
@@ -55,10 +52,9 @@ with no warning, and a deleted one makes `make-process' signal
                'missing
              (with-temp-buffer
                (let ((default-directory (s3-manager--safe-directory)))
-                 ;; The one synchronous invocation in the package: local, fast,
-                 ;; and everything else depends on its answer.  `call-process'
-                 ;; returns a string when the child is signalled and nil under
-                 ;; `ignore-errors', so compare rather than use `zerop'.
+                 ;; `call-process' returns a string when the child is signalled
+                 ;; and nil under `ignore-errors', so compare rather than
+                 ;; `zerop'.
                  (if (and (eql 0 (ignore-errors
                                    (call-process s3-manager-aws-program
                                                  nil t nil "--version")))
@@ -90,8 +86,8 @@ Synchronous, and therefore not used on the interactive path: see
 
 (defun s3-manager--check-executable ()
   "Signal a `user-error' unless the AWS CLI is on PATH.
-Presence only: `aws --version' costs 0.55s of Python startup, so the
-version is confirmed asynchronously by `s3-manager--check-version'."
+Presence only: `aws --version' costs 0.55s of Python startup, so
+`s3-manager--check-version' confirms the version asynchronously."
   (unless (executable-find s3-manager-aws-program)
     (user-error
      "S3 Manager: AWS CLI not found (%s).  Install AWS CLI v2, or set `s3-manager-aws-program'"
@@ -119,10 +115,9 @@ Runs at most once per session for a given `s3-manager-aws-program'."
               (format "AWS CLI %s is older than %s: `endpoint_url' in ~/.aws/config is ignored, so requests go to AWS rather than your configured endpoint"
                       version s3-manager-minimum-cli-version)
               :warning)))))
-     ;; A failed probe is not worth interrupting the user for -- the command
-     ;; they actually asked for will report its own errors -- but it must not
-     ;; vanish either, or there is no way to find out why the version warning
-     ;; never appeared.  Recorded, not reported.
+     ;; Recorded, not reported: a failed probe is not worth interrupting for,
+     ;; but it must not vanish either, or there is no way to find out why the
+     ;; version warning never appeared.
      :on-error (lambda (err)
                  (s3-manager--record-error err "aws --version")))))
 
@@ -131,13 +126,11 @@ Runs at most once per session for a given `s3-manager-aws-program'."
 
 (defun s3-manager--base-args (profile)
   "Return the global AWS CLI arguments for PROFILE.
-
 PROFILE may be nil, meaning the CLI's own default profile.
 
-`--no-cli-pager' and `--no-cli-auto-prompt' are unconditional.  Neither
-should trigger when stdout is a pipe, but a user configuration enabling
-the pager or auto-prompt turns an invocation into an unrecoverable hang,
-and these two strings cost nothing."
+`--no-cli-pager' and `--no-cli-auto-prompt' are unconditional: neither
+should trigger on a pipe, but a user configuration that enables either
+turns an invocation into an unrecoverable hang."
   (append (when profile (list "--profile" profile))
           (when-let* ((url (s3-manager--endpoint-for profile)))
             (list "--endpoint-url" url))
@@ -145,19 +138,17 @@ and these two strings cost nothing."
 
 (defun s3-manager--full-argv (profile args)
   "Return the complete argument vector for ARGS under PROFILE.
-The program itself and the global flags included, so what this returns
-is what runs.  `s3-manager--aws-async' builds its vector with this, and
-so does anything that shows the user a command to paste: a shown command
-that differed from the run one would be worse than showing none."
+Program and global flags included, so what this returns is what runs.
+Anything showing the user a command to paste builds it with this too --
+a shown command differing from the run one is worse than none."
   (cons s3-manager-aws-program
         (append (s3-manager--base-args profile) args)))
 
 (defun s3-manager--command-string (argv)
   "Render ARGV as a redacted, human-readable command line.
-
-The package never executes this string.  It is quoted anyway, because it
-is shown to the user in `s3-manager--error-buffer' and the natural next
-step is to paste it into a shell to reproduce the failure."
+Never executed, but quoted anyway: it appears in
+`s3-manager--error-buffer', and the natural next step is to paste it
+into a shell to reproduce the failure."
   (s3-manager--redact (s3-manager--quote-argv argv)))
 
 
@@ -165,15 +156,12 @@ step is to paste it into a shell to reproduce the failure."
 
 (defun s3-manager--parse-json (buffer)
   "Parse BUFFER as the JSON payload of one AWS CLI invocation.
+An empty buffer yields nil: a prefix matching nothing produces no output
+at all, and that is a listing of zero objects, not a failure.
 
-An empty buffer yields nil rather than an error: a prefix matching
-nothing produces no output at all, and that is a successful listing of
-zero objects, not a failure.
-
-Objects become alists with symbol keys.  JSON null and false both become
-nil, so an absent key, a null and an empty collection are
-indistinguishable -- which is what every call site in this package
-wants."
+Objects become alists with symbol keys, and null and false both become
+nil -- so an absent key, a null and an empty collection cannot be told
+apart, which is what every call site here wants."
   (with-current-buffer buffer
     (goto-char (point-min))
     (unless (looking-at-p "\\`[ \t\n\r]*\\'")
@@ -187,17 +175,15 @@ wants."
 
 (defun s3-manager--safe-funcall (fn arg what)
   "Call FN with ARG, reporting rather than losing any error it signals.
-
-Callbacks run from a process sentinel, and a signal raised in a sentinel
-is discarded by Emacs: the request would simply appear to hang forever.
-WHAT names the callback for the report."
+Callbacks run from a process sentinel, and Emacs discards a signal
+raised there: the request would appear to hang forever.  WHAT names the
+callback for the report."
   (when fn
     (condition-case err
         (funcall fn arg)
       (error
-       ;; Recorded as well as messaged: this is a bug in the package rather
-       ;; than a service failure, and an echo-area line about it is gone by
-       ;; the next keystroke.
+       ;; Recorded as well as messaged: this is our bug, not the service's,
+       ;; and an echo-area line is gone by the next keystroke.
        (s3-manager--record-error
         (s3-manager--local-error (format "%s callback" what)
                                  (error-message-string err))
@@ -227,17 +213,15 @@ started."
   "Abandon this buffer's in-flight request without running its callbacks."
   (let ((proc s3-manager--process))
     (setq s3-manager--process nil)
-    ;; Bump the generation even when there is no process to kill.  Dispatch
-    ;; waits for both the process and its stderr pipe, so a request can be
-    ;; past its main sentinel and still pending; the generation guard is what
-    ;; covers that window.
+    ;; Bumped even with no process to kill: dispatch waits for the stderr pipe
+    ;; too, so a request can be past its main sentinel and still pending.
     (cl-incf s3-manager--generation)
     (when proc
-      ;; Detach the sentinels *before* killing, or the kill is delivered as a
-      ;; failure and the user gets an error report for a request they
-      ;; deliberately abandoned.  Emacs looks the sentinel up at delivery time,
-      ;; so replacing it wins even if the process has already exited -- which
-      ;; is precisely the case this guards, so do not test `process-live-p'.
+      ;; Detach the sentinels *before* killing, or the kill arrives as a
+      ;; failure and reports an error for a request the user abandoned.  Emacs
+      ;; resolves the sentinel at delivery time, so this wins even after the
+      ;; process has exited -- which is the case being guarded.  Do not add a
+      ;; `process-live-p' test here.
       (when-let* ((errproc (process-get proc 's3-stderr-process)))
         (set-process-sentinel errproc #'ignore)
         (set-process-filter errproc #'ignore))
@@ -255,14 +239,13 @@ A nil GENERATION means the caller opted out of staleness checking."
 
 (defun s3-manager--make-progress-filter (callback buffer generation)
   "Return a process filter delivering progress segments to CALLBACK.
+CALLBACK runs in BUFFER, and only while BUFFER is at GENERATION, so a
+transfer whose origin moved on stops repainting it.
 
-CALLBACK runs in BUFFER, and only while BUFFER is still at GENERATION,
-so a transfer whose origin has moved on stops repainting it.
-
-The AWS CLI overwrites a single progress line using carriage returns, so
-input is split on both delimiters and only the final segment is
-reported.  Chunk boundaries do not align with segment boundaries, so an
-unterminated tail is carried into the next call."
+The CLI overwrites one progress line with carriage returns, so input is
+split on both delimiters and only the last segment reported.  Chunk
+boundaries do not align with segment boundaries, so an unterminated tail
+carries into the next call."
   (let ((carry ""))
     (lambda (proc chunk)
       ;; Keep the buffer contents intact for error reporting.
@@ -273,10 +256,10 @@ unterminated tail is carried into the next call."
       (let* ((segments (split-string (concat carry chunk) "[\r\n]"))
              (complete (butlast segments)))
         (setq carry (car (last segments)))
-        ;; Report the trailing partial segment too.  Progress lines overwrite
-        ;; one another, so a briefly truncated line costs nothing, whereas
-        ;; holding it back drops the final segment entirely when the CLI does
-        ;; not terminate it.
+        ;; The trailing partial segment counts too: progress lines overwrite
+        ;; one another, so a briefly truncated one costs nothing, while
+        ;; holding it back loses the last segment when the CLI leaves it
+        ;; unterminated.
         (when-let* ((latest (car (last (seq-remove #'string-empty-p
                                                   (append complete
                                                           (list carry)))))))
@@ -292,10 +275,10 @@ unterminated tail is carried into the next call."
                                  (timeout s3-manager-timeout))
   "Run the AWS CLI with ARGS asynchronously.  Return the process.
 
-ARGS is the service invocation only, e.g. (\"s3api\" \"list-buckets\");
-PROFILE's global flags are prepended here so (car ARGS) is always the
-service name, which is what exit codes 1 and 2 are classified against.
-It is an argument vector -- no shell -- so quote nothing.
+ARGS is the service invocation only, e.g. (\"s3api\" \"list-buckets\").
+PROFILE's global flags are prepended here, so (car ARGS) is always the
+service name -- which is what exit codes 1 and 2 are classified against.
+It is an argument vector, so quote nothing.
 
 REGISTER records the process for `s3-manager--cancel'.  Listings pass
 it; transfers must not, or navigating away would abort a download.
@@ -340,10 +323,10 @@ TIMEOUT is seconds, or nil to wait indefinitely."
                     (or on-error #'s3-manager--report-error) err "on-error")
                  (s3-manager--safe-funcall on-success payload "on-success")))))
          (dispatch ()
-           ;; Runs only once both the process and its stderr pipe have
-           ;; finished.  Their sentinels fire in an order that varies from run
-           ;; to run, so dispatching from the main sentinel alone would report
-           ;; an empty stderr for exactly the failures stderr exists to report.
+           ;; Only once both the process and its stderr pipe have finished.
+           ;; Their sentinels fire in an order that varies run to run, so
+           ;; dispatching from the main one alone would report an empty stderr
+           ;; for exactly the failures stderr exists to report.
            (when (and main-done stderr-done (not dispatched))
              (setq dispatched t)
              (let ((stderr (s3-manager--redact (text stderr-buffer)))
@@ -351,9 +334,8 @@ TIMEOUT is seconds, or nil to wait indefinitely."
                (unwind-protect
                    (cond
                     ;; Killed by a signal.  `process-exit-status' then returns
-                    ;; the signal number, which is not an AWS CLI exit code:
-                    ;; reading it as one would report SIGHUP and SIGINT as the
-                    ;; "partial success" codes 1 and 2.
+                    ;; the signal number, not an exit code: read as one, SIGHUP
+                    ;; and SIGINT become the "partial success" codes 1 and 2.
                     (exit-signalled
                      (deliver (list 's3-manager-cli-error command
                                     (format "signal %s" exit-code)
@@ -363,12 +345,11 @@ TIMEOUT is seconds, or nil to wait indefinitely."
                                       stderr))
                               nil))
                     ((eql exit-code 130)
-                     ;; The CLI's SIGINT status.  Not our own cancel, which
-                     ;; detaches sentinels before killing, so this is a real
-                     ;; interruption from outside.  Delivered as a failure
-                     ;; rather than swallowed: callers release their state on
-                     ;; that path, and returning here without it left
-                     ;; transfers counted forever and listings stuck loading.
+                     ;; The CLI's SIGINT status -- not our own cancel, which
+                     ;; detaches sentinels first.  Delivered as a failure, not
+                     ;; swallowed: callers release their state on that path,
+                     ;; and skipping it left transfers counted forever and
+                     ;; listings stuck loading.
                      (message "S3: interrupted (%s)" (car args))
                      (deliver (list 's3-manager-cli-error command exit-code
                                     (if (string-empty-p stderr)
@@ -398,9 +379,9 @@ TIMEOUT is seconds, or nil to wait indefinitely."
                    (with-current-buffer origin (setq s3-manager--process nil)))
                  (s3-manager--cleanup proc))))))
       ;; Explicit pipe and sentinel: a buffer for :stderr, or no sentinel,
-      ;; makes Emacs insert "Process ... finished" into the text we report
-      ;; verbatim.  :coding is not inherited and must be spelled out, or CRs
-      ;; become newlines and progress parsing breaks.
+      ;; makes Emacs insert "Process ... finished" into text we report
+      ;; verbatim.  :coding is not inherited -- without it CRs become newlines
+      ;; and progress parsing breaks.
       (setq stderr-proc
             (make-pipe-process
              :name (format " *%s-stderr*" label)
@@ -454,10 +435,9 @@ TIMEOUT is seconds, or nil to wait indefinitely."
          (run-at-time
           timeout nil
           (lambda ()
-            ;; Guard on the dispatch flag, not on process liveness.  If the
-            ;; CLI exits while a grandchild holds its stderr open, the pipe
-            ;; never closes, the barrier never completes, and this timer is
-            ;; the only thing left to release the request.
+            ;; The dispatch flag, not process liveness: if the CLI exits while
+            ;; a grandchild holds its stderr open the pipe never closes, the
+            ;; barrier never completes, and this timer is all that is left.
             (unless dispatched
               (let ((command (s3-manager--command-string argv)))
                 (set-process-sentinel proc #'ignore)
@@ -478,20 +458,18 @@ TIMEOUT is seconds, or nil to wait indefinitely."
 
 ;;;; Profiles
 ;;
-;; The package never reads ~/.aws itself.  It asks the CLI for the profile
-;; names and passes the chosen one back with --profile; credentials are the
-;; CLI's business throughout.
+;; ~/.aws is never read here.  The CLI is asked for the profile names and the
+;; chosen one goes back with --profile; credentials stay its business.
 
 (defvar s3-manager--profiles nil
   "Cached list of AWS CLI profile names, or nil if not yet discovered.
-An empty result is deliberately not cached: the natural response to
-\"no profiles found\" is to run `aws configure', and the next attempt
-should see the result of having done so.")
+An empty result is never cached: the natural response to \"no profiles
+found\" is to run `aws configure', and the next attempt should see it.")
 
 (defvar s3-manager--profiles-waiting nil
   "Callbacks awaiting the in-flight profile discovery.
-Non-nil also means a discovery is running, so concurrent callers share
-one subprocess and produce one prompt rather than several.")
+Non-nil also means one is running, so concurrent callers share a
+subprocess and produce one prompt.")
 
 (defvar s3-manager--profile-history nil
   "Minibuffer history of chosen AWS profiles.")
@@ -503,9 +481,9 @@ one subprocess and produce one prompt rather than several.")
           s3-manager--profiles profiles)
     (if err
         (s3-manager--report-error err "configure list-profiles")
-      ;; Leave the sentinel before running callbacks.  They prompt, and
-      ;; `completing-read' inside a process sentinel reenters the minibuffer
-      ;; from arbitrary points in whatever Emacs was doing at the time.
+      ;; Leave the sentinel before running callbacks: they prompt, and
+      ;; `completing-read' in a sentinel reenters the minibuffer from
+      ;; wherever Emacs happened to be.
       (run-at-time
        0 nil
        (lambda ()
@@ -514,10 +492,8 @@ one subprocess and produce one prompt rather than several.")
 
 (defun s3-manager--with-profiles (callback)
   "Call CALLBACK with the list of AWS profile names.
-
-CALLBACK runs immediately when the list is already known, and otherwise
-from a timer once the CLI has answered -- never from inside the process
-sentinel, so it is safe for it to prompt."
+Immediately when the list is known, otherwise from a timer once the CLI
+has answered -- never from the sentinel, so it is safe to prompt."
   (cond
    (s3-manager--profiles (funcall callback s3-manager--profiles))
    (s3-manager--profiles-waiting (push callback s3-manager--profiles-waiting))
@@ -534,12 +510,9 @@ sentinel, so it is safe for it to prompt."
 
 (defun s3-manager-read-profile (callback)
   "Prompt for an AWS profile and call CALLBACK with the chosen name.
-
-Does nothing but report when no profiles are configured.  The default is
-the most recently chosen profile, so repeat use is a single RET.
-
-The prompt names `s3-manager-forget-profiles': the list is cached for
-the session, so a profile added to ~/.aws since then is absent."
+Reports and does nothing when none are configured.  The default is the
+last profile chosen, so repeat use is one RET.  The prompt names
+`s3-manager-forget-profiles', since the list is cached for the session."
   (s3-manager--with-profiles
    (lambda (profiles)
      (if (null profiles)

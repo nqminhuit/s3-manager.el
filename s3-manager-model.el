@@ -27,17 +27,15 @@
                                 (:copier nil))
   "One row of an S3 listing: a prefix or an object.
 
-IMPORTANT: instances are used directly as `tabulated-list' entry ids and
-are compared with `equal', which on records is structural rather than
-identity-based.  Every slot must therefore be a pure function of the S3
-response.  Never add mutable state -- a mark, a download progress
-figure, a fetch timestamp -- because changing any slot changes the
-entry's identity, and point restoration across a refresh silently stops
-working.  Marks live in a separate table for exactly this reason.
+IMPORTANT: instances are `tabulated-list' entry ids, compared with
+`equal'.  Never add mutable state -- a mark, a progress figure, a fetch
+timestamp -- because changing a slot changes the entry's identity and
+point restoration across a refresh silently stops working.  Marks live
+in a separate table for this reason.
 
-Restoring point after `s3-manager-up' relies on a synthesized directory
-entry comparing `equal' to the real one, so directory entries must leave
-SIZE, LAST-MODIFIED and STORAGE-CLASS nil."
+`s3-manager-up' synthesizes a directory entry and relies on it comparing
+`equal' to the real one, so directory entries leave SIZE, LAST-MODIFIED
+and STORAGE-CLASS nil."
   type            ; `directory' or `object'
   key             ; full S3 key; a directory's key ends in "/"
   display-name    ; KEY with the parent prefix removed
@@ -57,9 +55,8 @@ they are compared with `equal'."
 
 (defun s3-manager--entries-from-listing (response prefix)
   "Convert a `list-objects-v2' RESPONSE taken at PREFIX into entries.
-
-`CommonPrefixes' and `Contents' are both absent rather than empty when
-they do not apply, so neither key may be assumed to exist."
+`CommonPrefixes' and `Contents' are absent rather than empty when they
+do not apply, so neither key may be assumed to exist."
   (append
    (mapcar (lambda (common)
              (s3-manager--directory-entry (alist-get 'Prefix common) prefix))
@@ -83,13 +80,11 @@ they do not apply, so neither key may be assumed to exist."
 ;;;; Listing cache
 ;;
 ;; Keyed on the resolved endpoint as well as the profile: the same bucket name
-;; on MinIO and on AWS are different buckets, and conflating them would be a
-;; correctness bug for exactly the S3-compatible case this package exists for.
+;; on MinIO and on AWS are different buckets.
 ;;
-;; Invalidation is explicit only.  Nothing expires on a timer, because a UI
-;; that disagrees with itself depending on wall-clock time is worse than one
-;; that is stale until asked -- and `g' is one keystroke, which is the
-;; convention every other Emacs listing follows.
+;; Invalidation is explicit only.  A listing that disagrees with itself
+;; depending on wall-clock time is worse than one stale until asked, and `g'
+;; is one keystroke.
 
 (cl-defstruct (s3-manager-page (:constructor s3-manager-page--create)
                                (:copier nil))
@@ -101,15 +96,13 @@ they do not apply, so neither key may be assumed to exist."
 
 (defvar s3-manager--cache (make-hash-table :test #'equal)
   "Maps (PROFILE ENDPOINT BUCKET PREFIX) to a `s3-manager-page'.
-
-Global rather than buffer-local so that quitting a listing and coming
-back is instant, which is the most common thing a user does with one.")
+Global rather than buffer-local, so quitting a listing and coming back
+is instant.")
 
 (defun s3-manager--cache-key-for (profile bucket prefix)
   "Return the cache key for PREFIX in BUCKET under PROFILE.
-The shape lives here alone, so a listing cached from one buffer is
-found from another -- which a copy's destination needs, since it may be
-a bucket this buffer is not showing."
+The shape lives here alone, so a listing cached from one buffer is found
+from another -- which a copy's destination needs."
   (list profile (s3-manager--endpoint-for profile) bucket prefix))
 
 (defun s3-manager--cache-key (&optional prefix)

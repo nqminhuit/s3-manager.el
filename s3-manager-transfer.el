@@ -26,9 +26,9 @@
 
 ;;;; Transfers
 ;;
-;; Bytes move with `aws s3 cp' rather than `s3api get-object': it performs a
-;; multipart parallel download above 8MB, reports progress, and preserves the
-;; object's modification time, none of which get-object does.
+;; Bytes move with `aws s3 cp' rather than `s3api get-object': it does
+;; multipart above 8MB, reports progress, and preserves the object's
+;; modification time, none of which get-object does.
 
 (declare-function dired-dwim-target-directory "dired-aux" ())
 
@@ -42,11 +42,9 @@ works in both directions; otherwise `s3-manager-download-directory'."
 
 (defun s3-manager--dwim-directory ()
   "Return a Dired directory visible in another window, or nil.
-
-`dired-dwim-target-directory' is documented for exactly this -- its own
-comment says a non-Dired buffer may want to profit from it -- and it
-returns nil when the user has turned `dired-dwim-target' off, so this
-follows their setting rather than imposing one."
+`dired-dwim-target-directory' is documented for exactly this, and it
+returns nil when `dired-dwim-target' is off -- so this follows the
+user's setting rather than imposing one."
   (and (bound-and-true-p dired-dwim-target)
        (require 'dired-aux nil t)
        (dired-dwim-target-directory)))
@@ -78,8 +76,7 @@ CLI's own failure would be mystifying."
 
 (defun s3-manager--large-transfer-p (size)
   "Return non-nil when a transfer of SIZE should offer its command.
-SIZE is a byte count, or the symbol `unbounded' for a recursive
-transfer, whose extent nothing here can know."
+SIZE is a byte count, or `unbounded' for a recursive transfer."
   (and s3-manager-large-transfer-size
        (or (eq size 'unbounded)
            (and (integerp size) (> size s3-manager-large-transfer-size)))))
@@ -92,19 +89,13 @@ this is the one-command form."
 
 (defun s3-manager--offer-commands (argvs description size)
   "Ask whether to run ARGVS here, or hand over the command lines.
+Returns non-nil to run them, nil when they were handed over instead, and
+signals a `user-error' on quit -- so a caller can write
+`(when (s3-manager--offer-commands ...) ...)'.
 
-Returns non-nil to run them, nil when the commands were handed over
-instead, and signals a `user-error' when the answer is quit, so a caller
-can write `(when (s3-manager--offer-commands ...) ...)'.
-
-DESCRIPTION names the operation and SIZE decides whether to ask at all
--- see `s3-manager--large-transfer-p'.  For a batch SIZE is the total,
-not the largest member: what makes a transfer worth leaving Emacs for is
-duration, and duration adds up.
-
-The commands shown are built by `s3-manager--full-argv', the same
-function the transport builds its own vector with, so what is offered is
-what would have run."
+DESCRIPTION names the operation.  SIZE decides whether to ask at all;
+for a batch it is the total, not the largest member, since what makes a
+transfer worth leaving Emacs for is duration and duration adds up."
   (if (not (s3-manager--large-transfer-p size))
       t
     (pcase (car (read-multiple-choice
@@ -126,10 +117,9 @@ what would have run."
 
 (defun s3-manager--transfer (args description &optional on-done on-failure)
   "Run the transfer ARGS, reporting progress in the current buffer.
-DESCRIPTION names the operation in messages and error reports.
-ON-DONE, when given, is called with no arguments after it succeeds.
-ON-FAILURE likewise after it fails, for releasing anything the caller
-set up in advance."
+DESCRIPTION names the operation in messages and error reports.  ON-DONE
+runs after it succeeds, ON-FAILURE after it fails -- for releasing
+whatever the caller set up in advance."
   (cl-incf s3-manager--transfers)
   (setq s3-manager--transfer-status "starting")
   (force-mode-line-update)
@@ -138,13 +128,11 @@ set up in advance."
    args
    :profile s3-manager--profile
    :buffer (current-buffer)
-   ;; Neither :register nor :generation: navigation must not abort a
-   ;; multi-gigabyte transfer, and progress keeps reporting into the buffer
-   ;; that started it even after that buffer has moved on.
+   ;; Neither :register nor :generation: navigating away must not abort a
+   ;; multi-gigabyte transfer.
    :parse nil
-   ;; Not `s3-manager-timeout': that deadline is measured from the start of
-   ;; the process, so a transfer big enough to outlast it is killed while
-   ;; healthy and reported as "No response after 120 seconds".
+   ;; Not `s3-manager-timeout': that deadline runs from the start, so a
+   ;; transfer big enough to outlast it is killed while healthy.
    :timeout s3-manager-transfer-timeout
    :progress-stream 'stdout
    ;; No --quiet and no --only-show-errors: both suppress the progress this
@@ -168,9 +156,8 @@ set up in advance."
                  (read-file-name (format "Download %s to: " name)
                                  (s3-manager--local-default-directory)
                                  nil nil
-                                 ;; The prompt names the object; the editable
-                                 ;; default must be a name that cannot escape
-                                 ;; the directory it is joined to.  Offering
+                                 ;; The editable default must be a name that
+                                 ;; cannot escape the directory it joins:
                                  ;; "~root" here meant one RET wrote to /root.
                                  (s3-manager--safe-leaf name)))))
     ;; Must stay above `file-directory-p', which would open a connection.
@@ -191,12 +178,9 @@ set up in advance."
 
 (defun s3-manager--get-args (uri destination &optional recursive)
   "Return the `s3 cp' arguments downloading URI to DESTINATION.
-With RECURSIVE, URI is a prefix and its whole tree comes down.
-
-The mirror of `s3-manager--upload-args', and separate from the commands
-for the same reason: what runs and what is shown to the user have to be
-the same vector.  DESTINATION is absolute, so it can never be read as an
-option."
+With RECURSIVE, URI is a prefix and its whole tree comes down.  A value
+rather than a command, so what runs and what is shown are one vector.
+DESTINATION is absolute, so it cannot be read as an option."
   (append (list "s3" "cp" uri destination)
           (when recursive '("--recursive"))
           ;; No --quiet and no --only-show-errors: both suppress the progress
@@ -221,17 +205,10 @@ option."
 
 (defun s3-manager--read-local-directory (prompt default)
   "Read a local directory after PROMPT, offering DEFAULT.
-
-Returns the path; it does **not** create it, so a caller can put the
-question of creating it after whatever else it has to ask.
-
-Refuses a remote one, as `s3-manager--read-destination-file' refuses a
-remote file, and for the same two reasons: `aws' cannot write there, and
-`file-directory-p' on a TRAMP path opens a connection -- so the check
-has to come before any predicate that would touch it.  This is not
-hypothetical for a default: `s3-manager--local-default-directory'
-honours `dired-dwim-target', so a remote Dired in the other window is
-what gets offered."
+Returns the path and does *not* create it, so a caller can put the
+question of creating it after whatever else it asks.  A remote one is
+refused -- not hypothetical, since the default honours
+`dired-dwim-target' and a remote Dired next door is what gets offered."
   (let ((directory (expand-file-name (read-directory-name prompt default
                                                           nil nil))))
     (s3-manager--refuse-remote directory "write there")
@@ -239,8 +216,8 @@ what gets offered."
 
 (defun s3-manager--ensure-local-directory (directory)
   "Create DIRECTORY after confirmation when it is absent.
-`aws s3 cp' would make it silently, so a mistyped path is otherwise a
-directory nobody meant with the bytes already in it."
+`aws s3 cp' would make it silently, so a mistyped path would otherwise
+be a directory nobody meant with the bytes already in it."
   (unless (file-directory-p directory)
     (unless (y-or-n-p (format "Create %s? " directory))
       (user-error "Download aborted"))
@@ -248,16 +225,14 @@ directory nobody meant with the bytes already in it."
 
 (defun s3-manager--check-download-leaves (entries)
   "Signal unless every entry in ENTRIES can be written under its own name.
+A batch names no destination out loud, so a key like \"backups/~root\"
+would write outside the chosen directory with nothing having shown the
+user where -- see `s3-manager--safe-leaf-p'.
 
-A batch names no destination out loud, so `expand-file-name' on a key
-like \"backups/~root\" would write outside the chosen directory without
-anything having shown the user where.  Measured, that key lands in
-\"/root\" and \"..\" lands in the parent -- see `s3-manager--safe-leaf-p'.
-
-The whole batch is refused rather than the offending entries skipped:
-several unsafe names cannot share one stand-in, and quietly downloading
-some of what was marked is worse than downloading none of it.  The
-single-object path still reaches them, and shows the path first."
+The whole batch is refused rather than the offenders skipped: several
+unsafe names cannot share one stand-in, and downloading some of what was
+marked is worse than downloading none.  The single-object path still
+reaches them, and shows the path first."
   (when-let* ((unsafe (seq-remove
                        (lambda (entry)
                          (s3-manager--safe-leaf-p
@@ -272,14 +247,10 @@ single-object path still reaches them, and shows the path first."
 
 (defun s3-manager--check-download-collisions (jobs directory)
   "Signal when two of JOBS would write the same file in DIRECTORY.
-
-Two S3 keys in one listing are distinct by construction, and on a
-case-sensitive filesystem their leaves are too.  On a case-insensitive
-one -- macOS by default -- \"A.txt\" and \"a.txt\" are one file, and the
-batch would run two transfers at it with nothing to say which won.  That
-is the collision `s3-manager-dired-upload' refuses in the other
-direction; the difference is only that here the filesystem decides
-whether there is one."
+Two keys in one listing are distinct, and so are their leaves on a
+case-sensitive filesystem.  On a case-insensitive one \"A.txt\" and
+\"a.txt\" are one file, and the batch would run two transfers at it with
+nothing to say which won."
   (let* ((fold (file-name-case-insensitive-p directory))
          (names (mapcar (lambda (job)
                           (let ((leaf (file-name-nondirectory (car job))))
@@ -292,8 +263,7 @@ whether there is one."
 (defun s3-manager--download-jobs (entries directory)
   "Return one (DESTINATION ARGS DESCRIPTION) per entry in ENTRIES.
 Each lands under its own display name in DIRECTORY, which
-`s3-manager--check-download-leaves' has already established is a name
-that stays inside it."
+`s3-manager--check-download-leaves' has established stays inside it."
   (mapcar
    (lambda (entry)
      (let* ((key (s3-manager-entry-key entry))
@@ -309,13 +279,10 @@ that stays inside it."
 
 (defun s3-manager--download-batch (entries)
   "Download ENTRIES into one local directory, one transfer at a time.
-
 One prompt for the directory and at most one for overwriting: a probe
-per object is bounded, but a prompt per object is not, which is
-`s3-manager-dired-upload' reasoning in the other direction."
+per object is bounded, a prompt per object is not."
   (let* ((total (length entries))
-         ;; Before the prompt: refusing after the user has chosen a directory
-         ;; would waste the answer, and nothing here depends on it.
+         ;; Before the prompt: refusing afterwards would waste the answer.
          (_ (s3-manager--check-download-leaves entries))
          (directory (s3-manager--read-local-directory
                      (format "Download %d objects to: " total)
@@ -331,13 +298,11 @@ per object is bounded, but a prompt per object is not, which is
            (seq-reduce (lambda (sum entry)
                          (+ sum (or (s3-manager-entry-size entry) 0)))
                        entries 0))
-      ;; Only now: answering `c' or `q' at the offer must not leave behind a
-      ;; directory created for a transfer that never ran.
+      ;; Only now: answering `c' or `q' at the offer must not leave a
+      ;; directory behind for a transfer that never ran.
       (s3-manager--ensure-local-directory directory)
       ;; After the offer too, so someone who takes the command line away is
-      ;; never asked about files Emacs is no longer going to write.  Nothing
-      ;; is ever unchecked: existence here is a local question with no round
-      ;; trip to fail, which is why there is no probe.
+      ;; not asked about files Emacs will no longer write.
       (when-let* ((existing (seq-filter #'file-exists-p (mapcar #'car jobs))))
         ;; `aws s3 cp' overwrites without asking, so this is the only chance.
         (unless (y-or-n-p (s3-manager--batch-question
@@ -355,11 +320,9 @@ per object is bounded, but a prompt per object is not, which is
 
 (defun s3-manager--download (entries)
   "Download ENTRIES, which is never empty.
-
-The split is Dired's: one object gets a filename prompt, and so can be
-renamed on the way down, while several share a directory and keep their
-own names.  Marks are left alone -- the objects are still there, as they
-are after `dired-do-copy'."
+Dired's split: one object gets a filename prompt and can be renamed on
+the way down, while several share a directory and keep their own names.
+Marks survive -- the objects are still there, as after `dired-do-copy'."
   (if (cdr entries)
       (s3-manager--download-batch entries)
     (s3-manager--download-one (car entries))))
@@ -400,10 +363,9 @@ are after `dired-do-copy'."
 
 (defun s3-manager--upload-key-name (source)
   "Return the S3 leaf name for local SOURCE.
-The mirror of `s3-manager--view-file-name', but running outwards: no
-tilde guard is needed (nothing expands them on the S3 side), and an
-unusable name is refused rather than defaulted -- inventing a key would
-write the user's bytes somewhere they never named."
+No tilde guard: nothing expands one on the S3 side.  An unusable name is
+refused rather than defaulted -- inventing a key would write the user's
+bytes somewhere they never named."
   (let ((name (file-name-nondirectory (directory-file-name source))))
     (when (member name s3-manager--unsafe-leaf-names)
       (user-error "Cannot derive an object name from %s" source))
@@ -411,12 +373,9 @@ write the user's bytes somewhere they never named."
 
 (defun s3-manager--upload-key (source prefix)
   "Return the destination key for uploading SOURCE into PREFIX.
-
-A directory yields a key ending in \"/\", and that slash is
-load-bearing rather than cosmetic: `s3 cp DIR s3://B/PREFIX --recursive'
-maps DIR/a.txt onto PREFIX/a.txt and drops the directory's own name, so
-the tree is scattered flat across the listing the user was looking at.
-Writing the leaf into the destination is what keeps it."
+A directory yields a key ending in \"/\", and that slash is load-bearing:
+without it `s3 cp DIR s3://B/PREFIX --recursive' drops the directory's
+own name and scatters the tree flat across the listing."
   (concat prefix
           (s3-manager--upload-key-name source)
           (if (file-directory-p source) "/" "")))
@@ -427,10 +386,9 @@ Writing the leaf into the destination is what keeps it."
                  (read-file-name "Upload file or directory: "
                                  (s3-manager--local-default-directory)
                                  nil t))))
-    ;; MUSTMATCH is advisory -- a default, a history entry, or completion
+    ;; MUSTMATCH is advisory -- a default, a history entry or completion
     ;; ignoring it all reach here -- and these checks also narrow the window
-    ;; between this prompt and the transfer, which for a single file spans a
-    ;; round trip and an unbounded confirmation.
+    ;; between this prompt and the transfer.
     (s3-manager--refuse-remote source "read it")
     (unless (file-exists-p source)
       (user-error "%s does not exist" source))
@@ -439,23 +397,21 @@ Writing the leaf into the destination is what keeps it."
     (if (file-directory-p source)
         (when (null (directory-files
                      source nil directory-files-no-dot-files-regexp t))
-          ;; S3 has no directories, so uploading an empty one transfers
-          ;; nothing, exits 0, and is reported as a success that leaves the
-          ;; listing unchanged -- which reads as the feature being broken.
+          ;; S3 has no directories, so an empty one transfers nothing, exits
+          ;; 0, and reads as a success that did not work.
           (user-error "%s is empty, and S3 has no directories to create"
                       source))
       (unless (file-regular-p source)
-        ;; A fifo or a character device would make `aws s3 cp' read forever,
-        ;; and `s3-manager-transfer-timeout' is nil, so nothing would stop it.
+        ;; `aws s3 cp' would read a fifo forever, and
+        ;; `s3-manager-transfer-timeout' is nil by default.
         (user-error "%s is not a regular file" source)))
     source))
 
 (defun s3-manager--after-upload (prefix key &optional recursive)
   "Refresh after an upload of KEY into PREFIX.
 With RECURSIVE, cached listings at and beneath KEY go too.  PREFIX is
-the destination recorded when the upload started, not the buffer's
-prefix now -- a transfer outlives navigation -- so the listing is
-re-read only while that destination is still on screen."
+what was recorded when the upload started, not the buffer's prefix now:
+a transfer outlives navigation."
   (s3-manager--cache-invalidate (s3-manager--cache-key prefix))
   (when recursive
     (s3-manager--cache-purge s3-manager--profile
@@ -468,14 +424,12 @@ re-read only while that destination is still on screen."
 (defun s3-manager--upload-args (source uri recursive &optional dry-run)
   "Return the `s3 cp' arguments uploading SOURCE to URI.
 With RECURSIVE, both paths carry a trailing slash and `--recursive' is
-passed.  With DRY-RUN, nothing is transferred and the CLI reports what
-it would have sent.  SOURCE is absolute, so it can never be read as an
-option.
+passed.  With DRY-RUN nothing is transferred.  SOURCE is absolute, so it
+cannot be read as an option.
 
-Every argument that decides *what* is sent -- the paths, `--recursive',
-the symlink flag -- is shared between the two forms.  A preview that
-could differ from the upload it previews would be worse than no preview,
-since the symlink decision leans on it."
+Everything deciding *what* is sent is shared between the two forms: a
+preview that could differ from what it previews is worse than none, and
+the symlink decision leans on it."
   (append (list "s3" "cp"
                 (if recursive (file-name-as-directory source) source)
                 uri)
@@ -496,12 +450,10 @@ since the symlink decision leans on it."
 (defun s3-manager--upload-start (source uri key prefix &optional recursive done)
   "Upload SOURCE to URI, refreshing PREFIX with point on KEY afterwards.
 With RECURSIVE, SOURCE is a directory and its whole tree is sent.  DONE
-replaces the refresh, for a batch that refreshes once at the end; it is
+replaces the refresh for a batch that refreshes once at the end, and is
 called on failure too."
-  ;; Re-checked here rather than only at the prompt: a head-object round trip
-  ;; and an unbounded `y-or-n-p' sit between the two, and a file removed in
-  ;; that window would otherwise be reported as a partial transfer failure
-  ;; for a file that was never opened.
+  ;; Re-checked rather than trusted from the prompt: a head-object round trip
+  ;; and an unbounded `y-or-n-p' sit between the two.
   (unless (file-readable-p source)
     (user-error "%s is no longer readable" source))
   (let ((finish (lambda (ok)
@@ -512,21 +464,19 @@ called on failure too."
      (s3-manager--upload-args source uri recursive)
      (s3-manager--upload-description source uri)
      (lambda () (funcall finish t))
-     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work,
-     ;; exactly as in `s3-manager--delete-prefix'.
+     ;; Also on failure: `aws s3' exits 1 or 2 having done part of the work.
      (lambda () (funcall finish nil)))))
 
 (defun s3-manager--prompt-later (buffer thunk &optional context)
   "Run THUNK in BUFFER from a zero-second timer.
-CONTEXT names the operation in a failure report, and defaults to
-\"Upload\" -- the only caller when this was written, and now one of
-several.
+CONTEXT names the operation in a failure report; it defaults to
+\"Upload\".
 
 A prompt inside a process sentinel re-enters the minibuffer from
-wherever Emacs happened to be; `s3-manager--profiles-resolved' takes the
-same hop.  Both branches take it, so ordering does not depend on the
-answer.  A `user-error' from THUNK is the user declining; anything else
-is reported, since a signal inside a timer is easy to miss."
+wherever Emacs happened to be, so every branch takes this hop and
+ordering cannot depend on the answer.  A `user-error' from THUNK is the
+user declining; anything else is reported, since a signal inside a timer
+is easy to miss."
   (let ((context (or context "Upload")))
     (run-at-time
      0 nil
@@ -543,11 +493,10 @@ is reported, since a signal inside a timer is easy to miss."
 
 (defun s3-manager--head-object-absent-p (err)
   "Return non-nil when ERR is `head-object' reporting that the key is absent.
-An allowlist, never a denylist: 403 is a permission error, 255 an
-unreachable endpoint, a timeout has no exit code, and reading any as
-absence would silently overwrite an object.  Measured: absence is exit
-254 plus this stderr, whose status is botocore's format string and so
-identical across S3-compatible endpoints."
+An allowlist, never a denylist: 403 is a permission error and 255 an
+unreachable endpoint, and reading either as absence would silently
+overwrite an object.  The stderr matched is botocore's own format
+string, so it is identical across S3-compatible endpoints."
   (and (eq (nth 0 err) 's3-manager-cli-error)
        (eql (nth 2 err) 254)
        (string-match-p
@@ -557,10 +506,8 @@ identical across S3-compatible endpoints."
 (defun s3-manager--confirm-overwrite (response uri &optional aborted)
   "Confirm overwriting URI, which `head-object' RESPONSE says exists.
 Signals a `user-error' reading ABORTED, by default \"Upload aborted\",
-when the answer is no.
-
-The service's own size and date, not ours: they are what tells the user
-whether the object about to be replaced is the one they think it is."
+when the answer is no.  The service's own size and date are shown: they
+are what says whether this is the object the user thinks it is."
   (unless (y-or-n-p
            (format "%s already exists (%s, modified %s).  Overwrite? "
                    uri
@@ -577,26 +524,23 @@ whether the object about to be replaced is the one they think it is."
 (defun s3-manager--head-object (bucket key on-present on-absent on-unknown)
   "Ask whether KEY exists in BUCKET, then take one of three branches.
 ON-PRESENT is called with the parsed response; the other two take no
-arguments.  ON-UNKNOWN means the check itself failed, and the failure
-has already been reported by the time it runs.
+arguments.  ON-UNKNOWN means the check itself failed, already reported.
 
 BUCKET is explicit because a copy's destination need not be the bucket
-this buffer is showing.  The profile is this buffer's and must be: one
+on screen; the profile is this buffer's and must be, since one
 invocation carries one --profile.
 
-Every branch goes through `s3-manager--prompt-later'.  This runs in a
-sentinel and all three callers may prompt, so none of them can run
-where the answer arrives."
+Every branch goes through `s3-manager--prompt-later': this runs in a
+sentinel and all three callers may prompt."
   (let ((origin (current-buffer)))
     (s3-manager--aws-async
      (s3-manager--head-object-args bucket key)
      :profile s3-manager--profile
      :buffer origin
      ;; No :register -- that slot belongs to the listing, and taking it would
-     ;; orphan a fetch in flight and let `^' cancel this probe.  No
-     ;; :generation either: the user asked for this and must get an answer
-     ;; even if they have navigated since, which is why the caller captures
-     ;; everything it will need before calling.
+     ;; orphan a fetch and let `^' cancel this probe.  No :generation either:
+     ;; the user asked for this and must get an answer even after navigating,
+     ;; which is why the caller captures what it needs beforehand.
      :name "s3-head-object"
      :on-success (lambda (response)
                    (s3-manager--prompt-later
@@ -615,11 +559,9 @@ where the answer arrives."
 
 (defun s3-manager--upload-probe (source uri key prefix)
   "Check whether KEY exists, then upload SOURCE to URI.
-
 `aws s3 cp' overwrites without a word, so `s3api head-object' is the
-only way to ask first.  The CLI grew a `--no-overwrite' flag, but it
-skips silently rather than asking, and its availability at the AWS CLI
-version this package requires is not established."
+only way to ask first.  The CLI's own `--no-overwrite' skips silently
+rather than asking, and is not available at the version required here."
   (message "S3: checking %s..." uri)
   (let ((start (lambda () (s3-manager--upload-start source uri key prefix))))
     (s3-manager--head-object
@@ -637,11 +579,9 @@ version this package requires is not established."
 
 (defun s3-manager-upload ()
   "Upload a local file or directory into the prefix being shown.
-
-The destination is this listing's own prefix, under the source's own
-name, regardless of where point is; the prompts name the full target
-URI, so there is nothing to infer.  A directory is uploaded
-recursively, after a typed confirmation."
+The destination is this listing's own prefix under the source's own
+name, wherever point is, and the prompts name the full target URI.  A
+directory goes recursively, after a typed confirmation."
   (interactive)
   (unless s3-manager--bucket
     (user-error "%s" (substitute-command-keys
@@ -653,9 +593,8 @@ recursively, after a typed confirmation."
     (if (file-directory-p source)
         (progn
           ;; `yes-or-no-p', as for a recursive delete: an unbounded number of
-          ;; objects is about to be written, no per-key overwrite check is
-          ;; made -- one probe per file is unbounded too -- and this must not
-          ;; ride on a single keystroke.
+          ;; objects is about to be written with no per-key overwrite check,
+          ;; and that must not ride on a single keystroke.
           (unless (yes-or-no-p
                    (format "Recursively upload everything under %s to %s%s? "
                            (abbreviate-file-name source) uri
@@ -663,10 +602,9 @@ recursively, after a typed confirmation."
                                " (following symlinks)" "")))
             (user-error "Upload aborted"))
           (s3-manager--upload-start source uri key prefix t))
-      ;; Ahead of the probe, deliberately.  The size is known here without
-      ;; asking anyone, so a user who wants the command should not have to
-      ;; wait for a `head-object' round trip and answer an overwrite
-      ;; question about an upload they are not going to run.
+      ;; Ahead of the probe: the size is known locally, so someone who wants
+      ;; the command should not wait for a `head-object' round trip and answer
+      ;; an overwrite question about an upload they will not run.
       (when (s3-manager--offer-command
              (s3-manager--upload-args source uri nil)
              (s3-manager--upload-description source uri)
@@ -679,8 +617,8 @@ recursively, after a typed confirmation."
 
 (defun s3-manager--visible-listing ()
   "Return an S3 object listing shown in another window, or nil.
-The selected window is excluded, so this answers \"what is in the other
-window\" from either side of the pair."
+The selected window is excluded, so the question reads the same from
+either side of the pair."
   (seq-find #'s3-manager--object-listing-p
             (mapcar #'window-buffer
                     (delq (selected-window) (window-list)))))
@@ -707,21 +645,20 @@ A visible one wins, so the window layout picks the destination."
 
 (defun s3-manager--probe-each (bucket keys existing unchecked done)
   "Probe KEYS in BUCKET one at a time, then call DONE with EXISTING and UNCHECKED.
-
 BUCKET is explicit because a copy's destination need not be the bucket
 on screen; the profile is this buffer's and must be.
 
-Sequential rather than parallel: the ordering makes the confirmation
-reproducible, and the probes are dwarfed by the transfer that follows.
-A probe per object is bounded; a prompt per object is not, which is why
-this collects rather than asking as it goes."
+Sequential: the ordering makes the confirmation reproducible, and the
+probes are dwarfed by the transfer that follows.  Collected rather than
+asked as they go, because a probe per object is bounded and a prompt per
+object is not."
   (if (null keys)
       (funcall done (nreverse existing) (nreverse unchecked))
     (let ((key (car keys)) (rest (cdr keys)))
       (s3-manager--aws-async
-       ;; The argv helper, deliberately not `s3-manager--head-object': these
-       ;; callbacks classify and chain, never prompt, and its timer hop would
-       ;; defer every step of the batch for no reason.
+       ;; The argv helper, not `s3-manager--head-object': these callbacks
+       ;; classify and chain rather than prompt, and its timer hop would defer
+       ;; every step of the batch for no reason.
        (s3-manager--head-object-args bucket key)
        :profile s3-manager--profile
        :buffer (current-buffer)
@@ -740,11 +677,8 @@ this collects rather than asking as it goes."
 (defun s3-manager--batch-question (lead existing unchecked)
   "Return the one confirmation covering a batch.
 LEAD names the operation and its destination; EXISTING and UNCHECKED are
-what `s3-manager--probe-each' found.
-
-Only the first three overwrite victims are named: the point is to say
-that some exist and roughly which, and a prompt that scrolls is a prompt
-nobody reads."
+what `s3-manager--probe-each' found.  Only three overwrite victims are
+named -- a prompt that scrolls is a prompt nobody reads."
   (concat lead
           (when existing
             (format ", overwriting %d (%s)" (length existing)
@@ -755,15 +689,13 @@ nobody reads."
 
 (defun s3-manager--run-sequentially (items start finish)
   "Run START on each of ITEMS in turn, then call FINISH with the failures.
-
 START receives one item and a continuation, and must call that
-continuation exactly once -- with non-nil for success -- on both paths,
-or the batch stops there with the rest unattempted and no summary.
-FINISH receives how many failed.
+continuation exactly once -- non-nil for success -- on *both* paths, or
+the batch stops there with the rest unattempted and no summary.  FINISH
+receives how many failed.
 
-Sequential rather than parallel: each transfer is an `aws' process
-holding a pipe and two buffers, and one listing can hand this hundreds
-of marked objects.  A queue with a width is §17's work, not this."
+Sequential: each transfer is an `aws' process holding a pipe and two
+buffers, and one listing can hand this hundreds of marked objects."
   (let ((failed 0) (step nil))
     (setq step
           (lambda (remaining)
@@ -777,11 +709,9 @@ of marked objects.  A queue with a width is §17's work, not this."
 
 (defun s3-manager--batch-summary (verb noun total failed)
   "Say how a batch of TOTAL ended, FAILED of them having not run.
-VERB is the past tense naming what happened; NOUN names one item.
-
-A batch is not atomic, so failures are counted and named rather than
-folded into a total, and the report buffer is named because the
-per-item errors are already in it."
+VERB is the past tense naming what happened; NOUN names one item.  A
+batch is not atomic, so failures are counted apart from the total and
+the report buffer holding them is named."
   (if (zerop failed)
       (message "S3: %s %d %s%s" verb total noun (if (= total 1) "" "s"))
     (message "S3: %s %d, %d failed -- see %s"
@@ -797,9 +727,8 @@ per-item errors are already in it."
        (let* ((recursive (file-directory-p source))
               (key (s3-manager--upload-key source prefix))
               (uri (s3-manager--s3-uri key)))
-         ;; Guarded here rather than left to `s3-manager--upload-start', whose
-         ;; `user-error' would unwind the whole batch and leave the rest
-         ;; unattempted with no summary.
+         ;; Guarded here rather than in `s3-manager--upload-start', whose
+         ;; `user-error' would unwind the whole batch.
          (if (not (file-readable-p source))
              (progn
                (s3-manager--record-error
@@ -822,10 +751,9 @@ per-item errors are already in it."
 ;;;###autoload
 (defun s3-manager-dired-upload ()
   "Upload the marked files in this Dired buffer into an S3 listing.
-With nothing marked, the file at point, as Dired itself does.
-
-One confirmation covers the whole batch: a probe per file is bounded,
-but a prompt per file is not."
+With nothing marked, the file at point, as Dired itself does.  One
+confirmation covers the batch: a probe per file is bounded, a prompt per
+file is not."
   (interactive)
   (unless (derived-mode-p 'dired-mode)
     (user-error "Not a Dired buffer"))
@@ -833,9 +761,9 @@ but a prompt per file is not."
          (target (s3-manager--dired-target))
          (recursive (seq-some #'file-directory-p sources))
          (leaves (mapcar #'s3-manager--upload-key-name sources)))
-    ;; Keys come from the leaf, so /a/x.txt and /b/x.txt would both write
-    ;; PREFIX/x.txt: two transfers racing, one object, and nothing to say
-    ;; which won.  The probe cannot see it -- neither key exists yet.
+    ;; Keys come from the leaf, so /a/x.txt and /b/x.txt both write
+    ;; PREFIX/x.txt: two transfers, one object, nothing to say which won.
+    ;; The probe cannot see it -- neither key exists yet.
     (when-let* ((clashing (s3-manager--repeated leaves)))
       (user-error "Marked files share a name: %s"
                   (string-join clashing ", ")))
@@ -870,13 +798,10 @@ but a prompt per file is not."
 ;;;###autoload
 (defun s3-manager-dired-do-copy (&optional arg)
   "Upload the marked files to a visible S3 listing, else `dired-do-copy'.
-
-Bound to `C' in Dired, this makes one key mean \"copy to the other
-window\" in both directions.  Falls back on the window layout rather
-than on whether a listing merely exists: a buried S3 buffer must not
-turn an ordinary copy into an upload to a bucket the user cannot see.
-
-ARG is passed through untouched."
+Bound to `C' in Dired, so one key means \"copy to the other window\" in
+both directions.  The window layout decides, not whether a listing
+merely exists: a buried S3 buffer must not turn an ordinary copy into an
+upload to a bucket the user cannot see.  ARG passes through untouched."
   (interactive "P" dired-mode)
   (if (s3-manager--visible-listing)
       (s3-manager-dired-upload)
@@ -884,15 +809,11 @@ ARG is passed through untouched."
 
 (defun s3-manager-upload-dry-run ()
   "Show what uploading a local file or directory would write, without writing.
+Names every object that would be created, before any of them are.
+Symbolic links resolve exactly as the upload itself would resolve them.
 
-The preview a recursive upload deserves: it names every object that
-would be created, before any of them are.  Symbolic links are resolved
-here exactly as they would be by the upload itself, so a link to a large
-tree shows up as the files it would really send.
-
-No overwrite check.  `--dryrun' reports what would be sent, not what
-would be replaced, and pretending otherwise would need one probe per
-file."
+No overwrite check: `--dryrun' reports what would be sent, not what
+would be replaced, and pretending otherwise needs a probe per file."
   (interactive)
   (unless s3-manager--bucket
     (user-error "Not an object listing"))
@@ -907,8 +828,7 @@ file."
      :profile s3-manager--profile
      :buffer (current-buffer)
      :parse nil
-     ;; Enumerates the whole tree; the README recommends it for exactly the
-     ;; large ones a fixed deadline would kill.
+     ;; Enumerates the whole tree, which is what it is recommended for.
      :timeout s3-manager-transfer-timeout
      :name "s3-cp-dryrun"
      :on-success
