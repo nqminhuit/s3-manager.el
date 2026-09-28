@@ -862,13 +862,22 @@ on no part of the other; one combined figure would correspond to no command.
          ("Size"     10 s3-manager--sort-by-size :right-align t)
          ("Modified" 20 t)])
   (setq tabulated-list-padding 2)          ; mark column, as in package-menu
-  (setq tabulated-list-sort-key '("Name" . nil))
   (setq-local revert-buffer-function #'s3-manager--revert)
   (setq-local mode-line-process '(s3-manager--transfer-status
                                   ("[" s3-manager--transfer-status "]")))
   (add-hook 'kill-buffer-hook #'s3-manager--cancel nil t)
   (tabulated-list-init-header))
 ```
+
+The sort key is not set here: each buffer kind defaults its own, on first
+render only, so a user's re-sort survives a revert.
+`s3-manager--object-buffer` defaults to `("Modified" . t)`, newest first;
+`s3-manager--bucket-buffer` defaults to `("Name" . nil)`.
+
+Reversing a sort makes `tabulated-list-mode` call the column's sorter with
+its rows swapped, which would also swap the directories-first ranking;
+`s3-manager--sort-by-time` counters this (its optional `counter-reversal`
+argument to `s3-manager--sort-by`) so directories still lead either way.
 
 `revert-buffer-function` must be set **in the mode body**, after
 `define-derived-mode` has run the parent's setup: `tabulated-list-mode`
@@ -2119,7 +2128,10 @@ responses.
 - **The directory-marker entry whose `Key` equals the request prefix is dropped.**
 - Sizes format correctly across boundaries (0 B, 999 B, 1.0 KB, 1.8 GB).
 - Directories sort before objects under every sort column.
+- Directories still sort first when the Modified column's sort is reversed.
 - `s3-manager--sort-by-size` orders correctly with nil sizes present.
+- A fresh object-listing buffer defaults to Modified, reversed (newest first);
+  a fresh bucket-list buffer defaults to Name, ascending.
 
 **Argv construction** — assert the exact list for each of:
 

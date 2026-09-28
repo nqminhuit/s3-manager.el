@@ -1710,6 +1710,33 @@ right-hand end."
                                sorted)
                        '(directory directory object)))))))
 
+(ert-deftest s3-manager-test-directories-lead-under-reversed-modified ()
+  "Directories still lead when the Modified sort is reversed."
+  (with-temp-buffer
+    (s3-manager-mode)
+    (setq tabulated-list-format s3-manager--object-list-format)
+    (tabulated-list-init-header)
+    (setq tabulated-list-entries
+          (mapcar #'s3-manager--entry-row
+                  (list (s3-manager-entry--create
+                         :type 'object :key "old.txt" :display-name "old.txt"
+                         :size 10 :last-modified "2026-09-01T00:00:00+00:00")
+                        (s3-manager-entry--create
+                         :type 'directory :key "sub/" :display-name "sub/")
+                        (s3-manager-entry--create
+                         :type 'object :key "new.txt" :display-name "new.txt"
+                         :size 20 :last-modified "2026-09-05T00:00:00+00:00"))))
+    (setq tabulated-list-sort-key '("Modified" . t))
+    (tabulated-list-print)
+    (goto-char (point-min))
+    (let (order)
+      (while (not (eobp))
+        (when (tabulated-list-get-id)
+          (push (s3-manager-entry-key (tabulated-list-get-id)) order))
+        (forward-line 1))
+      ;; Directory first, then objects newest first.
+      (should (equal (nreverse order) '("sub/" "new.txt" "old.txt"))))))
+
 (ert-deftest s3-manager-test-size-sorts-numerically ()
   "The displayed size is a string in which \"9 B\" follows \"1.8 GiB\"."
   (let* ((small (s3-manager-entry--create :type 'object :key "a" :size 9))
@@ -1855,6 +1882,43 @@ equality is structural."
                 (should (equal (tabulated-list-get-id) "media")))
               (kill-buffer buckets)))
         (kill-buffer objects)))))
+
+(ert-deftest s3-manager-test-object-buffer-defaults-to-newest-first ()
+  "A fresh object listing opens sorted by Modified, newest first."
+  (s3-manager-test--with-fake-aws
+      (:stdout (concat "{\"CommonPrefixes\":[{\"Prefix\":\"sub/\"}],"
+                       "\"Contents\":["
+                       "{\"Key\":\"old.txt\","
+                       "\"LastModified\":\"2026-09-01T00:00:00+00:00\","
+                       "\"Size\":10,\"StorageClass\":\"STANDARD\"},"
+                       "{\"Key\":\"new.txt\","
+                       "\"LastModified\":\"2026-09-05T00:00:00+00:00\","
+                       "\"Size\":20,\"StorageClass\":\"STANDARD\"}],"
+                       "\"Prefix\":\"\"}"))
+    (let ((buffer (s3-manager--object-buffer "production" "media" "")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (equal tabulated-list-sort-key '("Modified" . t)))
+            (goto-char (point-min))
+            (let (order)
+              (while (not (eobp))
+                (when (tabulated-list-get-id)
+                  (push (s3-manager-entry-key (tabulated-list-get-id)) order))
+                (forward-line 1))
+              ;; Directory first, then objects newest first.
+              (should (equal (nreverse order) '("sub/" "new.txt" "old.txt")))))
+        (kill-buffer buffer)))))
+
+(ert-deftest s3-manager-test-bucket-buffer-still-defaults-to-name ()
+  "The bucket list is unaffected: it still opens sorted by Name, ascending."
+  (s3-manager-test--with-fake-aws (:stdout s3-manager-test--one-bucket-json)
+    (let ((buffer (s3-manager--bucket-buffer "production")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (s3-manager-test--wait (lambda () (null s3-manager--status))))
+            (should (equal tabulated-list-sort-key '("Name" . nil))))
+        (kill-buffer buffer)))))
 
 (ert-deftest s3-manager-test-up-from-the-bucket-list-refuses ()
   (with-temp-buffer

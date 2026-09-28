@@ -380,17 +380,22 @@ right-hand end.")
   "Return a sort rank for ENTRY placing directories before objects."
   (if (eq (s3-manager-entry-type entry) 'directory) 0 1))
 
-(defun s3-manager--sort-by (a b accessor predicate)
+(defun s3-manager--sort-by (a b accessor predicate &optional counter-reversal)
   "Order rows A and B by ACCESSOR under PREDICATE, directories first.
 A and B are whole `tabulated-list-entries' elements, but only their ids
 are read: the displayed strings sort wrongly -- \"9 B\" comes after
-\"1.8 GiB\" lexicographically."
+\"1.8 GiB\" lexicographically.
+
+COUNTER-REVERSAL, when non-nil, keeps directories first under a reversed
+sort too -- see SPEC.md, \"the object browser's own default sort column\"."
   (let* ((ea (car a))
          (eb (car b))
          (ra (s3-manager--directory-rank ea))
          (rb (s3-manager--directory-rank eb)))
     (if (/= ra rb)
-        (< ra rb)
+        (if (and counter-reversal (cdr tabulated-list-sort-key))
+            (> ra rb)
+          (< ra rb))
       (funcall predicate (funcall accessor ea) (funcall accessor eb)))))
 
 (defun s3-manager--sort-by-name (a b)
@@ -409,7 +414,7 @@ The timestamps are ISO-8601, so they order correctly as strings."
   (s3-manager--sort-by a b
                        (lambda (entry)
                          (or (s3-manager-entry-last-modified entry) ""))
-                       #'string<))
+                       #'string< t))
 
 (defun s3-manager--entry-row (entry)
   "Return the `tabulated-list-entries' element for ENTRY."
@@ -503,8 +508,9 @@ TARGET, when given, is the entry to put point on once the listing lands."
             s3-manager--bucket bucket)
       (s3-manager--set-prefix prefix)
       (setq tabulated-list-format s3-manager--object-list-format)
+      ;; Newest first.
       (unless tabulated-list-sort-key
-        (setq tabulated-list-sort-key '("Name" . nil)))
+        (setq tabulated-list-sort-key '("Modified" . t)))
       (tabulated-list-init-header)
       (s3-manager--reload target))
     buffer))
