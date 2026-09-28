@@ -1400,6 +1400,14 @@ timers as well as sentinels."
   (should (equal (s3-manager--format-date "") "-"))
   (should (equal (s3-manager--format-date "2026-08") "-")))
 
+(ert-deftest s3-manager-test-format-datetime ()
+  (should (equal (s3-manager--format-datetime "2026-08-01T10:22:31+00:00")
+                 "2026-08-01 10:22"))
+  ;; Absent or malformed values must render, not signal.
+  (should (equal (s3-manager--format-datetime nil) "-"))
+  (should (equal (s3-manager--format-datetime "") "-"))
+  (should (equal (s3-manager--format-datetime "2026-08-01T10") "-")))
+
 (ert-deftest s3-manager-test-buffer-name ()
   (should (equal (s3-manager--buffer-name "production") "*s3: production*"))
   (should (equal (s3-manager--buffer-name "production" "media")
@@ -1663,7 +1671,7 @@ right-hand end."
                                         :size 2048
                                         :last-modified "2026-09-01T00:00:00+00:00"))))
     (should (equal (aref (cadr row) 0) "2 KiB"))
-    (should (equal (aref (cadr row) 1) "2026-09-01"))
+    (should (equal (aref (cadr row) 1) "2026-09-01 00:00"))
     (should (equal (aref (cadr row) 2) "long-name.bin"))))
 
 (ert-deftest s3-manager-test-a-long-name-cannot-misalign-a-row ()
@@ -1710,32 +1718,35 @@ right-hand end."
                                sorted)
                        '(directory directory object)))))))
 
-(ert-deftest s3-manager-test-directories-lead-under-reversed-modified ()
-  "Directories still lead when the Modified sort is reversed."
-  (with-temp-buffer
-    (s3-manager-mode)
-    (setq tabulated-list-format s3-manager--object-list-format)
-    (tabulated-list-init-header)
-    (setq tabulated-list-entries
-          (mapcar #'s3-manager--entry-row
-                  (list (s3-manager-entry--create
-                         :type 'object :key "old.txt" :display-name "old.txt"
-                         :size 10 :last-modified "2026-09-01T00:00:00+00:00")
-                        (s3-manager-entry--create
-                         :type 'directory :key "sub/" :display-name "sub/")
-                        (s3-manager-entry--create
-                         :type 'object :key "new.txt" :display-name "new.txt"
-                         :size 20 :last-modified "2026-09-05T00:00:00+00:00"))))
-    (setq tabulated-list-sort-key '("Modified" . t))
-    (tabulated-list-print)
-    (goto-char (point-min))
-    (let (order)
-      (while (not (eobp))
-        (when (tabulated-list-get-id)
-          (push (s3-manager-entry-key (tabulated-list-get-id)) order))
-        (forward-line 1))
-      ;; Directory first, then objects newest first.
-      (should (equal (nreverse order) '("sub/" "new.txt" "old.txt"))))))
+(ert-deftest s3-manager-test-directories-lead-under-any-reversed-column ()
+  "Directories still lead when any column's sort is reversed.
+Reversing a column makes `tabulated-list-mode' call the sorter with its
+two arguments swapped, which -- unguarded -- flips the directory-first
+ranking along with the column being sorted."
+  (dolist (column '("Name" "Size" "Modified"))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq tabulated-list-format s3-manager--object-list-format)
+      (tabulated-list-init-header)
+      (setq tabulated-list-entries
+            (mapcar #'s3-manager--entry-row
+                    (list (s3-manager-entry--create
+                           :type 'object :key "old.txt" :display-name "old.txt"
+                           :size 10 :last-modified "2026-09-01T00:00:00+00:00")
+                          (s3-manager-entry--create
+                           :type 'directory :key "sub/" :display-name "sub/")
+                          (s3-manager-entry--create
+                           :type 'object :key "new.txt" :display-name "new.txt"
+                           :size 20 :last-modified "2026-09-05T00:00:00+00:00"))))
+      (setq tabulated-list-sort-key (cons column t))
+      (tabulated-list-print)
+      (goto-char (point-min))
+      (let (order)
+        (while (not (eobp))
+          (when (tabulated-list-get-id)
+            (push (s3-manager-entry-type (tabulated-list-get-id)) order))
+          (forward-line 1))
+        (should (equal (car (nreverse order)) 'directory))))))
 
 (ert-deftest s3-manager-test-size-sorts-numerically ()
   "The displayed size is a string in which \"9 B\" follows \"1.8 GiB\"."

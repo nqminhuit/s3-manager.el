@@ -368,7 +368,7 @@ TARGET, when given, is the bucket name to put point on once it lands."
 
 (defconst s3-manager--object-list-format
   [("Size" 10 s3-manager--sort-by-size :right-align t)
-   ("Modified" 12 s3-manager--sort-by-time)
+   ("Modified" 17 s3-manager--sort-by-time)
    ("Name" 44 s3-manager--sort-by-name)]
   "Column layout for the object browser.
 Name last because `tabulated-list' does not truncate: a name wider than
@@ -380,22 +380,22 @@ right-hand end.")
   "Return a sort rank for ENTRY placing directories before objects."
   (if (eq (s3-manager-entry-type entry) 'directory) 0 1))
 
-(defun s3-manager--sort-by (a b accessor predicate &optional counter-reversal)
+(defun s3-manager--sort-by (a b accessor predicate)
   "Order rows A and B by ACCESSOR under PREDICATE, directories first.
 A and B are whole `tabulated-list-entries' elements, but only their ids
 are read: the displayed strings sort wrongly -- \"9 B\" comes after
 \"1.8 GiB\" lexicographically.
 
-COUNTER-REVERSAL, when non-nil, keeps directories first under a reversed
-sort too -- see SPEC.md, \"the object browser's own default sort column\"."
+Directories lead regardless of the column's sort direction: reversing a
+column swaps the arguments `tabulated-list-mode' calls this with, which
+would otherwise reverse the directory ranking along with everything
+else, so the ranking counters that swap whenever it decides the order."
   (let* ((ea (car a))
          (eb (car b))
          (ra (s3-manager--directory-rank ea))
          (rb (s3-manager--directory-rank eb)))
     (if (/= ra rb)
-        (if (and counter-reversal (cdr tabulated-list-sort-key))
-            (> ra rb)
-          (< ra rb))
+        (if (cdr tabulated-list-sort-key) (> ra rb) (< ra rb))
       (funcall predicate (funcall accessor ea) (funcall accessor eb)))))
 
 (defun s3-manager--sort-by-name (a b)
@@ -414,7 +414,7 @@ The timestamps are ISO-8601, so they order correctly as strings."
   (s3-manager--sort-by a b
                        (lambda (entry)
                          (or (s3-manager-entry-last-modified entry) ""))
-                       #'string< t))
+                       #'string<))
 
 (defun s3-manager--entry-row (entry)
   "Return the `tabulated-list-entries' element for ENTRY."
@@ -422,7 +422,7 @@ The timestamps are ISO-8601, so they order correctly as strings."
     (list entry
           (vector (if directory "-" (s3-manager--format-size
                                      (s3-manager-entry-size entry)))
-                  (if directory "-" (s3-manager--format-date
+                  (if directory "-" (s3-manager--format-datetime
                                      (s3-manager-entry-last-modified entry)))
                   (if directory
                       (propertize (s3-manager-entry-display-name entry)

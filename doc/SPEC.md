@@ -876,8 +876,9 @@ render only, so a user's re-sort survives a revert.
 
 Reversing a sort makes `tabulated-list-mode` call the column's sorter with
 its rows swapped, which would also swap the directories-first ranking;
-`s3-manager--sort-by-time` counters this (its optional `counter-reversal`
-argument to `s3-manager--sort-by`) so directories still lead either way.
+`s3-manager--sort-by` counters this for every column (checking
+`tabulated-list-sort-key`'s own reversed flag), so directories still lead
+either way, whichever column is active.
 
 `revert-buffer-function` must be set **in the mode body**, after
 `define-derived-mode` has run the parent's setup: `tabulated-list-mode`
@@ -898,9 +899,9 @@ characters — so Name is the **last** column in both layouts:
 
 ```
        Size Modified   Name
-    92 MiB 2026-09-03  20260809_095247.mp4
-   110 MiB 2026-09-03  TheWisdomOfFatherBrown.TheDuelOfDrHirsch.final.mp4
-   2.8 MiB 2026-09-02  a.png
+    92 MiB 2026-09-03 14:07  20260809_095247.mp4
+   110 MiB 2026-09-03 09:52  TheWisdomOfFatherBrown.TheDuelOfDrHirsch.final.mp4
+   2.8 MiB 2026-09-02 20:15  a.png
 ```
 
 An overlong name can then only run off the right-hand end, which costs nothing.
@@ -916,7 +917,9 @@ the Size column by up to nine places from row to row.
 **Rejected alternative: a `Type` column holding `DIR`/`FILE`.** It spends eight
 columns of a width-constrained table to encode one bit. Instead, directories are rendered with a trailing `/`
 and the `s3-manager-directory` face (inheriting `dired-directory`), exactly as
-Dired does. Size and Modified render as `-` for directories.
+Dired does. Size and Modified render as `-` for directories.  Modified shows the date and
+minute -- date alone cannot distinguish same-day objects, and the seconds are
+not worth the extra column width.
 
 ### 9.2 Entry IDs
 
@@ -2128,7 +2131,7 @@ responses.
 - **The directory-marker entry whose `Key` equals the request prefix is dropped.**
 - Sizes format correctly across boundaries (0 B, 999 B, 1.0 KB, 1.8 GB).
 - Directories sort before objects under every sort column.
-- Directories still sort first when the Modified column's sort is reversed.
+- Directories still sort first when any column's sort is reversed.
 - `s3-manager--sort-by-size` orders correctly with nil sizes present.
 - A fresh object-listing buffer defaults to Modified, reversed (newest first);
   a fresh bucket-list buffer defaults to Name, ascending.
