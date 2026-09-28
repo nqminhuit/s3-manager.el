@@ -368,7 +368,7 @@ TARGET, when given, is the bucket name to put point on once it lands."
 
 (defconst s3-manager--object-list-format
   [("Size" 10 s3-manager--sort-by-size :right-align t)
-   ("Modified" 17 s3-manager--sort-by-time)
+   ("Modified" 20 s3-manager--sort-by-time)
    ("Name" 44 s3-manager--sort-by-name)]
   "Column layout for the object browser.
 Name last because `tabulated-list' does not truncate: a name wider than

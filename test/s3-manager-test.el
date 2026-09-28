@@ -1402,11 +1402,11 @@ timers as well as sentinels."
 
 (ert-deftest s3-manager-test-format-datetime ()
   (should (equal (s3-manager--format-datetime "2026-08-01T10:22:31+00:00")
-                 "2026-08-01 10:22"))
+                 "2026-08-01 10:22:31"))
   ;; Absent or malformed values must render, not signal.
   (should (equal (s3-manager--format-datetime nil) "-"))
   (should (equal (s3-manager--format-datetime "") "-"))
-  (should (equal (s3-manager--format-datetime "2026-08-01T10") "-")))
+  (should (equal (s3-manager--format-datetime "2026-08-01T10:22") "-")))
 
 (ert-deftest s3-manager-test-buffer-name ()
   (should (equal (s3-manager--buffer-name "production") "*s3: production*"))
@@ -1671,7 +1671,7 @@ right-hand end."
                                         :size 2048
                                         :last-modified "2026-09-01T00:00:00+00:00"))))
     (should (equal (aref (cadr row) 0) "2 KiB"))
-    (should (equal (aref (cadr row) 1) "2026-09-01 00:00"))
+    (should (equal (aref (cadr row) 1) "2026-09-01 00:00:00"))
     (should (equal (aref (cadr row) 2) "long-name.bin"))))
 
 (ert-deftest s3-manager-test-a-long-name-cannot-misalign-a-row ()

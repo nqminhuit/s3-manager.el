@@ -899,9 +899,9 @@ characters — so Name is the **last** column in both layouts:
 
 ```
        Size Modified   Name
-    92 MiB 2026-09-03 14:07  20260809_095247.mp4
-   110 MiB 2026-09-03 09:52  TheWisdomOfFatherBrown.TheDuelOfDrHirsch.final.mp4
-   2.8 MiB 2026-09-02 20:15  a.png
+    92 MiB 2026-09-03 14:07:31  20260809_095247.mp4
+   110 MiB 2026-09-03 09:52:05  TheWisdomOfFatherBrown.TheDuelOfDrHirsch.final.mp4
+   2.8 MiB 2026-09-02 20:15:44  a.png
 ```
 
 An overlong name can then only run off the right-hand end, which costs nothing.
@@ -917,9 +917,8 @@ the Size column by up to nine places from row to row.
 **Rejected alternative: a `Type` column holding `DIR`/`FILE`.** It spends eight
 columns of a width-constrained table to encode one bit. Instead, directories are rendered with a trailing `/`
 and the `s3-manager-directory` face (inheriting `dired-directory`), exactly as
-Dired does. Size and Modified render as `-` for directories.  Modified shows the date and
-minute -- date alone cannot distinguish same-day objects, and the seconds are
-not worth the extra column width.
+Dired does. Size and Modified render as `-` for directories.  Modified shows the full
+timestamp to the second -- date alone cannot distinguish same-day objects.
 
 ### 9.2 Entry IDs
 

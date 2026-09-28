@@ -8,11 +8,11 @@ the `aws` command line client.
 ```
  prud  s3://media/videos/2026/   4 entries
 
-       Size Modified          Name
-          -        -           raw/
-    1.8 GiB 2026-09-02 20:15    clip-02.mp4
-    1.2 GiB 2026-09-02 09:03    clip-01.mp4
-    1.2 KiB 2026-09-01 17:40    notes.md
+       Size Modified             Name
+          -        -              raw/
+    1.8 GiB 2026-09-02 20:15:12    clip-02.mp4
+    1.2 GiB 2026-09-02 09:03:47    clip-01.mp4
+    1.2 KiB 2026-09-01 17:40:06    notes.md
 ```
 
 Newest first by default; click a column header, or press it again, to sort by
@@ -96,11 +96,11 @@ stand in for each other:
 ```
  prud  s3://media/videos/2026/   4 entries  2 marked, 1 flagged
 
-       Size Modified          Name
-          -        -           raw/
-*   1.8 GiB 2026-09-02 20:15    clip-02.mp4
-*   1.2 GiB 2026-09-02 09:03    clip-01.mp4
-D   1.2 KiB 2026-09-01 17:40    notes.md
+       Size Modified             Name
+          -        -              raw/
+*   1.8 GiB 2026-09-02 20:15:12    clip-02.mp4
+*   1.2 GiB 2026-09-02 09:03:47    clip-01.mp4
+D   1.2 KiB 2026-09-01 17:40:06    notes.md
 ```
 
 `x` deletes what is flagged and looks at nothing else. `C`, `c`, `r` and the

@@ -400,13 +400,13 @@ directly rather than parsed."
     "-"))
 
 (defun s3-manager--format-datetime (timestamp)
-  "Return the date and minute of ISO-8601 TIMESTAMP, or \"-\" if absent.
+  "Return the date and time of ISO-8601 TIMESTAMP, or \"-\" if absent.
 Distinguishes same-day objects in the listing, which the date alone
 cannot.  Taken directly from the string, like `s3-manager--format-date',
 so this is whatever offset S3 reported the timestamp in rather than a
 timezone conversion."
-  (if (and (stringp timestamp) (>= (length timestamp) 16))
-      (concat (substring timestamp 0 10) " " (substring timestamp 11 16))
+  (if (and (stringp timestamp) (>= (length timestamp) 19))
+      (concat (substring timestamp 0 10) " " (substring timestamp 11 19))
     "-"))
 
 (defun s3-manager--buffer-name (profile &optional bucket)
