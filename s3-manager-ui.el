@@ -33,6 +33,7 @@
 (declare-function s3-manager-get "s3-manager-transfer" ())
 (declare-function s3-manager-get-recursive "s3-manager-transfer" ())
 (declare-function s3-manager-upload "s3-manager-transfer" ())
+(declare-function s3-manager-create-directory "s3-manager-folder" ())
 (declare-function s3-manager-delete "s3-manager-delete" ())
 (declare-function s3-manager-execute "s3-manager-delete" ())
 (declare-function s3-manager-view "s3-manager-view" ())
@@ -128,6 +129,7 @@ off screen -- state nobody can see must not be state a command acts on."
   "g g" #'s3-manager-beginning-of-listing
   "g r" #'s3-manager-refresh
   "+" #'s3-manager-load-more
+  "M-+" #'s3-manager-create-directory
   "C" #'s3-manager-copy
   "c" #'s3-manager-copy-to
   "r" #'s3-manager-rename
