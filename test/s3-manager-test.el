@@ -136,6 +136,128 @@ one exit code for both cannot express it."
                    (lambda () (not (eq ,result-var 'pending)))))))
 
 
+;;;; Creating folders
+
+(ert-deftest s3-manager-test-directory-paths ()
+  (should (equal (s3-manager--directory-key "photos" "") "photos/"))
+  (should (equal (s3-manager--directory-key "photos/2026/" "archive/")
+                 "archive/photos/2026/"))
+  (should (equal (s3-manager--directory-key "my photos/ảnh" "")
+                 "my photos/ảnh/"))
+  (dolist (name '("" " " "/" "/photos" "a//b" "a//" "." ".." "a/../b" "a/./b"))
+    (should-error (s3-manager--directory-key name "") :type 'user-error))
+  (should (eq (keymap-lookup s3-manager-mode-map "M-+")
+              #'s3-manager-create-directory)))
+
+(ert-deftest s3-manager-test-create-directory-needs-a-bucket ()
+  (with-temp-buffer
+    (s3-manager-mode)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (&rest _) (ert-fail "Must refuse before prompting"))))
+      (should-error (s3-manager-create-directory) :type 'user-error))))
+
+(ert-deftest s3-manager-test-create-directory-writes-marker-after-navigation ()
+  "Exercise the real transport, preserving the destination across navigation."
+  (let ((argv-file (make-temp-file "s3-folder")) refreshed)
+    (unwind-protect
+        (s3-manager-test--with-fake-aws
+            (:stdout "{}" :argv-file argv-file :head-exit 254
+             :head-stderr "An error occurred (404) when calling the HeadObject operation")
+          (with-temp-buffer
+            (s3-manager-mode)
+            (setq s3-manager--profile "p" s3-manager--bucket "bk"
+                  s3-manager--prefix "archive/")
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest _) "my photos/2026"))
+                      ((symbol-function 's3-manager--after-create-directory)
+                       (lambda (&rest args) (setq refreshed args))))
+              (s3-manager-create-directory)
+              (setq s3-manager--bucket "elsewhere" s3-manager--prefix "other/")
+              (should (s3-manager-test--wait (lambda () refreshed)))
+              (should (equal refreshed '("p" "bk" "archive/my photos/2026/")))
+              (let ((records (s3-manager-test--argv-records argv-file)))
+                (should (= 2 (length records)))
+                (should (equal (member "s3api" (cadr records))
+                               '("s3api" "put-object" "--bucket" "bk"
+                                 "--key" "archive/my photos/2026/")))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-create-directory-preserves-existing-marker ()
+  (let ((argv-file (make-temp-file "s3-folder")) refreshed)
+    (unwind-protect
+        (s3-manager-test--with-fake-aws
+            (:argv-file argv-file :head-exit 0
+             :head-stdout "{\"ContentLength\":123}")
+          (with-temp-buffer
+            (s3-manager-mode)
+            (setq s3-manager--profile "p" s3-manager--bucket "bk"
+                  s3-manager--prefix "")
+            (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "photos"))
+                      ((symbol-function 's3-manager--after-create-directory)
+                       (lambda (&rest _) (setq refreshed t))))
+              (s3-manager-create-directory)
+              (should (s3-manager-test--wait (lambda () refreshed)))
+              (should (= 1 (length (s3-manager-test--argv-records argv-file)))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-create-directory-aborts-on-unknown-existence ()
+  (let ((argv-file (make-temp-file "s3-folder")) reported aborted)
+    (unwind-protect
+        (s3-manager-test--with-fake-aws
+            (:argv-file argv-file :head-exit 254 :head-stderr "AccessDenied")
+          (with-temp-buffer
+            (s3-manager-mode)
+            (setq s3-manager--profile "p" s3-manager--bucket "bk"
+                  s3-manager--prefix "")
+            (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "photos"))
+                      ((symbol-function 's3-manager--report-error)
+                       (lambda (&rest args) (setq reported args)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest _)
+                         (when (string-match-p "creation aborted" fmt)
+                           (setq aborted t)))))
+              (s3-manager-create-directory)
+              (should (s3-manager-test--wait (lambda () aborted)))
+              (should reported)
+              (should (= 1 (length (s3-manager-test--argv-records argv-file)))))))
+      (delete-file argv-file))))
+
+(ert-deftest s3-manager-test-create-directory-refreshes-ancestors ()
+  (let ((s3-manager--cache (make-hash-table :test #'equal)) refreshed)
+    (dolist (prefix '("" "a/" "a/b/" "unrelated/"))
+      (s3-manager--cache-put (s3-manager--cache-key-for "p" "bk" prefix)
+                             nil nil nil))
+    (with-temp-buffer
+      (s3-manager-mode)
+      (setq s3-manager--profile "p" s3-manager--bucket "bk"
+            s3-manager--prefix "a/")
+      (cl-letf (((symbol-function 's3-manager--reload)
+                 (lambda (_append key) (push key refreshed))))
+        (s3-manager--after-create-directory "p" "bk" "a/b/c/"))
+      (should (equal refreshed '("a/b/"))))
+    (dolist (prefix '("" "a/" "a/b/"))
+      (should-not (s3-manager--cache-get (s3-manager--cache-key-for "p" "bk" prefix))))
+    (should (s3-manager--cache-get (s3-manager--cache-key-for "p" "bk" "unrelated/")))))
+
+(ert-deftest s3-manager-test-create-directory-reports-write-failure ()
+  (let (reported)
+    (s3-manager-test--with-fake-aws
+        (:exit 254 :stderr "AccessDenied on PutObject" :head-exit 254
+         :head-stderr "An error occurred (404) when calling the HeadObject operation")
+      (with-temp-buffer
+        (s3-manager-mode)
+        (setq s3-manager--profile "p" s3-manager--bucket "bk"
+              s3-manager--prefix "")
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "photos"))
+                  ((symbol-function 's3-manager--report-error)
+                   (lambda (err &rest _) (setq reported err)))
+                  ((symbol-function 's3-manager--after-create-directory)
+                   (lambda (&rest _) (ert-fail "Failed creation must not refresh"))))
+          (s3-manager-create-directory)
+          (should (s3-manager-test--wait (lambda () reported)))
+          (should (eq (car reported) 's3-manager-cli-error))
+          (should (string-match-p "AccessDenied on PutObject" (nth 3 reported))))))))
+
 ;;;; Argument construction
 
 (ert-deftest s3-manager-test-base-args-minimal ()
@@ -4707,7 +4829,7 @@ of the suite is unaffected by having run this one."
          (and command
               (symbolp command)
               (string-prefix-p "s3-manager-" (symbol-name command)))))
-     '("RET" "^" "g r" "g g" "+" "C" "c" "r" "d" "u" "U" "x" "D"))))
+     '("RET" "^" "g r" "g g" "+" "M-+" "C" "c" "r" "d" "u" "U" "x" "D"))))
 
 (ert-deftest s3-manager-test-evil-does-not-shadow-the-keymap ()
   "Every key this mode binds must survive Evil, in every state.

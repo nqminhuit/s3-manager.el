@@ -48,6 +48,7 @@ From GitHub:
 | `RET` | enter a bucket or prefix; open a small object read-only |
 | `^` | up one level |
 | `+` | fetch the next page of a truncated listing |
+| `M-+` | create a folder, including nested folders |
 | `g r` / `C-u g r` | refresh; with `C-u`, drop every cached listing for the bucket |
 | `g g` / `5 g g` | first row of the listing / line 5 |
 | `C` | copy toward the other window — download, or a server-side copy into another listing |
@@ -130,6 +131,15 @@ flag.
 
 Marks are dropped when you change prefix, and the header line counts them so
 that a mark scrolled off screen is not invisible state.
+
+### Creating folders
+
+Press `M-+` (`M-x s3-manager-create-directory`) in a bucket to create a
+folder under the current prefix. Enter `photos` or a nested path such as
+`photos/2026`; a trailing `/` is optional. The command creates a zero-byte
+object ending in `/`, so the folder remains visible while empty. S3 supplies
+the intermediate prefixes automatically. Existing objects at the folder key
+are left unchanged, and failed existence checks abort creation.
 
 ### Copying within S3
 
